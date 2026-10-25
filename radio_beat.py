@@ -6,8 +6,9 @@ plugin (mpv-mpris) gives media keys and the bar's player widget for free.
 The stream's ICY title ("ARTIST - SONG") is looked up on Deezer (then
 iTunes) for the album, proper spelling and the cover.
 
-Closing the window while it plays keeps the music going; starting the app
-again shows the window. Started at login (--autostart) it just plays.
+It starts playing right away. Closing the window keeps it playing, with an
+icon in the bar's tray (StatusNotifierItem) that shows the window again;
+Stop quits. Started at login (--autostart) it plays with only the tray icon.
 """
 
 import ctypes
@@ -250,6 +251,9 @@ class Mpv:
     def stop(self) -> None:
         self.cmd("stop")
 
+    def pause(self, on: bool) -> None:
+        self.cmd("set_property", "pause", on)
+
     def volume(self, v: float) -> None:
         self.cmd("set_property", "volume", v)
 
@@ -261,110 +265,204 @@ class Mpv:
             self.proc.kill()
 
 
-# --- window ---------------------------------------------------------------------
+# --- tray icon (StatusNotifierItem) ----------------------------------------------
 
-CSS = b"""
-.cover { border-radius: 14px; }
-.song { font-size: 20pt; font-weight: 800; }
-.artist { font-size: 14pt; font-weight: 600; }
-.play-button { min-width: 64px; min-height: 64px; border-radius: 999px; }
-.play-button { background: #E3051A; color: white; }
-.play-button:hover { background: #F21C30; }
-.play-button.playing { background: alpha(#E3051A, 0.75); }
+SNI_XML = """
+<node>
+  <interface name="org.kde.StatusNotifierItem">
+    <property name="Category" type="s" access="read"/>
+    <property name="Id" type="s" access="read"/>
+    <property name="Title" type="s" access="read"/>
+    <property name="Status" type="s" access="read"/>
+    <property name="IconName" type="s" access="read"/>
+    <property name="IconThemePath" type="s" access="read"/>
+    <property name="IconPixmap" type="a(iiay)" access="read"/>
+    <property name="ToolTip" type="(sa(iiay)ss)" access="read"/>
+    <property name="ItemIsMenu" type="b" access="read"/>
+    <method name="Activate"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="SecondaryActivate"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="ContextMenu"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="Scroll"><arg name="delta" type="i" direction="in"/><arg name="orientation" type="s" direction="in"/></method>
+    <signal name="NewToolTip"/>
+    <signal name="NewTitle"/>
+  </interface>
+</node>
 """
 
 
-COVER = 320  # px, largest cover
+class Tray:
+    """Tray icon: click shows / hides the window, middle click pauses,
+    scrolling changes the volume. Registers again when the bar restarts."""
+
+    PATH = "/StatusNotifierItem"
+
+    def __init__(self, app):
+        self.app = app
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        self.name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+        self.tooltip = "Rádio Beat"
+        node = Gio.DBusNodeInfo.new_for_xml(SNI_XML)
+        self.bus.register_object(self.PATH, node.interfaces[0], self._call, self._get, None)
+        Gio.bus_own_name_on_connection(self.bus, self.name, Gio.BusNameOwnerFlags.NONE, None, None)
+        self.pixmap = self._pixmap()
+        Gio.bus_watch_name_on_connection(self.bus, "org.kde.StatusNotifierWatcher",
+                                         Gio.BusNameWatcherFlags.NONE, self._register, None)
+
+    def _pixmap(self):
+        from gi.repository import GdkPixbuf
+        out = []
+        for size in (32, 64):
+            p = os.path.join(HERE, "icons", "hicolor", f"{size}x{size}" if size != 32 else "48x48", "apps", f"{APP_ID}.png")
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_size(p, size, size).add_alpha(False, 0, 0, 0)
+            except GLib.Error:
+                continue
+            px, w, h, stride = pb.get_pixels(), pb.get_width(), pb.get_height(), pb.get_rowstride()
+            argb = bytearray()
+            for y in range(h):
+                row = px[y * stride: y * stride + w * 4]
+                for x in range(0, w * 4, 4):
+                    r, g, b, a = row[x: x + 4]
+                    argb += bytes((a, r, g, b))  # ARGB32, network byte order
+            out.append((w, h, bytes(argb)))
+        return out
+
+    def _register(self, *_):
+        self.bus.call("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher",
+                      "RegisterStatusNotifierItem", GLib.Variant("(s)", (self.name,)), None,
+                      Gio.DBusCallFlags.NONE, -1, None, None)
+
+    def _get(self, _conn, _sender, _path, _iface, prop):
+        v = {
+            "Category": GLib.Variant("s", "ApplicationStatus"),
+            "Id": GLib.Variant("s", "radio-beat"),
+            "Title": GLib.Variant("s", "Rádio Beat"),
+            "Status": GLib.Variant("s", "Active"),
+            "IconName": GLib.Variant("s", APP_ID),
+            "IconThemePath": GLib.Variant("s", os.path.join(HERE, "icons")),
+            "IconPixmap": GLib.Variant("a(iiay)", self.pixmap),
+            "ToolTip": GLib.Variant("(sa(iiay)ss)", (APP_ID, [], "Rádio Beat", self.tooltip)),
+            "ItemIsMenu": GLib.Variant("b", False),
+        }
+        return v.get(prop)
+
+    def _call(self, _conn, _sender, _path, _iface, method, params, invocation):
+        if method == "Activate":
+            self.app.toggle_window()
+        elif method in ("SecondaryActivate", "ContextMenu"):
+            self.app.toggle_pause()
+        elif method == "Scroll":
+            delta, orient = params.unpack()
+            if orient == "vertical":
+                self.app.nudge_volume(-5 if delta > 0 else 5)
+        invocation.return_value(None)
+
+    def set_tooltip(self, text: str) -> None:
+        if text != self.tooltip:
+            self.tooltip = text
+            self.bus.emit_signal(None, self.PATH, "org.kde.StatusNotifierItem", "NewToolTip", None)
+
+
+# --- window ---------------------------------------------------------------------
+
+CSS = b"""
+.cover-bg { background: #111; }
+.scrim { background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.75) 55%, rgba(0,0,0,0) 100%); }
+.scrim label { color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+.song { font-size: 22pt; font-weight: 800; }
+.artist { font-size: 15pt; font-weight: 600; }
+.album { font-size: 12pt; opacity: 0.8; }
+.status { font-size: 9pt; opacity: 0.65; }
+.round { min-width: 56px; min-height: 56px; border-radius: 999px; padding: 0; }
+.play-button { background: #E3051A; color: white; min-width: 68px; min-height: 68px; }
+.play-button:hover { background: #F21C30; }
+.stop-button { background: rgba(255,255,255,0.16); color: white; }
+.stop-button:hover { background: rgba(255,255,255,0.28); }
+.scrim scale trough highlight { background: #E3051A; }
+.overlay-header { background: none; box-shadow: none; }
+.overlay-header button { background: rgba(0,0,0,0.45); color: white; }
+"""
 
 
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Rádio Beat", default_width=400, default_height=720)
+        super().__init__(application=app, title="Rádio Beat", default_width=420, default_height=620)
         self.app = app
         self.set_icon_name(APP_ID)
 
-        header = Adw.HeaderBar()
-        menu = Gio.Menu()
-        menu.append("Quit", "app.quit")
-        mb = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu)
-        header.pack_end(mb)
+        # The cover fills the window; everything else lies on top of it.
+        self.cover = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True)
+        bg = Gtk.Box(hexpand=True, vexpand=True)
+        bg.add_css_class("cover-bg")
+        bg.append(self.cover)
+        overlay = Gtk.Overlay(child=bg)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_top=8,
-                      margin_bottom=18, margin_start=18, margin_end=18)
+        header = Adw.HeaderBar(show_title=False, valign=Gtk.Align.START)
+        header.add_css_class("overlay-header")
+        header.pack_end(self._settings_button())
+        overlay.add_overlay(header)
 
-        # A fixed square (Gtk.Image keeps its pixel size), corners rounded by the clip box.
-        self.cover = Gtk.Image(pixel_size=COVER)
-        clip = Gtk.Box(halign=Gtk.Align.CENTER, overflow=Gtk.Overflow.HIDDEN)
-        clip.add_css_class("cover")
-        clip.append(self.cover)
-        box.append(clip)
-
-        self.song = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
+                        margin_top=0)
+        scrim.add_css_class("scrim")
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=90,
+                        margin_bottom=22, margin_start=22, margin_end=22)
+        scrim.append(inner)
+        self.song = Gtk.Label(wrap=True, xalign=0)
         self.song.add_css_class("song")
-        self.artist = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        self.artist = Gtk.Label(wrap=True, xalign=0)
         self.artist.add_css_class("artist")
-        self.album = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
-        self.album.add_css_class("dim-label")
+        self.album = Gtk.Label(wrap=True, xalign=0)
+        self.album.add_css_class("album")
         for w in (self.song, self.artist, self.album):
-            box.append(w)
+            inner.append(w)
 
-        controls = Gtk.Box(spacing=14, halign=Gtk.Align.CENTER, margin_top=4)
-        self.play_btn = Gtk.Button(icon_name="media-playback-start-symbolic", tooltip_text="Play")
+        controls = Gtk.Box(spacing=12, margin_top=12)
+        self.play_btn = Gtk.Button(icon_name="media-playback-pause-symbolic", valign=Gtk.Align.CENTER)
+        self.play_btn.add_css_class("round")
         self.play_btn.add_css_class("play-button")
-        self.play_btn.connect("clicked", lambda *_: app.toggle())
+        self.play_btn.connect("clicked", lambda *_: app.toggle_pause())
+        stop = Gtk.Button(icon_name="media-playback-stop-symbolic", tooltip_text="Stop and quit",
+                          valign=Gtk.Align.CENTER)
+        stop.add_css_class("round")
+        stop.add_css_class("stop-button")
+        stop.connect("clicked", lambda *_: app.quit_all())
+        self.vol = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.vol.set_hexpand(True)
+        self.vol.set_valign(Gtk.Align.CENTER)
+        self.vol.set_value(app.settings["volume"])
+        self.vol.connect("value-changed", lambda s: app.set_volume(s.get_value()))
         controls.append(self.play_btn)
-        vol = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
-        vol.set_size_request(180, -1)
-        vol.set_valign(Gtk.Align.CENTER)
-        vol.set_value(app.settings["volume"])
-        vol.connect("value-changed", lambda s: app.set_volume(s.get_value()))
-        controls.append(Gtk.Image(icon_name="audio-volume-high-symbolic"))
-        controls.append(vol)
-        box.append(controls)
+        controls.append(stop)
+        controls.append(Gtk.Image(icon_name="audio-volume-high-symbolic", margin_start=6))
+        controls.append(self.vol)
+        inner.append(controls)
+        self.status = Gtk.Label(xalign=0)
+        self.status.add_css_class("status")
+        inner.append(self.status)
+        overlay.add_overlay(scrim)
 
-        self.status = Gtk.Label()
-        self.status.add_css_class("dim-label")
-        self.status.add_css_class("caption")
-        box.append(self.status)
+        self.set_content(overlay)
+        self.connect("close-request", self.on_close)
+        self.refresh()
 
-        prefs = Adw.PreferencesGroup(margin_top=6)
+    def _settings_button(self) -> Gtk.MenuButton:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8, margin_bottom=8,
+                      margin_start=8, margin_end=8, width_request=320)
+        group = Adw.PreferencesGroup()
         self.quality = Adw.ComboRow(title="Audio quality")
         self.quality_model = Gtk.StringList()
         self.quality.set_model(self.quality_model)
         self.fill_quality()
         self.quality.connect("notify::selected", self.on_quality)
-        prefs.add(self.quality)
-        auto = Adw.SwitchRow(title="Start at login", subtitle="Plays in the background; open the app to see it")
+        group.add(self.quality)
+        auto = Adw.SwitchRow(title="Start at login", subtitle="Plays with just the tray icon")
         auto.set_active(autostart_on())
         auto.connect("notify::active", lambda r, _: set_autostart(r.get_active()))
-        prefs.add(auto)
-        box.append(prefs)
-
-        clamp = Adw.Clamp(maximum_size=420, child=box, valign=Gtk.Align.CENTER)
-        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, child=clamp, vexpand=True)
-        tv = Adw.ToolbarView(content=scroll)
-        tv.add_top_bar(header)
-        self.set_content(tv)
-        self.connect("close-request", self.on_close)
-        self.connect("notify::default-height", lambda *_: self.fit_cover())
-        # Tiled windows get their size from the compositor: shrink the cover
-        # so the controls stay in view.
-        self._last_h = 0
-        self.add_tick_callback(self._watch_size)
-        self.play_btn.grab_focus()
-        self.refresh()
-
-    def _watch_size(self, *_):
-        h = self.get_height()
-        if h and h != self._last_h:
-            self._last_h = h
-            self.fit_cover()
-        return True
-
-    def fit_cover(self) -> None:
-        h = self.get_height() or 720
-        size = max(140, min(COVER, h - 420))
-        self.cover.set_pixel_size(size)
+        group.add(auto)
+        box.append(group)
+        return Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings",
+                              popover=Gtk.Popover(child=box))
 
     def fill_quality(self) -> None:
         self._filling = True
@@ -385,38 +483,41 @@ class Window(Adw.ApplicationWindow):
             self.app.set_quality(self.app.streams[i][0])
 
     def on_close(self, *_):
-        if self.app.playing:
-            self.set_visible(False)  # keep playing; starting the app again shows it
-            return True
-        self.app.quit_all()
-        return False
+        self.set_visible(False)  # keeps playing; the tray icon brings it back
+        return True
 
     def refresh(self) -> None:
         a = self.app
         info = a.info or {}
         self.song.set_text(info.get("title") or a.song or "Rádio Beat")
-        self.artist.set_text(info.get("artist") or a.artist_raw or ("První bigbeat u nás" if not a.playing else ""))
+        artist = info.get("artist") or a.artist_raw or "První bigbeat u nás"
+        self.artist.set_text(artist)
         self.album.set_text(info.get("album") or "")
         self.album.set_visible(bool(info.get("album")))
-        self.cover.set_from_paintable(a.cover_tex or a.logo_tex)
-        self.play_btn.set_icon_name("media-playback-stop-symbolic" if a.playing else "media-playback-start-symbolic")
-        self.play_btn.set_tooltip_text("Stop" if a.playing else "Play")
-        (self.play_btn.add_css_class if a.playing else self.play_btn.remove_css_class)("playing")
-        if a.playing:
-            parts = [p for p in (a.codec, f"{a.bitrate} kbps" if a.bitrate else None) if p]
-            self.status.set_text(" · ".join(parts) if parts else ("Connecting…" if a.loading else ""))
+        self.cover.set_paintable(a.cover_tex or a.logo_tex)
+        self.play_btn.set_icon_name("media-playback-start-symbolic" if a.paused else "media-playback-pause-symbolic")
+        self.play_btn.set_tooltip_text("Play" if a.paused else "Pause")
+        if a.paused:
+            self.status.set_text("Paused")
         else:
-            self.status.set_text("")
+            parts = [p for p in (a.codec, f"{a.bitrate} kbps" if a.bitrate else None) if p]
+            self.status.set_text(" · ".join(parts) if parts else "Connecting…")
+        if abs(self.vol.get_value() - a.settings["volume"]) >= 1:
+            self.vol.set_value(a.settings["volume"])
 
 
 class App(Adw.Application):
+    RELIVE = 30  # s paused: pick the live stream up again instead of resuming behind it
+
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
         self.settings = load_settings()
         self.streams = list(STREAMS)
         self.win: Window | None = None
         self.mpv: Mpv | None = None
-        self.playing = self.loading = False
+        self.tray: Tray | None = None
+        self.paused = False
+        self.paused_at = 0.0
         self.icy = self.song = self.artist_raw = None
         self.info: dict | None = None
         self.codec = self.bitrate = None
@@ -443,15 +544,20 @@ class App(Adw.Application):
                 break
         self.mpv = Mpv(self.on_prop)
         self.mpv.volume(self.settings["volume"])
-        self.hold()  # alive while playing with the window closed
+        try:
+            self.tray = Tray(self)
+        except GLib.Error as e:
+            print(f"no tray icon: {e}", file=sys.stderr)
+        self.hold()  # runs on with the window closed
         threading.Thread(target=self._probe_flac, daemon=True).start()
 
     def do_command_line(self, cmdline):
         args = cmdline.get_arguments()[1:]
         first = not self._started
         self._started = True
-        if "--autostart" in args and first:
+        if first:
             self.play()
+        if "--autostart" in args and first:
             return 0
         self.show_window()
         return 0
@@ -461,6 +567,12 @@ class App(Adw.Application):
             self.win = Window(self)
         self.win.set_visible(True)
         self.win.present()
+
+    def toggle_window(self):
+        if self.win and self.win.get_visible():
+            self.win.set_visible(False)
+        else:
+            self.show_window()
 
     def _probe_flac(self):
         url = probe_flac()
@@ -477,30 +589,37 @@ class App(Adw.Application):
         return next((u for i, _, u in self.streams if i == self.settings["quality"]), self.streams[0][2])
 
     def play(self):
-        self.playing = self.loading = True
+        self.paused = False
+        self.mpv.pause(False)
         self.mpv.play(self.url())
         self.update()
 
-    def stop(self):
-        self.playing = self.loading = False
-        self.mpv.stop()
-        self.icy = self.song = self.artist_raw = None
-        self.info, self.cover_tex, self.codec, self.bitrate = None, None, None, None
+    def toggle_pause(self):
+        if not self.paused:
+            self.paused, self.paused_at = True, time.monotonic()
+            self.mpv.pause(True)
+        elif time.monotonic() - self.paused_at > self.RELIVE:
+            self.play()  # back to live, not minutes behind
+        else:
+            self.paused = False
+            self.mpv.pause(False)
         self.update()
-
-    def toggle(self):
-        self.stop() if self.playing else self.play()
 
     def set_quality(self, qid: str):
         self.settings["quality"] = qid
         save_settings(self.settings)
-        if self.playing:
-            self.play()
+        self.play()
 
     def set_volume(self, v: float):
-        self.settings["volume"] = int(v)
-        self.mpv.volume(v)
-        save_settings(self.settings)
+        v = max(0, min(100, int(v)))
+        if v != self.settings["volume"]:
+            self.settings["volume"] = v
+            self.mpv.volume(v)
+            save_settings(self.settings)
+
+    def nudge_volume(self, d: int):
+        self.set_volume(self.settings["volume"] + d)
+        self.update()
 
     def quit_all(self):
         if self.mpv:
@@ -511,6 +630,11 @@ class App(Adw.Application):
     def update(self):
         if self.win:
             self.win.refresh()
+        if self.tray:
+            info = self.info or {}
+            title, artist = info.get("title") or self.song, info.get("artist") or self.artist_raw
+            text = " – ".join(x for x in (artist, title) if x) or "Rádio Beat"
+            self.tray.set_tooltip(("⏸ " if self.paused else "") + text)
 
     # mpv events (main loop)
     def on_prop(self, name, data):
@@ -523,16 +647,14 @@ class App(Adw.Application):
             self.codec = {"aac": "AAC", "mp3": "MP3", "flac": "FLAC"}.get(data or "", (data or "").upper() or None)
         elif name == "audio-bitrate":
             self.bitrate = round(data / 1000) if data else None
-        elif name == "core-idle":
-            self.loading = bool(data) and self.playing
-        elif name == "idle-active" and data and self.playing:
+        elif name == "idle-active" and data and not self.paused:
             # stream dropped or didn't connect: try again shortly
             GLib.timeout_add_seconds(3, self._retry)
         self.update()
         return False
 
     def _retry(self):
-        if self.playing:
+        if not self.paused:
             self.mpv.play(self.url())
         return False
 
