@@ -186,8 +186,10 @@ def run_update() -> str | None:
     """Installs the GitHub version (the same get.sh as the first install); error text or None."""
     # get.sh of that very commit: raw.githubusercontent.com serves master's files
     # from a cache that lags a few minutes behind.
-    src = f"https://raw.githubusercontent.com/{REPO}/{LATEST['sha']}/get.sh" if LATEST.get("sha") else f"{RAW}/get.sh"
-    r = subprocess.run(["bash", "-c", f"curl -fsSL {src} | bash"], capture_output=True, text=True, timeout=600)
+    sha = LATEST.get("sha", "")
+    src = f"https://raw.githubusercontent.com/{REPO}/{sha}/get.sh" if sha else f"{RAW}/get.sh"
+    r = subprocess.run(["bash", "-c", f"curl -fsSL {src} | RADIO_BEAT_SHA={sha} bash"],
+                       capture_output=True, text=True, timeout=600)
     if r.returncode != 0:
         return (r.stderr.strip().splitlines() or ["update failed"])[-1]
     return None
