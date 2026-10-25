@@ -10,8 +10,10 @@ Closing the window while it plays keeps the music going; starting the app
 again shows the window. Started at login (--autostart) it just plays.
 """
 
+import ctypes
 import json
 import os
+import signal
 import re
 import socket
 import subprocess
@@ -185,6 +187,11 @@ def fetch(url: str) -> bytes | None:
 
 # --- mpv ------------------------------------------------------------------------
 
+def _die_with_parent() -> None:
+    # PR_SET_PDEATHSIG: mpv stops even if the app is killed instead of quit.
+    ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)
+
+
 class Mpv:
     """mpv child process over JSON IPC; property changes arrive on `on_prop`."""
 
@@ -197,6 +204,7 @@ class Mpv:
              "--cache=yes", "--demuxer-max-bytes=4MiB", "--network-timeout=15",
              *os.environ.get("RADIO_BEAT_MPV_ARGS", "").split()],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            preexec_fn=_die_with_parent,
         )
         for _ in range(100):
             if os.path.exists(self.sock_path):
