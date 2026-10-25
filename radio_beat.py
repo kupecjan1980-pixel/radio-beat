@@ -112,6 +112,81 @@ def set_autostart(on: bool) -> None:
         )
 
 
+# --- KDE: open next to the tray ----------------------------------------------------
+# A Wayland window can't place itself. KWin can: a window rule with "under the
+# mouse" placement opens it where the tray icon was clicked, kept inside the
+# screen above the panel, so it lines up with the taskbar's right end.
+
+KWIN_RULE = "radio-beat-placement"
+KWIN_UNDER_MOUSE, KWIN_FORCE = 7, 2  # Placement::UnderMouse, Rules::Force
+
+
+def is_kde() -> bool:
+    return "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper() and bool(shutil.which("kwriteconfig6"))
+
+
+def _kcfg(*args: str) -> str:
+    r = subprocess.run(list(args), capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def kwin_rule(on: bool) -> None:
+    rules = [x for x in _kcfg("kreadconfig6", "--file", "kwinrulesrc", "--group", "General", "--key", "rules").split(",") if x]
+    w = lambda key, val, group=KWIN_RULE: subprocess.run(
+        ["kwriteconfig6", "--file", "kwinrulesrc", "--group", group, "--key", key, str(val)], capture_output=True)
+    if on:
+        for key, val in (("Description", "Rádio Beat: open next to the tray"), ("wmclass", APP_ID),
+                         ("wmclassmatch", 1), ("wmclasscomplete", "false"),
+                         ("placement", KWIN_UNDER_MOUSE), ("placementrule", KWIN_FORCE)):
+            w(key, val)
+        if KWIN_RULE not in rules:
+            rules.append(KWIN_RULE)
+    else:
+        subprocess.run(["kwriteconfig6", "--file", "kwinrulesrc", "--group", KWIN_RULE, "--key", "placement", "--delete"],
+                       capture_output=True)
+        rules = [x for x in rules if x != KWIN_RULE]
+    w("rules", ",".join(rules), "General")
+    w("count", len(rules), "General")
+    try:
+        Gio.bus_get_sync(Gio.BusType.SESSION).call_sync("org.kde.KWin", "/KWin", "org.kde.KWin", "reconfigure",
+                                                        None, None, Gio.DBusCallFlags.NONE, 3000, None)
+    except GLib.Error:
+        pass
+
+
+# --- updates ----------------------------------------------------------------------
+
+REPO = "kupecjan1980-pixel/radio-beat"
+RAW = f"https://raw.githubusercontent.com/{REPO}/master"
+
+
+def update_status() -> tuple[bool | None, str]:
+    """(newer version on GitHub?, text); None when it couldn't be checked."""
+    import hashlib
+    new = fetch(f"{RAW}/radio_beat.py?{int(time.time())}")
+    if not new:
+        return None, "Couldn't reach GitHub"
+    with open(os.path.realpath(__file__), "rb") as f:
+        mine = f.read()
+    if hashlib.sha256(new).digest() == hashlib.sha256(mine).digest():
+        return False, "Up to date"
+    msg = ""
+    try:
+        c = _json(f"https://api.github.com/repos/{REPO}/commits?per_page=1")[0]["commit"]
+        msg = f": {c['message'].splitlines()[0]} ({c['committer']['date'][:10]})"
+    except (OSError, ValueError, KeyError, IndexError):
+        pass
+    return True, "New version" + msg
+
+
+def run_update() -> str | None:
+    """Installs the GitHub version (the same get.sh as the first install); error text or None."""
+    r = subprocess.run(["bash", "-c", f"curl -fsSL {RAW}/get.sh | bash"], capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        return (r.stderr.strip().splitlines() or ["update failed"])[-1]
+    return None
+
+
 # --- song lookup ----------------------------------------------------------------
 
 def norm(s: str) -> str:
@@ -492,6 +567,16 @@ class Window(Adw.ApplicationWindow):
         auto.set_active(autostart_on())
         auto.connect("notify::active", lambda r, _: set_autostart(r.get_active()))
         group.add(auto)
+        if is_kde():
+            near = Adw.SwitchRow(title="Open next to the tray", subtitle="Where the tray icon was clicked")
+            near.set_active(self.app.settings.get("tray_popup", True))
+            near.connect("notify::active", lambda r, _: self.app.set_tray_popup(r.get_active()))
+            group.add(near)
+        self.update_row = Adw.ActionRow(title="Updates", subtitle=self.app.update_text)
+        self.update_btn = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
+        self.update_btn.connect("clicked", lambda *_: self.app.update_clicked())
+        self.update_row.add_suffix(self.update_btn)
+        group.add(self.update_row)
         box.append(group)
         return Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings",
                               popover=Gtk.Popover(child=box))
@@ -540,6 +625,10 @@ class Window(Adw.ApplicationWindow):
             if a.alt:
                 parts.append(f"backup: {a.stream()[1]}")
             self.status.set_text(" · ".join(parts) if parts else "Connecting…")
+        self.update_row.set_subtitle(a.update_text)
+        self.update_btn.set_label("Update" if a.update_ready else "Check")
+        self.update_btn.set_sensitive(not a.update_busy)
+        (self.update_btn.add_css_class if a.update_ready else self.update_btn.remove_css_class)("suggested-action")
         if abs(self.vol.get_value() - a.settings["volume"]) >= 1:
             self.vol.set_value(a.settings["volume"])
 
@@ -572,6 +661,9 @@ class App(Adw.Application):
         self.alt = 0  # streams moved on from the chosen one (backup servers)
         self.last_reconnect = 0.0
         self.quitting = False
+        self.update_text = "Not checked yet"
+        self.update_ready = False
+        self.update_busy = False
         q = Gio.SimpleAction.new("quit", None)
         q.connect("activate", lambda *_: self.quit_all())
         self.add_action(q)
@@ -597,6 +689,9 @@ class App(Adw.Application):
             print(f"no tray icon: {e}", file=sys.stderr)
         self.hold()  # runs on with the window closed
         threading.Thread(target=self._probe_flac, daemon=True).start()
+        if is_kde():
+            threading.Thread(target=kwin_rule, args=(self.settings.get("tray_popup", True),), daemon=True).start()
+        GLib.timeout_add_seconds(20, lambda: (self.check_update(), False)[1])  # once, after it settled
 
     def do_command_line(self, cmdline):
         args = cmdline.get_arguments()[1:]
@@ -620,6 +715,51 @@ class App(Adw.Application):
             self.win.set_visible(False)
         else:
             self.show_window()
+
+    # updates / tray placement
+    def set_tray_popup(self, on: bool):
+        self.settings["tray_popup"] = on
+        save_settings(self.settings)
+        threading.Thread(target=kwin_rule, args=(on,), daemon=True).start()
+
+    def check_update(self):
+        if self.update_busy:
+            return
+        self.update_busy, self.update_text = True, "Checking…"
+        self.update()
+
+        def work():
+            ready, text = update_status()
+            GLib.idle_add(self._checked, bool(ready), text)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _checked(self, ready, text):
+        self.update_busy, self.update_ready, self.update_text = False, ready, text
+        self.update()
+        return False
+
+    def update_clicked(self):
+        if not self.update_ready:
+            self.check_update()
+            return
+        self.update_busy, self.update_text = True, "Updating…"
+        self.update()
+
+        def work():
+            err = run_update()
+            GLib.idle_add(self._updated, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _updated(self, err):
+        if err:
+            self.update_busy, self.update_text = False, f"Update failed: {err}"
+            self.update()
+            return False
+        # Start the new version once this one is gone (same app id), then quit.
+        subprocess.Popen(["sh", "-c", f"sleep 2; exec {launcher()}"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.quit_all()
+        return False
 
     def _probe_flac(self):
         url = probe_flac()
