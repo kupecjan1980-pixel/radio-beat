@@ -161,22 +161,21 @@ RAW = f"https://raw.githubusercontent.com/{REPO}/master"
 
 
 def update_status() -> tuple[bool | None, str]:
-    """(newer version on GitHub?, text); None when it couldn't be checked."""
-    import hashlib
-    new = fetch(f"{RAW}/radio_beat.py?{int(time.time())}")
-    if not new:
-        return None, "Couldn't reach GitHub"
-    with open(os.path.realpath(__file__), "rb") as f:
-        mine = f.read()
-    if hashlib.sha256(new).digest() == hashlib.sha256(mine).digest():
-        return False, "Up to date"
-    msg = ""
+    """(newer version on GitHub?, text); None when it couldn't be checked.
+    Compares the installed commit (VERSION, written by install.sh) with GitHub's newest."""
     try:
-        c = _json(f"https://api.github.com/repos/{REPO}/commits?per_page=1")[0]["commit"]
-        msg = f": {c['message'].splitlines()[0]} ({c['committer']['date'][:10]})"
-    except (OSError, ValueError, KeyError, IndexError):
-        pass
-    return True, "New version" + msg
+        c = _json(f"https://api.github.com/repos/{REPO}/commits/master")
+        sha, info = c["sha"], c["commit"]
+    except (OSError, ValueError, KeyError):
+        return None, "Couldn't reach GitHub"
+    try:
+        with open(os.path.join(HERE, "VERSION")) as f:
+            mine = f.read().strip()
+    except OSError:
+        mine = ""
+    if mine == sha:
+        return False, f"Up to date ({info['committer']['date'][:10]})"
+    return True, f"New version: {info['message'].splitlines()[0]} ({info['committer']['date'][:10]})"
 
 
 def run_update() -> str | None:
