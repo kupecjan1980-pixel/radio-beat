@@ -14,6 +14,7 @@ Stop quits. Started at login (--autostart) it plays with only the tray icon.
 import ctypes
 import json
 import os
+import shutil
 import signal
 import re
 import socket
@@ -193,29 +194,57 @@ def _die_with_parent() -> None:
     ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)
 
 
+FLATPAK_MPV = "io.mpv.Mpv"
+
+
+def mpv_command(sock_dir: str) -> list[str] | None:
+    """mpv on the system, else the Flathub one (Bazzite and other atomic
+    systems); its sandbox gets the folder with the control socket."""
+    if shutil.which("mpv"):
+        return ["mpv"]
+    if shutil.which("flatpak") and subprocess.run(["flatpak", "info", FLATPAK_MPV], capture_output=True).returncode == 0:
+        return ["flatpak", "run", f"--filesystem={sock_dir}", FLATPAK_MPV]
+    return None
+
+
 class Mpv:
-    """mpv child process over JSON IPC; property changes arrive on `on_prop`."""
+    """mpv child process over JSON IPC; property changes arrive on `on_prop`
+    ("mpv-exit" when mpv goes away)."""
+
+    PROPS = ("metadata", "audio-codec-name", "audio-bitrate", "idle-active", "playback-time", "paused-for-cache")
 
     def __init__(self, on_prop):
         self.on_prop = on_prop
-        self.sock_path = os.path.join(tempfile.mkdtemp(prefix="radio-beat-"), "mpv.sock")
+        run = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+        sock_dir = os.path.join(run, "radio-beat")
+        os.makedirs(sock_dir, mode=0o700, exist_ok=True)
+        self.sock_path = os.path.join(sock_dir, f"mpv-{os.getpid()}.sock")
+        try:
+            os.remove(self.sock_path)
+        except FileNotFoundError:
+            pass
+        cmd = mpv_command(sock_dir)
+        if not cmd:
+            raise RuntimeError("mpv isn't installed (system package, or Flathub: flatpak install flathub io.mpv.Mpv)")
         self.proc = subprocess.Popen(
-            ["mpv", "--idle=yes", "--no-video", "--no-terminal", "--force-window=no",
+            [*cmd, "--idle=yes", "--no-video", "--no-terminal", "--force-window=no",
              "--title=Rádio Beat", f"--input-ipc-server={self.sock_path}",
              "--cache=yes", "--demuxer-max-bytes=4MiB", "--network-timeout=15",
+             # let ffmpeg pick a dropped HTTP stream up again by itself
+             "--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=5",
              *os.environ.get("RADIO_BEAT_MPV_ARGS", "").split()],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             preexec_fn=_die_with_parent,
         )
-        for _ in range(100):
-            if os.path.exists(self.sock_path):
+        for _ in range(300):  # a Flatpak mpv takes a few seconds the first time
+            if os.path.exists(self.sock_path) or self.proc.poll() is not None:
                 break
             time.sleep(0.05)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect(self.sock_path)
         self.lock = threading.Lock()
         threading.Thread(target=self._reader, daemon=True).start()
-        for i, prop in enumerate(("metadata", "audio-codec-name", "audio-bitrate", "core-idle", "idle-active")):
+        for i, prop in enumerate(self.PROPS):
             self.cmd("observe_property", i + 1, prop)
 
     def cmd(self, *args) -> None:
@@ -232,8 +261,9 @@ class Mpv:
             try:
                 chunk = self.sock.recv(65536)
             except OSError:
-                return
+                chunk = b""
             if not chunk:
+                GLib.idle_add(self.on_prop, "mpv-exit", None)
                 return
             buf += chunk
             while b"\n" in buf:
@@ -497,10 +527,16 @@ class Window(Adw.ApplicationWindow):
         self.cover.set_paintable(a.cover_tex or a.logo_tex)
         self.play_btn.set_icon_name("media-playback-start-symbolic" if a.paused else "media-playback-pause-symbolic")
         self.play_btn.set_tooltip_text("Play" if a.paused else "Pause")
-        if a.paused:
+        if a.error:
+            self.status.set_text(a.error)
+        elif a.paused:
             self.status.set_text("Paused")
+        elif a.tries:
+            self.status.set_text(f"Reconnecting… ({a.stream()[1]})")
         else:
             parts = [p for p in (a.codec, f"{a.bitrate} kbps" if a.bitrate else None) if p]
+            if a.alt:
+                parts.append(f"backup: {a.stream()[1]}")
             self.status.set_text(" · ".join(parts) if parts else "Connecting…")
         if abs(self.vol.get_value() - a.settings["volume"]) >= 1:
             self.vol.set_value(a.settings["volume"])
@@ -508,6 +544,8 @@ class Window(Adw.ApplicationWindow):
 
 class App(Adw.Application):
     RELIVE = 30  # s paused: pick the live stream up again instead of resuming behind it
+    STALL = 20  # s without new audio: reconnect
+    PER_SERVER = 3  # failed tries before moving to the next stream
 
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
@@ -518,6 +556,7 @@ class App(Adw.Application):
         self.tray: Tray | None = None
         self.paused = False
         self.paused_at = 0.0
+        self.error: str | None = None
         self.icy = self.song = self.artist_raw = None
         self.info: dict | None = None
         self.codec = self.bitrate = None
@@ -525,6 +564,12 @@ class App(Adw.Application):
         self.logo_tex = None
         self._lookup_id = 0
         self._started = False
+        self.last_audio = time.monotonic()  # when playback last moved on
+        self.last_pos = None
+        self.tries = 0  # reconnects since audio last flowed
+        self.alt = 0  # streams moved on from the chosen one (backup servers)
+        self.last_reconnect = 0.0
+        self.quitting = False
         q = Gio.SimpleAction.new("quit", None)
         q.connect("activate", lambda *_: self.quit_all())
         self.add_action(q)
@@ -542,8 +587,8 @@ class App(Adw.Application):
             if os.path.exists(p):
                 self.logo_tex = Gdk.Texture.new_from_filename(p)
                 break
-        self.mpv = Mpv(self.on_prop)
-        self.mpv.volume(self.settings["volume"])
+        self.start_mpv()
+        GLib.timeout_add_seconds(5, self._watchdog)
         try:
             self.tray = Tray(self)
         except GLib.Error as e:
@@ -584,17 +629,59 @@ class App(Adw.Application):
         if self.win:
             self.win.fill_quality()
 
+    def start_mpv(self):
+        try:
+            self.mpv = Mpv(self.on_prop)
+            self.mpv.volume(self.settings["volume"])
+            self.error = None
+        except (OSError, RuntimeError) as e:
+            self.mpv, self.error = None, str(e)
+
     # playback
+    def stream(self) -> tuple[str, str, str]:
+        """The chosen quality, or the stream after it when it keeps failing."""
+        ids = [i for i, _, _ in self.streams]
+        q = self.settings["quality"]
+        start = ids.index(q) if q in ids else 0
+        return self.streams[(start + self.alt) % len(self.streams)]
+
     def url(self) -> str:
-        return next((u for i, _, u in self.streams if i == self.settings["quality"]), self.streams[0][2])
+        return self.stream()[2]
 
     def play(self):
+        """Start (again) on the chosen quality, live."""
         self.paused = False
-        self.mpv.pause(False)
-        self.mpv.play(self.url())
+        self.alt, self.tries = 0, 0
+        self._load()
         self.update()
 
+    def _load(self):
+        if not self.mpv:
+            return
+        self.last_audio, self.last_pos = time.monotonic(), None
+        self.last_reconnect = time.monotonic()
+        self.mpv.pause(False)
+        self.mpv.play(self.url())
+
+    def reconnect(self, why: str):
+        """The stream stopped: load it again, moving to the next server after a few tries."""
+        if self.paused or self.quitting or time.monotonic() - self.last_reconnect < 5:
+            return
+        self.tries += 1
+        if self.tries % self.PER_SERVER == 0:
+            self.alt += 1
+        print(f"radio-beat: {why}, reconnecting (try {self.tries}, {self.stream()[1]})", file=sys.stderr)
+        self._load()
+        self.update()
+
+    def _watchdog(self):
+        if self.mpv and not self.paused and time.monotonic() - self.last_audio > self.STALL:
+            self.reconnect("no audio for a while")
+        return True
+
     def toggle_pause(self):
+        if not self.mpv:
+            return
         if not self.paused:
             self.paused, self.paused_at = True, time.monotonic()
             self.mpv.pause(True)
@@ -602,6 +689,7 @@ class App(Adw.Application):
             self.play()  # back to live, not minutes behind
         else:
             self.paused = False
+            self.last_audio = time.monotonic()
             self.mpv.pause(False)
         self.update()
 
@@ -614,7 +702,8 @@ class App(Adw.Application):
         v = max(0, min(100, int(v)))
         if v != self.settings["volume"]:
             self.settings["volume"] = v
-            self.mpv.volume(v)
+            if self.mpv:
+                self.mpv.volume(v)
             save_settings(self.settings)
 
     def nudge_volume(self, d: int):
@@ -622,6 +711,7 @@ class App(Adw.Application):
         self.update()
 
     def quit_all(self):
+        self.quitting = True
         if self.mpv:
             self.mpv.quit()
         self.release()
@@ -647,15 +737,26 @@ class App(Adw.Application):
             self.codec = {"aac": "AAC", "mp3": "MP3", "flac": "FLAC"}.get(data or "", (data or "").upper() or None)
         elif name == "audio-bitrate":
             self.bitrate = round(data / 1000) if data else None
-        elif name == "idle-active" and data and not self.paused:
-            # stream dropped or didn't connect: try again shortly
-            GLib.timeout_add_seconds(3, self._retry)
+        elif name == "playback-time":
+            if data is not None and (self.last_pos is None or data > self.last_pos):
+                if self.last_pos is not None and self.tries:
+                    self.tries = 0  # audio flows again
+                self.last_pos, self.last_audio = data, time.monotonic()
+            return False  # many of these: no redraw
+        elif name == "idle-active" and data and not self.paused and not self.quitting:
+            # stream ended or didn't connect: try again shortly
+            GLib.timeout_add_seconds(3, lambda: (self.reconnect("stream ended"), False)[1])
+        elif name == "mpv-exit" and not self.quitting:
+            print("radio-beat: mpv went away, starting it again", file=sys.stderr)
+            GLib.timeout_add_seconds(2, self._restart_mpv)
         self.update()
         return False
 
-    def _retry(self):
-        if not self.paused:
-            self.mpv.play(self.url())
+    def _restart_mpv(self):
+        self.start_mpv()
+        if self.mpv and not self.paused:
+            self._load()
+        self.update()
         return False
 
     def new_title(self, icy: str):

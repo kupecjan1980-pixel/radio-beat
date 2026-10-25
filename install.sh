@@ -18,11 +18,23 @@ if [ "${1:-}" = "--remove" ]; then
     exit 0
 fi
 
-for dep in mpv python3; do
-    command -v "$dep" >/dev/null || { echo "Missing: $dep" >&2; exit 1; }
-done
-python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1"); import cairo' \
-    || { echo "Needs python-gobject, gtk4, libadwaita and python-cairo" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "Missing: python3" >&2; exit 1; }
+if ! python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1"); from gi.repository import Gtk, Adw' 2>/dev/null; then
+    echo "Needs GTK 4 and libadwaita for Python (python-gobject / python3-gobject, gtk4, libadwaita)." >&2
+    [ -e /run/ostree-booted ] && echo "On Bazzite / Fedora Atomic: rpm-ostree install python3-gobject gtk4 libadwaita, then reboot." >&2
+    exit 1
+fi
+# mpv plays the stream: the system's, else the Flathub one (atomic systems like Bazzite).
+if ! command -v mpv >/dev/null; then
+    if command -v flatpak >/dev/null; then
+        if ! flatpak info io.mpv.Mpv >/dev/null 2>&1; then
+            echo "Installing mpv from Flathub (for you only)…"
+            flatpak install -y --user flathub io.mpv.Mpv
+        fi
+    else
+        echo "Missing: mpv" >&2; exit 1
+    fi
+fi
 
 # The station's logo, for the icon and the window when nothing has a cover.
 if [ ! -s logo.png ]; then
@@ -31,9 +43,14 @@ fi
 
 mkdir -p "$DEST" "$(dirname "$BIN")" "$(dirname "$DESKTOP")"
 install -m 644 radio_beat.py logo.png "$DEST/"
+HAVE_CAIRO=$(python3 -c 'import cairo' 2>/dev/null && echo 1 || true)
 for size in 48 64 128 256 512; do
     mkdir -p "$ICONS/${size}x${size}/apps" "$DEST/icons/hicolor/${size}x${size}/apps"
-    python3 make_icon.py logo.png "$ICONS/${size}x${size}/apps/$APP_ID.png" "$size"
+    if [ -n "$HAVE_CAIRO" ]; then
+        python3 make_icon.py logo.png "$ICONS/${size}x${size}/apps/$APP_ID.png" "$size"
+    else
+        cp logo.png "$ICONS/${size}x${size}/apps/$APP_ID.png"  # square already; themes scale it
+    fi
     cp "$ICONS/${size}x${size}/apps/$APP_ID.png" "$DEST/icons/hicolor/${size}x${size}/apps/"
 done
 gtk-update-icon-cache -q -t "$ICONS" 2>/dev/null || true
