@@ -203,7 +203,9 @@ def mpv_command(sock_dir: str) -> list[str] | None:
     if shutil.which("mpv"):
         return ["mpv"]
     if shutil.which("flatpak") and subprocess.run(["flatpak", "info", FLATPAK_MPV], capture_output=True).returncode == 0:
-        return ["flatpak", "run", f"--filesystem={sock_dir}", FLATPAK_MPV]
+        run = os.environ.get("XDG_RUNTIME_DIR", "")
+        share = f"xdg-run/{os.path.relpath(sock_dir, run)}" if run and sock_dir.startswith(run + "/") else sock_dir
+        return ["flatpak", "run", f"--filesystem={share}", FLATPAK_MPV]
     return None
 
 
