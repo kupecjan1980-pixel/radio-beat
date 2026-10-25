@@ -29,7 +29,10 @@ if ! command -v mpv >/dev/null; then
     if command -v flatpak >/dev/null; then
         if ! flatpak info io.mpv.Mpv >/dev/null 2>&1; then
             echo "Installing mpv from Flathub (for you only)…"
-            flatpak install -y --user flathub io.mpv.Mpv
+            # Bazzite has Flathub for the whole system only; a user install needs
+            # it in the user's own remotes too (no password for either).
+            flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+            flatpak install -y --user --noninteractive flathub io.mpv.Mpv
         fi
     else
         echo "Missing: mpv" >&2; exit 1
