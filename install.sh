@@ -77,6 +77,11 @@ Categories=AudioVideo;Audio;Player;
 Keywords=radio;beat;rock;
 EOF
 update-desktop-database -q "$(dirname "$DESKTOP")" 2>/dev/null || true
+# KDE Plasma ties windows to launchers through its own cache (ksycoca); a new
+# entry may not be in it yet, and the window then gets a generic icon.
+for k in kbuildsycoca6 kbuildsycoca5; do
+    command -v "$k" >/dev/null && { "$k" >/dev/null 2>&1 || true; break; }
+done
 
 # An existing autostart entry points at the installed launcher.
 if [ -f "$AUTOSTART" ]; then
