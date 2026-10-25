@@ -160,12 +160,16 @@ REPO = "kupecjan1980-pixel/radio-beat"
 RAW = f"https://raw.githubusercontent.com/{REPO}/master"
 
 
+LATEST: dict = {}  # the newest commit seen by update_status()
+
+
 def update_status() -> tuple[bool | None, str]:
     """(newer version on GitHub?, text); None when it couldn't be checked.
     Compares the installed commit (VERSION, written by install.sh) with GitHub's newest."""
     try:
         c = _json(f"https://api.github.com/repos/{REPO}/commits/master")
         sha, info = c["sha"], c["commit"]
+        LATEST["sha"] = sha
     except (OSError, ValueError, KeyError):
         return None, "Couldn't reach GitHub"
     try:
@@ -180,7 +184,10 @@ def update_status() -> tuple[bool | None, str]:
 
 def run_update() -> str | None:
     """Installs the GitHub version (the same get.sh as the first install); error text or None."""
-    r = subprocess.run(["bash", "-c", f"curl -fsSL {RAW}/get.sh | bash"], capture_output=True, text=True, timeout=600)
+    # get.sh of that very commit: raw.githubusercontent.com serves master's files
+    # from a cache that lags a few minutes behind.
+    src = f"https://raw.githubusercontent.com/{REPO}/{LATEST['sha']}/get.sh" if LATEST.get("sha") else f"{RAW}/get.sh"
+    r = subprocess.run(["bash", "-c", f"curl -fsSL {src} | bash"], capture_output=True, text=True, timeout=600)
     if r.returncode != 0:
         return (r.stderr.strip().splitlines() or ["update failed"])[-1]
     return None
