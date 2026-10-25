@@ -112,10 +112,48 @@ def set_autostart(on: bool) -> None:
         )
 
 
-# --- KDE: open next to the tray ----------------------------------------------------
-# A Wayland window can't place itself. KWin can: a window rule with "under the
-# mouse" placement opens it where the tray icon was clicked, kept inside the
-# screen above the panel, so it lines up with the taskbar's right end.
+# --- KDE: open in the bottom-right corner ---------------------------------------
+# A Wayland window can't place itself, and KWin's window rules have no "bottom
+# right" placement. A small KWin script does it: each time the window appears,
+# it goes flush against the right edge, its bottom on the taskbar (KWin's
+# MaximizeArea is the screen without the panels). The app loads the script
+# into KWin over D-Bus at start (Plasma 6, and 5's clientAdded).
+# The earlier "under the mouse" rule (KWIN_RULE) is taken out again.
+
+KWIN_SCRIPT_NAME = "radio-beat-corner"
+KWIN_SCRIPT = """
+function place(w) {
+    if (!w || w.resourceClass !== "%s") return;
+    var a = workspace.clientArea(KWin.MaximizeArea, w);
+    var g = w.frameGeometry;
+    w.frameGeometry = {x: a.x + a.width - g.width, y: a.y + a.height - g.height, width: g.width, height: g.height};
+}
+(workspace.windowAdded || workspace.clientAdded).connect(place);
+""" % APP_ID
+
+
+def _kwin_scripting(method: str, args=None, reply: str | None = None):
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+    return bus.call_sync("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", method, args,
+                         GLib.VariantType(reply) if reply else None, Gio.DBusCallFlags.NONE, 5000, None)
+
+
+def kwin_corner(on: bool) -> None:
+    """Loads (or unloads) the bottom-right placement script into the running KWin."""
+    try:
+        loaded = _kwin_scripting("isScriptLoaded", GLib.Variant("(s)", (KWIN_SCRIPT_NAME,)), "(b)").unpack()[0]
+        if loaded:
+            _kwin_scripting("unloadScript", GLib.Variant("(s)", (KWIN_SCRIPT_NAME,)), "(b)")
+        if on:
+            os.makedirs(CONFIG, exist_ok=True)
+            path = os.path.join(CONFIG, "kwin-corner.js")
+            with open(path, "w") as f:
+                f.write(KWIN_SCRIPT)
+            _kwin_scripting("loadScript", GLib.Variant("(ss)", (path, KWIN_SCRIPT_NAME)), "(i)")
+            _kwin_scripting("start")
+    except GLib.Error as e:
+        print(f"radio-beat: KWin script: {e.message}", file=sys.stderr)
+
 
 KWIN_RULE = "radio-beat-placement"
 KWIN_UNDER_MOUSE, KWIN_FORCE = 7, 2  # Placement::UnderMouse, Rules::Force
@@ -132,6 +170,8 @@ def _kcfg(*args: str) -> str:
 
 def kwin_rule(on: bool) -> None:
     rules = [x for x in _kcfg("kreadconfig6", "--file", "kwinrulesrc", "--group", "General", "--key", "rules").split(",") if x]
+    if not on and KWIN_RULE not in rules:
+        return  # never added: leave KWin's rules alone
     w = lambda key, val, group=KWIN_RULE: subprocess.run(
         ["kwriteconfig6", "--file", "kwinrulesrc", "--group", group, "--key", key, str(val)], capture_output=True)
     if on:
@@ -576,7 +616,7 @@ class Window(Adw.ApplicationWindow):
         auto.connect("notify::active", lambda r, _: set_autostart(r.get_active()))
         group.add(auto)
         if is_kde():
-            near = Adw.SwitchRow(title="Open next to the tray", subtitle="Where the tray icon was clicked")
+            near = Adw.SwitchRow(title="Open in the corner", subtitle="Bottom right, on the taskbar")
             near.set_active(self.app.settings.get("tray_popup", True))
             near.connect("notify::active", lambda r, _: self.app.set_tray_popup(r.get_active()))
             group.add(near)
@@ -698,7 +738,7 @@ class App(Adw.Application):
         self.hold()  # runs on with the window closed
         threading.Thread(target=self._probe_flac, daemon=True).start()
         if is_kde():
-            threading.Thread(target=kwin_rule, args=(self.settings.get("tray_popup", True),), daemon=True).start()
+            threading.Thread(target=self._kde_place, args=(self.settings.get("tray_popup", True),), daemon=True).start()
         GLib.timeout_add_seconds(20, lambda: (self.check_update(), False)[1])  # once, after it settled
 
     def do_command_line(self, cmdline):
@@ -728,7 +768,12 @@ class App(Adw.Application):
     def set_tray_popup(self, on: bool):
         self.settings["tray_popup"] = on
         save_settings(self.settings)
-        threading.Thread(target=kwin_rule, args=(on,), daemon=True).start()
+        threading.Thread(target=self._kde_place, args=(on,), daemon=True).start()
+
+    @staticmethod
+    def _kde_place(on: bool):
+        kwin_rule(False)  # the earlier "under the mouse" rule
+        kwin_corner(on)
 
     def check_update(self):
         if self.update_busy:
