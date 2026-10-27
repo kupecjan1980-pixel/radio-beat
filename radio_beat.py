@@ -711,9 +711,9 @@ class Window(Adw.ApplicationWindow):
 
     def _settings_button(self) -> Gtk.MenuButton:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8, margin_bottom=8,
-                      margin_start=8, margin_end=8, width_request=300)
+                      margin_start=8, margin_end=8)
         group = Adw.PreferencesGroup()
-        self.quality = Adw.ComboRow(title="Audio quality")
+        self.quality = Adw.ComboRow(title="Quality")
         self.quality_model = Gtk.StringList()
         self.quality.set_model(self.quality_model)
         self.fill_quality()
@@ -741,7 +741,11 @@ class Window(Adw.ApplicationWindow):
         self.update_note.add_css_class("caption")
         box.append(self.update_note)
         # Opens leftwards from the gear (at the right edge), so it stays inside the window.
-        pop = Gtk.Popover(child=box, has_arrow=False)
+        # A popup takes its content's full natural width; this caps it near the app's width.
+        fit = Gtk.ScrolledWindow(child=box, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                 vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                 width_request=320)
+        pop = Gtk.Popover(child=fit, has_arrow=False)
         pop.set_offset(-130, 4)
         return Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings", popover=pop)
 
