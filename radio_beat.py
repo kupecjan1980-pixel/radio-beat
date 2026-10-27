@@ -767,6 +767,10 @@ class Window(Adw.ApplicationWindow):
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self.on_key)
         self.add_controller(keys)
+        # Double click anywhere (buttons and the volume slider keep their clicks): full screen and back.
+        dbl = Gtk.GestureClick()
+        dbl.connect("pressed", self.on_double)
+        self.add_controller(dbl)
 
         scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
                         margin_top=0)
@@ -922,6 +926,16 @@ class Window(Adw.ApplicationWindow):
         self.full_btn.set_tooltip_text("Leave full screen (F11 / Esc)" if full else "Full screen (F11)")
         (self.add_css_class if full else self.remove_css_class)("full")
         self.show_pic.set_pixel_size(130 if full else 72)
+
+    def on_double(self, _gesture, n, x, y) -> None:
+        if n != 2:
+            return
+        w = self.pick(x, y, Gtk.PickFlags.DEFAULT)
+        while w is not None and w is not self:
+            if isinstance(w, (Gtk.Button, Gtk.MenuButton, Gtk.Scale, Adw.HeaderBar)):
+                return  # their own clicks (the title bar maximises on double click)
+            w = w.get_parent()
+        self.toggle_full()
 
     def on_key(self, _ctl, keyval, _code, _state):
         if keyval == Gdk.KEY_F11 or (keyval == Gdk.KEY_Escape and self.is_fullscreen()):

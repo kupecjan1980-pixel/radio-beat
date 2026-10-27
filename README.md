@@ -5,7 +5,7 @@ Not made by or affiliated with the station; it plays the public streams.
 
 - Album cover fills the window, with song, artist and album over it (looked up on Deezer, then iTunes; 1200–1920 px, sharp on a Full HD screen)
 - On air: the show playing now (picture, name, host, what it's about) and the next one, from radiobeat.cz's programme
-- Full screen: the button next to settings, or F11 (Esc leaves)
+- Full screen: the button next to settings, a double click on the picture, or F11 (Esc leaves)
 - Plays as soon as it starts; Pause, and Stop (quits)
 - Restarts playback on its own: reconnects when the stream ends or stalls for 20 s,
   moves to a backup server after 3 failed tries, restarts mpv if it crashes
