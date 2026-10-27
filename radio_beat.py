@@ -715,10 +715,10 @@ CSS = b"""
 .cover-bg { background: #111; }
 .scrim { background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.75) 55%, rgba(0,0,0,0) 100%); }
 .scrim label { color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
-.song { font-size: 22pt; font-weight: 800; }
-.artist { font-size: 15pt; font-weight: 600; }
-.album { font-size: 12pt; opacity: 0.8; }
-.status { font-size: 9pt; opacity: 0.65; }
+.song { font-weight: 800; }
+.artist { font-weight: 600; }
+.album { opacity: 0.8; }
+.status { opacity: 0.65; }
 .round { min-width: 56px; min-height: 56px; border-radius: 999px; padding: 0; }
 .play-button { background: #E3051A; color: white; min-width: 68px; min-height: 68px; }
 .play-button:hover { background: #F21C30; }
@@ -728,19 +728,20 @@ CSS = b"""
 .overlay-header { background: none; box-shadow: none; }
 .show-card { background: rgba(0,0,0,0.45); border-radius: 14px; padding: 10px; }
 .show-pic { border-radius: 10px; }
-.on-air { background: #E3051A; color: white; border-radius: 999px; padding: 1px 8px; font-size: 8pt; font-weight: 800; }
-.show-title { font-size: 12pt; font-weight: 700; }
-.show-sub { font-size: 9.5pt; opacity: 0.8; }
-.show-next { font-size: 9.5pt; opacity: 0.7; }
-.full .song { font-size: 40pt; }
-.full .artist { font-size: 26pt; }
-.full .album { font-size: 18pt; }
-.full .show-title { font-size: 18pt; }
-.full .show-sub, .full .show-next { font-size: 13pt; }
-.full .on-air { font-size: 11pt; }
+.on-air { background: #E3051A; color: white; border-radius: 999px; padding: 1px 8px; font-weight: 800; }
+.show-title { font-weight: 700; }
+.show-sub { opacity: 0.8; }
+.show-next { opacity: 0.7; }
 .overlay-header button { background: rgba(0,0,0,0.45); color: white; }
 .overlay-header windowcontrols image.icon { -gtk-icon-size: 34px; min-width: 34px; min-height: 34px; border-radius: 8px; }
 """
+
+
+# Sizes at the window's first size (BASE_SIZE); a larger window or full screen
+# scales them all by how much bigger it is (the smaller of width and height).
+BASE_SIZE = (440, 600)
+TEXT_PT = {"song": 24, "artist": 16.5, "album": 13, "status": 10, "on-air": 9,
+           "show-title": 13.5, "show-sub": 10.5, "show-next": 10.5, "pic": 96}
 
 
 class Window(Adw.ApplicationWindow):
@@ -748,6 +749,10 @@ class Window(Adw.ApplicationWindow):
         super().__init__(application=app, title="Rádio Beat", default_width=420, default_height=620)
         self.app = app
         self.set_icon_name(APP_ID)
+        self._scale = 1.0
+        self.scale_css = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.scale_css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
 
         # The cover fills the window; everything else lies on top of it.
         self.cover = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True)
@@ -781,7 +786,7 @@ class Window(Adw.ApplicationWindow):
         # What's on: the show now (picture, name, host) and the next one.
         self.show_card = Gtk.Box(spacing=12, margin_bottom=10)
         self.show_card.add_css_class("show-card")
-        self.show_pic = Gtk.Image(pixel_size=72, valign=Gtk.Align.CENTER)
+        self.show_pic = Gtk.Image(pixel_size=TEXT_PT["pic"], valign=Gtk.Align.CENTER)
         self.show_pic.add_css_class("show-pic")
         self.show_pic.set_overflow(Gtk.Overflow.HIDDEN)
         self.show_card.append(self.show_pic)
@@ -829,7 +834,9 @@ class Window(Adw.ApplicationWindow):
         self.vol.connect("value-changed", lambda s: app.set_volume(s.get_value()))
         controls.append(self.play_btn)
         controls.append(stop)
-        controls.append(Gtk.Image(icon_name="audio-volume-high-symbolic", margin_start=6))
+        vol_icon = Gtk.Image(icon_name="audio-volume-high-symbolic", margin_start=6)
+        vol_icon.add_css_class("vol-icon")
+        controls.append(vol_icon)
         controls.append(self.vol)
         inner.append(controls)
         self.status = Gtk.Label(xalign=0)
@@ -838,6 +845,7 @@ class Window(Adw.ApplicationWindow):
         overlay.add_overlay(scrim)
 
         self.set_content(overlay)
+        self._apply_scale()
         self.connect("close-request", self.on_close)
         self.refresh()
 
@@ -925,7 +933,31 @@ class Window(Adw.ApplicationWindow):
         self.full_btn.set_icon_name("view-restore-symbolic" if full else "view-fullscreen-symbolic")
         self.full_btn.set_tooltip_text("Leave full screen (F11 / Esc)" if full else "Full screen (F11)")
         (self.add_css_class if full else self.remove_css_class)("full")
-        self.show_pic.set_pixel_size(130 if full else 72)
+
+    def do_size_allocate(self, width, height, baseline):
+        Adw.ApplicationWindow.do_size_allocate(self, width, height, baseline)
+        f = round(max(1.0, min(width / BASE_SIZE[0], height / BASE_SIZE[1])), 2)
+        if f != self._scale:
+            self._scale = f
+            GLib.idle_add(self._apply_scale)  # not while laying out
+
+    def _apply_scale(self) -> bool:
+        """Text and the show picture grow with the window: in full screen
+        they fill the screen instead of staying window-sized."""
+        f = self._scale
+        css = "".join(f".{cls} {{ font-size: {pt * f:.1f}pt; }}\n" for cls, pt in TEXT_PT.items() if cls != "pic")
+        # the buttons grow too, so they don't look lost next to the text
+        css += (f".round {{ min-width: {56 * f:.0f}px; min-height: {56 * f:.0f}px; }}\n"
+                f".play-button {{ min-width: {68 * f:.0f}px; min-height: {68 * f:.0f}px; }}\n"
+                f".round image, .vol-icon {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
+                f".overlay-header button {{ min-width: {34 * f:.0f}px; min-height: {34 * f:.0f}px; }}\n"
+                f".overlay-header button image {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
+                f".overlay-header windowcontrols image.icon {{ -gtk-icon-size: {34 * f:.0f}px; "
+                f"min-width: {34 * f:.0f}px; min-height: {34 * f:.0f}px; }}\n"
+                f".show-card {{ padding: {10 * f:.0f}px; border-radius: {14 * f:.0f}px; }}\n")
+        self.scale_css.load_from_data(css.encode())
+        self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
+        return False
 
     def on_double(self, _gesture, n, x, y) -> None:
         if n != 2:
