@@ -31,7 +31,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gio, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gio, Graphene, Gtk  # noqa: E402
 
 APP_ID = "local.hanis.RadioBeat"
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -612,6 +612,7 @@ CSS = b"""
 .full .show-sub, .full .show-next { font-size: 13pt; }
 .full .on-air { font-size: 11pt; }
 .overlay-header button { background: rgba(0,0,0,0.45); color: white; }
+.overlay-header windowcontrols image.icon { -gtk-icon-size: 34px; min-width: 34px; min-height: 34px; border-radius: 8px; }
 """
 
 
@@ -746,8 +747,23 @@ class Window(Adw.ApplicationWindow):
                                  vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
                                  width_request=320)
         pop = Gtk.Popover(child=fit, has_arrow=False)
-        pop.set_offset(-130, 4)
-        return Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings", popover=pop)
+        btn = Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings", popover=pop)
+        pop.connect("show", lambda p: self._place_menu(btn, p))
+        return btn
+
+    MENU_W = 320 + 2 * 6  # the box above plus the popover's own padding
+    MENU_GAP = 10  # px kept from the window's edges
+
+    def _place_menu(self, btn, pop) -> None:
+        """Drop the menu below the gear, inside the window with a gap from
+        its edges, whatever the window's width and title buttons."""
+        ok, pt = btn.compute_point(self, Graphene.Point())
+        if not ok:
+            return
+        mid = pt.x + btn.get_width() / 2  # a popover is centred on its button
+        right = min(self.get_width() - self.MENU_GAP, mid + self.MENU_W / 2)
+        left = max(self.MENU_GAP, right - self.MENU_W)
+        pop.set_offset(int(left + self.MENU_W / 2 - mid), 8)
 
     def fill_quality(self) -> None:
         self._filling = True
