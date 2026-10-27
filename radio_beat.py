@@ -219,7 +219,7 @@ def update_status() -> tuple[bool | None, str]:
         mine = ""
     if mine == sha:
         return False, f"Up to date ({info['committer']['date'][:10]})"
-    return True, f"New version: {info['message'].splitlines()[0]} ({info['committer']['date'][:10]})"
+    return True, f"New version from {info['committer']['date'][:10]}:\n{info['message'].splitlines()[0]}"
 
 
 def run_update() -> str | None:
@@ -711,7 +711,7 @@ class Window(Adw.ApplicationWindow):
 
     def _settings_button(self) -> Gtk.MenuButton:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8, margin_bottom=8,
-                      margin_start=8, margin_end=8, width_request=320)
+                      margin_start=8, margin_end=8, width_request=300)
         group = Adw.PreferencesGroup()
         self.quality = Adw.ComboRow(title="Audio quality")
         self.quality_model = Gtk.StringList()
@@ -728,14 +728,22 @@ class Window(Adw.ApplicationWindow):
             near.set_active(self.app.settings.get("tray_popup", True))
             near.connect("notify::active", lambda r, _: self.app.set_tray_popup(r.get_active()))
             group.add(near)
-        self.update_row = Adw.ActionRow(title="Updates", subtitle=self.app.update_text)
+        self.update_row = Adw.ActionRow(title="Updates")
         self.update_btn = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
         self.update_btn.connect("clicked", lambda *_: self.app.update_clicked())
         self.update_row.add_suffix(self.update_btn)
         group.add(self.update_row)
         box.append(group)
-        return Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings",
-                              popover=Gtk.Popover(child=box))
+        # Under the row, wrapped: a commit message would widen the menu past the window.
+        self.update_note = Gtk.Label(label=self.app.update_text, xalign=0, wrap=True,
+                                     max_width_chars=1, hexpand=False, margin_start=12, margin_end=12)
+        self.update_note.add_css_class("dim-label")
+        self.update_note.add_css_class("caption")
+        box.append(self.update_note)
+        # Opens leftwards from the gear (at the right edge), so it stays inside the window.
+        pop = Gtk.Popover(child=box, has_arrow=False)
+        pop.set_offset(-130, 4)
+        return Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings", popover=pop)
 
     def fill_quality(self) -> None:
         self._filling = True
@@ -813,7 +821,7 @@ class Window(Adw.ApplicationWindow):
             if a.alt:
                 parts.append(f"backup: {a.stream()[1]}")
             self.status.set_text(" · ".join(parts) if parts else "Connecting…")
-        self.update_row.set_subtitle(a.update_text)
+        self.update_note.set_text(a.update_text)
         self.update_btn.set_label("Update" if a.update_ready else "Check")
         self.update_btn.set_sensitive(not a.update_busy)
         (self.update_btn.add_css_class if a.update_ready else self.update_btn.remove_css_class)("suggested-action")
