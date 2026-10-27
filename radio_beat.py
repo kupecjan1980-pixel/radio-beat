@@ -310,6 +310,70 @@ def fetch(url: str) -> bytes | None:
         return None
 
 
+# --- programme (radiobeat.cz) ----------------------------------------------------
+# The station's site lists the week (Monday first) at /cs/program/ and the
+# host on air on the homepage; there's no public API, so both are read from
+# the HTML.
+
+SITE = "https://www.radiobeat.cz"
+DAYS = ["pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota", "neděle"]
+
+
+def _text(html: str) -> str:
+    import html as h
+    return " ".join(h.unescape(re.sub(r"<[^>]+>", " ", html)).split())
+
+
+def parse_schedule(page: str) -> dict[int, list[dict]]:
+    """weekday (0 = Monday) -> shows [{start (minutes), title, desc, img}]."""
+    out: dict[int, list[dict]] = {}
+    days = page.split('class="schedule__day')[1:]
+    for chunk in days:
+        m = re.search(r'ca-control">\s*<a[^>]*>\s*([^<\s]+)', chunk)
+        name = m.group(1).strip().lower() if m else ""
+        if name not in DAYS:
+            continue
+        shows = []
+        for item in chunk.split('schedule__list-item')[1:]:
+            t = re.search(r'schedule__title">(.*?)</h3>', item, re.S)
+            m = re.match(r"(\d{1,2}):(\d{2})\s*(.*)", _text(t.group(1))) if t else None
+            if not m:
+                continue
+            d = re.search(r'schedule__description">(.*?)</p>', item, re.S)
+            img = re.search(r'data-src="([^"]+)"', item)
+            shows.append({"start": int(m.group(1)) * 60 + int(m.group(2)), "title": m.group(3),
+                          "desc": _text(d.group(1)) if d else "",
+                          "img": SITE + img.group(1).replace("/media/200/", "/media/400/") if img else None})
+        out[DAYS.index(name)] = sorted(shows, key=lambda x: x["start"])
+    return out
+
+
+def parse_host(page: str) -> str | None:
+    m = re.search(r'id="interpeteur-name">(.*?)</span>', page, re.S)
+    return _text(m.group(1)) or None if m else None
+
+
+def on_air(schedule: dict[int, list[dict]], now: time.struct_time) -> tuple[dict | None, dict | None]:
+    """The show on now and the next one (with "day" for a later day)."""
+    if not schedule:
+        return None, None
+    mins = now.tm_hour * 60 + now.tm_min
+    cur = nxt = None
+    for back in range(8):  # now: the last start at or before now, today or earlier
+        shows = schedule.get((now.tm_wday - back) % 7) or []
+        before = [s for s in shows if back or s["start"] <= mins]
+        if before:
+            cur = before[-1]
+            break
+    for ahead in range(8):
+        day = (now.tm_wday + ahead) % 7
+        later = [s for s in schedule.get(day) or [] if ahead or s["start"] > mins]
+        if later:
+            nxt = dict(later[0], day=None if ahead == 0 else ("zítra" if ahead == 1 else DAYS[day]))
+            break
+    return cur, nxt
+
+
 # --- mpv ------------------------------------------------------------------------
 
 def _die_with_parent() -> None:
@@ -535,6 +599,18 @@ CSS = b"""
 .stop-button:hover { background: rgba(255,255,255,0.28); }
 .scrim scale trough highlight { background: #E3051A; }
 .overlay-header { background: none; box-shadow: none; }
+.show-card { background: rgba(0,0,0,0.45); border-radius: 14px; padding: 10px; }
+.show-pic { border-radius: 10px; }
+.on-air { background: #E3051A; color: white; border-radius: 999px; padding: 1px 8px; font-size: 8pt; font-weight: 800; }
+.show-title { font-size: 12pt; font-weight: 700; }
+.show-sub { font-size: 9.5pt; opacity: 0.8; }
+.show-next { font-size: 9.5pt; opacity: 0.7; }
+.full .song { font-size: 40pt; }
+.full .artist { font-size: 26pt; }
+.full .album { font-size: 18pt; }
+.full .show-title { font-size: 18pt; }
+.full .show-sub, .full .show-next { font-size: 13pt; }
+.full .on-air { font-size: 11pt; }
 .overlay-header button { background: rgba(0,0,0,0.45); color: white; }
 """
 
@@ -555,7 +631,14 @@ class Window(Adw.ApplicationWindow):
         header = Adw.HeaderBar(show_title=False, valign=Gtk.Align.START)
         header.add_css_class("overlay-header")
         header.pack_end(self._settings_button())
+        self.full_btn = Gtk.Button(icon_name="view-fullscreen-symbolic", tooltip_text="Full screen (F11)")
+        self.full_btn.connect("clicked", lambda *_: self.toggle_full())
+        header.pack_end(self.full_btn)
         overlay.add_overlay(header)
+        self.connect("notify::fullscreened", self.on_fullscreened)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self.on_key)
+        self.add_controller(keys)
 
         scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
                         margin_top=0)
@@ -563,6 +646,31 @@ class Window(Adw.ApplicationWindow):
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=90,
                         margin_bottom=22, margin_start=22, margin_end=22)
         scrim.append(inner)
+        # What's on: the show now (picture, name, host) and the next one.
+        self.show_card = Gtk.Box(spacing=12, margin_bottom=10)
+        self.show_card.add_css_class("show-card")
+        self.show_pic = Gtk.Image(pixel_size=72, valign=Gtk.Align.CENTER)
+        self.show_pic.add_css_class("show-pic")
+        self.show_pic.set_overflow(Gtk.Overflow.HIDDEN)
+        self.show_card.append(self.show_pic)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
+        top = Gtk.Box(spacing=8)
+        badge = Gtk.Label(label="ON AIR", valign=Gtk.Align.CENTER)
+        badge.add_css_class("on-air")
+        self.show_title = Gtk.Label(xalign=0, ellipsize=3, hexpand=True)  # 3 = Pango.EllipsizeMode.END
+        self.show_title.add_css_class("show-title")
+        top.append(badge)
+        top.append(self.show_title)
+        self.show_sub = Gtk.Label(xalign=0, wrap=True, lines=2, ellipsize=3)
+        self.show_sub.add_css_class("show-sub")
+        self.show_next = Gtk.Label(xalign=0, ellipsize=3)
+        self.show_next.add_css_class("show-next")
+        for w in (top, self.show_sub, self.show_next):
+            text.append(w)
+        self.show_card.append(text)
+        self.show_card.set_visible(False)
+        inner.append(self.show_card)
+
         self.song = Gtk.Label(wrap=True, xalign=0)
         self.song.add_css_class("song")
         self.artist = Gtk.Label(wrap=True, xalign=0)
@@ -647,6 +755,25 @@ class Window(Adw.ApplicationWindow):
         if 0 <= i < len(self.app.streams):
             self.app.set_quality(self.app.streams[i][0])
 
+    def toggle_full(self) -> None:
+        if self.is_fullscreen():
+            self.unfullscreen()
+        else:
+            self.fullscreen()
+
+    def on_fullscreened(self, *_):
+        full = self.is_fullscreen()
+        self.full_btn.set_icon_name("view-restore-symbolic" if full else "view-fullscreen-symbolic")
+        self.full_btn.set_tooltip_text("Leave full screen (F11 / Esc)" if full else "Full screen (F11)")
+        (self.add_css_class if full else self.remove_css_class)("full")
+        self.show_pic.set_pixel_size(130 if full else 72)
+
+    def on_key(self, _ctl, keyval, _code, _state):
+        if keyval == Gdk.KEY_F11 or (keyval == Gdk.KEY_Escape and self.is_fullscreen()):
+            self.toggle_full()
+            return True
+        return False
+
     def on_close(self, *_):
         self.set_visible(False)  # keeps playing; the tray icon brings it back
         return True
@@ -660,6 +787,19 @@ class Window(Adw.ApplicationWindow):
         self.album.set_text(info.get("album") or "")
         self.album.set_visible(bool(info.get("album")))
         self.cover.set_paintable(a.cover_tex or a.logo_tex)
+        cur, nxt = on_air(a.schedule, time.localtime())
+        self.show_card.set_visible(cur is not None)
+        if cur:
+            self.show_title.set_text(cur["title"])
+            host = a.host if a.host and norm(a.host) != norm(cur["title"]) else None
+            self.show_sub.set_text(" · ".join(x for x in (host, cur["desc"]) if x))
+            self.show_sub.set_visible(bool(host or cur["desc"]))
+            if nxt:
+                when = f'{nxt["start"] // 60}:{nxt["start"] % 60:02d}'
+                self.show_next.set_text(f'Next {nxt["day"] + " " if nxt["day"] else ""}{when} · {nxt["title"]}')
+            self.show_next.set_visible(nxt is not None)
+            tex = a.show_pics.get(cur["img"]) if cur["img"] else None
+            self.show_pic.set_from_paintable(tex or a.logo_tex)
         self.play_btn.set_icon_name("media-playback-start-symbolic" if a.paused else "media-playback-pause-symbolic")
         self.play_btn.set_tooltip_text("Play" if a.paused else "Pause")
         if a.error:
@@ -698,6 +838,9 @@ class App(Adw.Application):
         self.error: str | None = None
         self.icy = self.song = self.artist_raw = None
         self.info: dict | None = None
+        self.schedule: dict[int, list[dict]] = {}  # radiobeat.cz programme, by weekday
+        self.host: str | None = None  # who's on air (the site's homepage)
+        self.show_pics: dict[str, object] = {}  # show picture url -> texture
         self.codec = self.bitrate = None
         self.cover_tex = None
         self.logo_tex = None
@@ -731,6 +874,8 @@ class App(Adw.Application):
                 break
         self.start_mpv()
         GLib.timeout_add_seconds(5, self._watchdog)
+        self._programme()
+        GLib.timeout_add_seconds(60, self._programme_tick)
         try:
             self.tray = Tray(self)
         except GLib.Error as e:
@@ -951,6 +1096,58 @@ class App(Adw.Application):
         self.start_mpv()
         if self.mpv and not self.paused:
             self._load()
+        self.update()
+        return False
+
+    # programme: the week every 30 min, the host every 5, the card every minute
+    def _programme_tick(self):
+        self._ticks = getattr(self, "_ticks", 0) + 1
+        if self._ticks % 30 == 0 or not self.schedule:
+            self._programme()
+        elif self._ticks % 5 == 0:
+            self._programme(host_only=True)
+        else:
+            self._show_pic()
+            self.update()
+        return True
+
+    def _programme(self, host_only: bool = False):
+        def work():
+            sched = None
+            if not host_only:
+                page = fetch(SITE + "/cs/program/")
+                sched = parse_schedule(page.decode("utf-8", "replace")) if page else None
+            page = fetch(SITE + "/")
+            host = parse_host(page.decode("utf-8", "replace")) if page else None
+            GLib.idle_add(self._programme_got, sched, host)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _programme_got(self, sched, host):
+        if sched:
+            self.schedule = sched
+        if host:
+            self.host = host
+        self._show_pic()
+        self.update()
+        return False
+
+    def _show_pic(self):
+        cur, nxt = on_air(self.schedule, time.localtime())
+        for show in (cur, nxt):
+            url = show and show["img"]
+            if url and url not in self.show_pics:
+                self.show_pics[url] = None  # fetching
+
+                def work(url=url):
+                    data = fetch(url)
+                    GLib.idle_add(self._show_pic_got, url, data)
+                threading.Thread(target=work, daemon=True).start()
+
+    def _show_pic_got(self, url, data):
+        try:
+            self.show_pics[url] = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data)) if data else None
+        except GLib.Error:
+            self.show_pics[url] = None
         self.update()
         return False
 
