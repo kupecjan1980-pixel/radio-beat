@@ -283,7 +283,7 @@ def lookup(artist: str, song: str) -> dict | None:
             if sc > best_score:
                 best_score = sc
                 best = {"artist": x["artist"]["name"], "title": x["title"],
-                        "album": x["album"]["title"], "cover": x["album"].get("cover_xl")}
+                        "album": x["album"]["title"], "cover": (x["album"].get("cover_xl") or "").replace("/1000x1000-", "/1200x1200-") or None}
     except (OSError, ValueError, KeyError):
         pass
     if best_score >= 4:
@@ -295,7 +295,7 @@ def lookup(artist: str, song: str) -> dict | None:
                 best_score = sc
                 art = x.get("artworkUrl100", "")
                 best = {"artist": x["artistName"], "title": x["trackName"],
-                        "album": x.get("collectionName"), "cover": art.replace("100x100bb", "600x600bb") or None}
+                        "album": x.get("collectionName"), "cover": art.replace("100x100bb", "1920x1920bb") or None}
     except (OSError, ValueError, KeyError):
         pass
     return best if best_score >= 3 else None
@@ -416,7 +416,8 @@ class Mpv:
         if not cmd:
             raise RuntimeError("mpv isn't installed (system package, or Flathub: flatpak install flathub io.mpv.Mpv)")
         self.proc = subprocess.Popen(
-            [*cmd, "--idle=yes", "--no-video", "--no-terminal", "--force-window=no",
+            # --load-scripts=no: no MPRIS plugin, the app shows itself as the player (Mpris)
+            [*cmd, "--idle=yes", "--no-video", "--load-scripts=no", "--no-terminal", "--force-window=no",
              "--title=Rádio Beat", f"--input-ipc-server={self.sock_path}",
              "--cache=yes", "--demuxer-max-bytes=4MiB", "--network-timeout=15",
              # let ffmpeg pick a dropped HTTP stream up again by itself
@@ -507,6 +508,132 @@ SNI_XML = """
   </interface>
 </node>
 """
+
+
+MPRIS_XML = """
+<node>
+  <interface name="org.mpris.MediaPlayer2">
+    <method name="Raise"/>
+    <method name="Quit"/>
+    <property name="CanQuit" type="b" access="read"/>
+    <property name="CanRaise" type="b" access="read"/>
+    <property name="HasTrackList" type="b" access="read"/>
+    <property name="Identity" type="s" access="read"/>
+    <property name="DesktopEntry" type="s" access="read"/>
+    <property name="SupportedUriSchemes" type="as" access="read"/>
+    <property name="SupportedMimeTypes" type="as" access="read"/>
+  </interface>
+  <interface name="org.mpris.MediaPlayer2.Player">
+    <method name="Next"/>
+    <method name="Previous"/>
+    <method name="Pause"/>
+    <method name="PlayPause"/>
+    <method name="Stop"/>
+    <method name="Play"/>
+    <method name="Seek"><arg direction="in" type="x"/></method>
+    <method name="SetPosition"><arg direction="in" type="o"/><arg direction="in" type="x"/></method>
+    <method name="OpenUri"><arg direction="in" type="s"/></method>
+    <signal name="Seeked"><arg type="x"/></signal>
+    <property name="PlaybackStatus" type="s" access="read"/>
+    <property name="Rate" type="d" access="readwrite"/>
+    <property name="Metadata" type="a{sv}" access="read"/>
+    <property name="Volume" type="d" access="readwrite"/>
+    <property name="Position" type="x" access="read"/>
+    <property name="MinimumRate" type="d" access="read"/>
+    <property name="MaximumRate" type="d" access="read"/>
+    <property name="CanGoNext" type="b" access="read"/>
+    <property name="CanGoPrevious" type="b" access="read"/>
+    <property name="CanPlay" type="b" access="read"/>
+    <property name="CanPause" type="b" access="read"/>
+    <property name="CanSeek" type="b" access="read"/>
+    <property name="CanControl" type="b" access="read"/>
+  </interface>
+</node>
+"""
+
+
+class Mpris:
+    """The app's own media controls (MPRIS): the desktop's player widget and
+    media keys see "Rádio Beat" with the song and cover, instead of mpv
+    (whose MPRIS plugin isn't loaded)."""
+
+    PATH = "/org/mpris/MediaPlayer2"
+    ROOT, PLAYER = "org.mpris.MediaPlayer2", "org.mpris.MediaPlayer2.Player"
+
+    def __init__(self, app):
+        self.app = app
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        self.cover_file = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(),
+                                       "radio-beat", "cover.jpg")
+        self.last: dict = {}
+        node = Gio.DBusNodeInfo.new_for_xml(MPRIS_XML)
+        for iface in node.interfaces:
+            self.bus.register_object(self.PATH, iface, self._call, self._get, self._set)
+        Gio.bus_own_name_on_connection(self.bus, "org.mpris.MediaPlayer2.radiobeat",
+                                       Gio.BusNameOwnerFlags.NONE, None, None)
+
+    def _metadata(self) -> dict:
+        a = self.app
+        info = a.info or {}
+        md = {"mpris:trackid": GLib.Variant("o", "/local/hanis/RadioBeat/live"),
+              "xesam:title": GLib.Variant("s", info.get("title") or a.song or "Rádio Beat"),
+              "xesam:artist": GLib.Variant("as", [info.get("artist") or a.artist_raw or "Rádio Beat"])}
+        if info.get("album"):
+            md["xesam:album"] = GLib.Variant("s", info["album"])
+        art = info.get("cover") if a.cover_tex else None
+        if art:
+            md["mpris:artUrl"] = GLib.Variant("s", art)
+        return md
+
+    def _props(self) -> dict:
+        a = self.app
+        return {
+            self.ROOT: {
+                "CanQuit": GLib.Variant("b", True), "CanRaise": GLib.Variant("b", True),
+                "HasTrackList": GLib.Variant("b", False), "Identity": GLib.Variant("s", "Rádio Beat"),
+                "DesktopEntry": GLib.Variant("s", APP_ID),
+                "SupportedUriSchemes": GLib.Variant("as", []), "SupportedMimeTypes": GLib.Variant("as", []),
+            },
+            self.PLAYER: {
+                "PlaybackStatus": GLib.Variant("s", "Paused" if a.paused else "Playing"),
+                "Rate": GLib.Variant("d", 1.0), "MinimumRate": GLib.Variant("d", 1.0),
+                "MaximumRate": GLib.Variant("d", 1.0),
+                "Metadata": GLib.Variant("a{sv}", self._metadata()),
+                "Volume": GLib.Variant("d", a.settings["volume"] / 100),
+                "Position": GLib.Variant("x", 0),
+                "CanGoNext": GLib.Variant("b", False), "CanGoPrevious": GLib.Variant("b", False),
+                "CanPlay": GLib.Variant("b", True), "CanPause": GLib.Variant("b", True),
+                "CanSeek": GLib.Variant("b", False), "CanControl": GLib.Variant("b", True),
+            },
+        }
+
+    def _get(self, _conn, _sender, _path, iface, prop):
+        return self._props().get(iface, {}).get(prop)
+
+    def _set(self, _conn, _sender, _path, iface, prop, value):
+        if iface == self.PLAYER and prop == "Volume":
+            self.app.set_volume(max(0.0, min(1.0, value.unpack())) * 100)
+        return True
+
+    def _call(self, _conn, _sender, _path, _iface, method, params, invocation):
+        a = self.app
+        if method == "Raise":
+            a.show_window()
+        elif method == "Quit":
+            a.quit_all()
+        elif method == "PlayPause" or (method == "Play" and a.paused) or (method in ("Pause", "Stop") and not a.paused):
+            a.toggle_pause()
+        invocation.return_value(None)
+
+    def changed(self) -> None:
+        """PropertiesChanged for what's different since the last call."""
+        now = self._props()[self.PLAYER]
+        diff = {k: v for k, v in now.items() if k in ("PlaybackStatus", "Metadata", "Volume")
+                and (k not in self.last or self.last[k] != v)}
+        self.last = now
+        if diff:
+            self.bus.emit_signal(None, self.PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                 GLib.Variant("(sa{sv}as)", (self.PLAYER, diff, [])))
 
 
 class Tray:
@@ -861,6 +988,7 @@ class App(Adw.Application):
         self.win: Window | None = None
         self.mpv: Mpv | None = None
         self.tray: Tray | None = None
+        self.mpris: Mpris | None = None
         self.paused = False
         self.paused_at = 0.0
         self.error: str | None = None
@@ -904,6 +1032,10 @@ class App(Adw.Application):
         GLib.timeout_add_seconds(5, self._watchdog)
         self._programme()
         GLib.timeout_add_seconds(60, self._programme_tick)
+        try:
+            self.mpris = Mpris(self)
+        except GLib.Error as e:
+            print(f"no media controls: {e}", file=sys.stderr)
         try:
             self.tray = Tray(self)
         except GLib.Error as e:
@@ -1088,6 +1220,8 @@ class App(Adw.Application):
     def update(self):
         if self.win:
             self.win.refresh()
+        if self.mpris:
+            self.mpris.changed()
         if self.tray:
             info = self.info or {}
             title, artist = info.get("title") or self.song, info.get("artist") or self.artist_raw

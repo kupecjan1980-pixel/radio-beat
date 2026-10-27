@@ -3,7 +3,7 @@
 A small Linux desktop player for the Czech station [Rádio Beat](https://www.radiobeat.cz/).
 Not made by or affiliated with the station; it plays the public streams.
 
-- Album cover fills the window, with song, artist and album over it (looked up on Deezer, then iTunes)
+- Album cover fills the window, with song, artist and album over it (looked up on Deezer, then iTunes; 1200–1920 px, sharp on a Full HD screen)
 - On air: the show playing now (picture, name, host, what it's about) and the next one, from radiobeat.cz's programme
 - Full screen: the button next to settings, or F11 (Esc leaves)
 - Plays as soon as it starts; Pause, and Stop (quits)
@@ -16,7 +16,7 @@ Not made by or affiliated with the station; it plays the public streams.
 - KDE Plasma: opens in the bottom-right corner, flush with the right edge and sitting on the taskbar
   (a small KWin script the app loads; switch in settings)
 - Updates from settings: Check compares with GitHub, Update installs the new version and restarts the app
-- Media keys and the desktop's player controls through mpv's MPRIS plugin, where installed
+- Media keys and the desktop's player widget (MPRIS): shows as Rádio Beat with the song and cover; mpv itself stays hidden
 
 ## Install
 
