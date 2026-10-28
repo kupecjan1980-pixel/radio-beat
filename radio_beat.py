@@ -1520,8 +1520,9 @@ CSS = b"""
 .show-sub { opacity: 0.8; }
 .show-next { opacity: 0.7; }
 .overlay-header button { background: rgba(0,0,0,0.45); color: white; }
-.overlay-header .top-logo { border-radius: 8px; margin-start: 4px; }
+.overlay-header .top-logo { border-radius: 8px; margin-left: 4px; }
 .overlay-header button.close-button { background: #E3051A; color: white; }
+.overlay-header:backdrop, .overlay-header:backdrop * { opacity: 1; filter: none; }  /* not faded when unfocused */
 .overlay-header button.close-button:hover { background: #F21C30; }
 """
 
@@ -1660,7 +1661,9 @@ class GlassCard(Gtk.Box):
                 # The blurred bars beside the cover: blurred here too, like around the card, and not bent
                 # (squeezing undone: they stay where they are).
                 tex = self._backdrop(view, pic, vw, vh, darken)
-                if tex:
+                # Where it sits before its CSS zoom (the parent's origin): the texture has the zoom in it.
+                ok, p = view.get_parent().compute_point(self, Graphene.Point().init(0, 0))
+                if tex and ok:
                     snap.save()
                     if reach > 0.05:
                         snap.translate(Graphene.Point().init(cx, cy))
@@ -1805,6 +1808,7 @@ class Window(Adw.ApplicationWindow):
         self._scale = 1.0
         self._fit = 1.0  # < 1: everything smaller, so it all fits in the window (not in full screen)
         self._fit_queued = False
+        self._scale_pending = False
         self.scale_css = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.scale_css,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
@@ -2096,9 +2100,10 @@ class Window(Adw.ApplicationWindow):
         Adw.ApplicationWindow.do_size_allocate(self, width, height, baseline)
         f = round(max(1.0, min(width / BASE_SIZE[0], height / BASE_SIZE[1])) * self._fit, 2)
         if f != self._scale:
-            self._scale = f
+            self._scale, self._scale_pending = f, True
             GLib.idle_add(self._apply_scale)  # not while laying out
-        if not self._fit_queued:
+        # Measured only once the new sizes are in (the layout after _apply_scale), not with the old ones.
+        if not self._fit_queued and not self._scale_pending:
             self._fit_queued = True
             GLib.idle_add(self._check_fit)
         wide = width >= 1.3 * height
@@ -2119,10 +2124,10 @@ class Window(Adw.ApplicationWindow):
         if self.is_fullscreen():
             fit = 1.0
         else:
-            need = self.scrim.measure(Gtk.Orientation.VERTICAL, w)[0]
+            need = self.scrim.measure(Gtk.Orientation.VERTICAL, w)[1]  # natural: what it really takes
             if need > h and fit > 0.5:
                 fit = max(0.5, fit * self.FIT_STEP)
-            elif fit < 1.0 and need / self.FIT_STEP < h * 0.95:  # still fits a step bigger: no back and forth
+            elif fit < 1.0 and need < h * 0.85:  # a step bigger still fits: no back and forth
                 fit = min(1.0, fit / self.FIT_STEP)
         if fit != self._fit:
             self._fit = fit
@@ -2188,6 +2193,8 @@ class Window(Adw.ApplicationWindow):
             w.set_margin_bottom(v)
         self.show_card.queue_draw()
         self._arrange()
+        self._scale_pending = False
+        self.queue_resize()  # lays out with the new sizes, then the fit is checked
         return False
 
     def apply_look(self) -> None:
