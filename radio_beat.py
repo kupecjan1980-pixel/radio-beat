@@ -115,24 +115,37 @@ def set_autostart(on: bool) -> None:
         )
 
 
-# --- KDE: open in the bottom-left corner ----------------------------------------
+# --- KDE: open in the bottom-right corner ---------------------------------------
 # A Wayland window can't place itself, and KWin's window rules have no "bottom
-# left" placement. A small KWin script does it: each time the window appears,
-# it goes flush against the left edge, its bottom on the taskbar (KWin's
+# right" placement. A small KWin script does it: each time the window appears,
+# leaves full screen or comes back from being minimised, it goes flush against
+# the right edge, its bottom on the taskbar (by the clock) (KWin's
 # MaximizeArea is the screen without the panels). The app loads the script
 # into KWin over D-Bus at start (Plasma 6, and 5's clientAdded).
 # The earlier "under the mouse" rule (KWIN_RULE) is taken out again.
 
 KWIN_SCRIPT_NAME = "radio-beat-corner"
 KWIN_SCRIPT = """
-function place(w) {
-    if (!w || w.resourceClass !== "%s") return;
+function place(w) {  // true when it was put there (not while full screen or still screen-sized)
+    if (!w || w.resourceClass !== "%s" || w.fullScreen) return false;
     var a = workspace.clientArea(KWin.MaximizeArea, w);
     var g = w.frameGeometry;
-    w.frameGeometry = {x: a.x, y: a.y + a.height - g.height, width: g.width, height: g.height};
+    if (g.width >= a.width) return false;
+    w.frameGeometry = {x: a.x + a.width - g.width, y: a.y + a.height - g.height, width: g.width, height: g.height};
+    return true;
 }
-(workspace.windowAdded || workspace.clientAdded).connect(place);
-""" % APP_ID
+function watch(w) {
+    if (!w || w.resourceClass !== "%s") return;
+    // KWin gives the window its size back after these signals: it's placed at the next fitting geometry.
+    // Once placed, moving it by hand stays.
+    var due = !place(w);
+    function again() { due = !place(w); }
+    if (w.frameGeometryChanged) w.frameGeometryChanged.connect(function () { if (due && place(w)) due = false; });
+    if (w.fullScreenChanged) w.fullScreenChanged.connect(again);
+    if (w.minimizedChanged) w.minimizedChanged.connect(function () { if (!w.minimized) again(); });
+}
+(workspace.windowAdded || workspace.clientAdded).connect(watch);
+""" % (APP_ID, APP_ID)
 
 
 def _kwin_scripting(method: str, args=None, reply: str | None = None):
@@ -142,7 +155,7 @@ def _kwin_scripting(method: str, args=None, reply: str | None = None):
 
 
 def kwin_corner(on: bool) -> None:
-    """Loads (or unloads) the bottom-left placement script into the running KWin."""
+    """Loads (or unloads) the bottom-right placement script into the running KWin."""
     try:
         loaded = _kwin_scripting("isScriptLoaded", GLib.Variant("(s)", (KWIN_SCRIPT_NAME,)), "(b)").unpack()[0]
         if loaded:
@@ -2043,7 +2056,7 @@ class Window(Adw.ApplicationWindow):
         self.card_row.connect("notify::active", lambda r, _: self.app.set_card_volume(r.get_active()))
         group.add(self.card_row)
         if is_kde():
-            near = Adw.SwitchRow(title="Open in the corner", subtitle="Bottom left, on the taskbar")
+            near = Adw.SwitchRow(title="Open in the corner", subtitle="Bottom right, on the taskbar by the clock (also after full screen)")
             near.set_active(self.app.settings.get("tray_popup", True))
             near.connect("notify::active", lambda r, _: self.app.set_tray_popup(r.get_active()))
             group.add(near)
@@ -2073,6 +2086,12 @@ class Window(Adw.ApplicationWindow):
         self.shade_scale.connect("value-changed", lambda sc: self.app.set_look(shade=round(sc.get_value())))
         shade.add_suffix(self.shade_scale)
         group.add(shade)
+        start_full = Adw.SwitchRow(title="Start in full screen",
+                                   subtitle="Opens filling the screen; a double click makes it a window"
+                                   + (" in the bottom-right corner" if is_kde() else ""), subtitle_lines=0)
+        start_full.set_active(self.app.settings.get("start_full", True))
+        start_full.connect("notify::active", lambda r, _: self.app.set_look(start_full=r.get_active()))
+        group.add(start_full)
         auto_up = Adw.SwitchRow(title="Update by itself",
                                 subtitle="Looks for a new version every 5 minutes, installs it and restarts",
                                 subtitle_lines=0)
@@ -2482,6 +2501,8 @@ class App(Adw.Application):
     def show_window(self):
         if not self.win:
             self.win = Window(self)
+            if self.settings.get("start_full", True):
+                self.win.fullscreen()  # opens in full screen; a double click makes it a window (in the corner)
         self.win.minimised = False
         self.win.set_visible(True)
         self.win.present()
