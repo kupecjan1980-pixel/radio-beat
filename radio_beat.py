@@ -420,7 +420,7 @@ class Mpv:
         self.proc = subprocess.Popen(
             # --load-scripts=no: no MPRIS plugin, the app shows itself as the player (Mpris)
             [*cmd, "--idle=yes", "--no-video", "--load-scripts=no", "--no-terminal", "--force-window=no",
-             "--title=Rádio Beat", f"--input-ipc-server={self.sock_path}",
+             "--title=Rádio Beat", f"--audio-client-name={CLIENT_NAME}", f"--input-ipc-server={self.sock_path}",
              "--cache=yes", "--demuxer-max-bytes=4MiB", "--network-timeout=15",
              # let ffmpeg pick a dropped HTTP stream up again by itself
              "--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=5",
@@ -485,6 +485,103 @@ class Mpv:
             self.proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+
+
+# --- sound card volume ---------------------------------------------------------------
+
+CLIENT_NAME = "radio-beat"  # mpv's audio stream name (--audio-client-name), to find it among the streams
+
+
+class CardVolume:
+    """The volume of the sound card Rádio Beat plays on (its PipeWire/PulseAudio sink), both ways: set() changes
+    it, and its own changes (a volume knob on the card, the desktop's volume) come to on_change(percent, card name)
+    on the main loop. Through pactl: 'pactl subscribe' says when, 'pactl -f json list' reads it."""
+
+    def __init__(self, on_change):
+        self.on_change = on_change
+        self.ok = shutil.which("pactl") is not None
+        self.sink = None  # our stream's sink (index), None: the default one
+        self.running = False
+        self.proc = None
+        self.wake = threading.Event()  # something changed: read the volume again
+        self.want = None  # percent waiting to be set
+        self.want_ev = threading.Event()
+
+    def start(self) -> None:
+        if self.ok and not self.running:
+            self.running = True
+            for f in (self._listen, self._reader, self._setter):
+                threading.Thread(target=f, daemon=True).start()
+
+    def stop(self) -> None:
+        self.running = False
+        self.wake.set()
+        self.want_ev.set()
+        if self.proc:
+            self.proc.kill()
+
+    def set(self, v: int) -> None:
+        self.want = v
+        self.want_ev.set()
+
+    def _listen(self) -> None:
+        while self.running:
+            try:
+                self.proc = proc = subprocess.Popen(["pactl", "subscribe"], stdin=subprocess.DEVNULL,
+                                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            except OSError:
+                self.ok = False
+                return
+            self.wake.set()
+            for line in proc.stdout:
+                if " on sink" in line or " on server" in line:  # sinks, streams (sink-input), default sink
+                    self.wake.set()
+            proc.wait()
+            time.sleep(2)  # the sound server restarted: subscribe again
+
+    def _pactl(self, *args) -> str:
+        return subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=5).stdout
+
+    def _read(self):
+        try:
+            mine = [i for i in json.loads(self._pactl("-f", "json", "list", "sink-inputs"))
+                    if i["properties"].get("application.name") == CLIENT_NAME]
+            sinks = json.loads(self._pactl("-f", "json", "list", "sinks"))
+            default = self._pactl("get-default-sink").strip()
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            return None
+        sink = next((s for s in sinks if mine and s["index"] == mine[0]["sink"]), None) \
+            or next((s for s in sinks if s["name"] == default), None)
+        if not sink:
+            return None
+        self.sink = str(sink["index"]) if mine else None
+        vols = [int(c["value_percent"].rstrip("%")) for c in sink["volume"].values()] or [0]
+        return (0 if sink["mute"] else round(sum(vols) / len(vols))), sink.get("description", "")
+
+    def _reader(self) -> None:
+        last = None
+        while self.running:
+            self.wake.wait()
+            self.wake.clear()
+            got = self._read() if self.running else None
+            if got and got != last:
+                last = got
+                GLib.idle_add(self.on_change, *got)
+            time.sleep(0.05)  # a knob turn comes as a burst of changes: one read per 50 ms
+
+    def _setter(self) -> None:
+        while self.running:
+            self.want_ev.wait()
+            self.want_ev.clear()
+            v, self.want = self.want, None
+            if v is None or not self.running:
+                continue
+            target = self.sink or "@DEFAULT_SINK@"
+            try:
+                self._pactl("set-sink-volume", target, f"{v}%")
+                self._pactl("set-sink-mute", target, "0")
+            except (OSError, subprocess.SubprocessError):
+                pass
 
 
 # --- tray icon (StatusNotifierItem) ----------------------------------------------
@@ -601,7 +698,7 @@ class Mpris:
                 "Rate": GLib.Variant("d", 1.0), "MinimumRate": GLib.Variant("d", 1.0),
                 "MaximumRate": GLib.Variant("d", 1.0),
                 "Metadata": GLib.Variant("a{sv}", self._metadata()),
-                "Volume": GLib.Variant("d", a.settings["volume"] / 100),
+                "Volume": GLib.Variant("d", a.volume_now() / 100),
                 "Position": GLib.Variant("x", 0),
                 "CanGoNext": GLib.Variant("b", False), "CanGoPrevious": GLib.Variant("b", False),
                 "CanPlay": GLib.Variant("b", True), "CanPause": GLib.Variant("b", True),
@@ -1741,7 +1838,7 @@ class Window(Adw.ApplicationWindow):
         self.vol = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
         self.vol.set_hexpand(True)
         self.vol.set_valign(Gtk.Align.CENTER)
-        self.vol.set_value(app.settings["volume"])
+        self.vol.set_value(app.volume_now())
         self.vol.connect("value-changed", lambda s: app.set_volume(s.get_value()))
         controls.append(self.play_btn)
         controls.append(stop)
@@ -1775,6 +1872,11 @@ class Window(Adw.ApplicationWindow):
         auto.set_active(autostart_on())
         auto.connect("notify::active", lambda r, _: set_autostart(r.get_active()))
         group.add(auto)
+        self.card_row = Adw.SwitchRow(title="Volume on the sound card", subtitle=self.app.card_text(),
+                                      subtitle_lines=0, sensitive=self.app.card.ok)
+        self.card_row.set_active(self.app.card_on())
+        self.card_row.connect("notify::active", lambda r, _: self.app.set_card_volume(r.get_active()))
+        group.add(self.card_row)
         if is_kde():
             near = Adw.SwitchRow(title="Open in the corner", subtitle="Bottom right, on the taskbar")
             near.set_active(self.app.settings.get("tray_popup", True))
@@ -2050,8 +2152,9 @@ class Window(Adw.ApplicationWindow):
         self.update_btn.set_label("Update" if a.update_ready else "Check")
         self.update_btn.set_sensitive(not a.update_busy)
         (self.update_btn.add_css_class if a.update_ready else self.update_btn.remove_css_class)("suggested-action")
-        if abs(self.vol.get_value() - a.settings["volume"]) >= 1:
-            self.vol.set_value(a.settings["volume"])
+        if abs(self.vol.get_value() - a.volume_now()) >= 1:
+            self.vol.set_value(a.volume_now())
+        self.card_row.set_subtitle(a.card_text())
 
 
 class App(Adw.Application):
@@ -2082,6 +2185,10 @@ class App(Adw.Application):
         self.logo_tex = None
         self.refined = None  # (before, after) of the last enhancing step: redrawn in, not morphed
         self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
+        self.card = CardVolume(self._card_changed)
+        self.card_vol = None  # the sound card's volume, percent (card_on)
+        self.card_name = ""
+        self.card_set_at = 0.0  # when the slider last set it
         self.upscale_src: dict[str, tuple[str, bytes]] = {}  # kind -> (key, picture bytes), for after the install
         self.orig_tex: dict[str, object] = {}  # kind -> the picture as it came
         self.picture_text = "No picture yet"
@@ -2119,6 +2226,8 @@ class App(Adw.Application):
                     self.upscale_src["logo"] = (p, f.read())
                 break
         threading.Thread(target=self._install_upscaler, daemon=True).start()
+        if self.card_on():
+            self.card.start()
         self.start_mpv()
         GLib.timeout_add_seconds(5, self._watchdog)
         self._programme()
@@ -2229,7 +2338,7 @@ class App(Adw.Application):
     def start_mpv(self):
         try:
             self.mpv = Mpv(self.on_prop)
-            self.mpv.volume(self.settings["volume"])
+            self.mpv.volume(100 if self.card_on() else self.settings["volume"])
             self.error = None
         except (OSError, RuntimeError) as e:
             self.mpv, self.error = None, str(e)
@@ -2295,16 +2404,56 @@ class App(Adw.Application):
         save_settings(self.settings)
         self.play()
 
+    # volume: Rádio Beat's own (mpv), or the sound card's (card_on: mpv stays at 100 %, a knob on the card moves the slider)
+    def card_on(self) -> bool:
+        return self.card.ok and self.settings.get("card_volume", True)
+
+    def card_text(self) -> str:
+        if not self.card.ok:
+            return "Off: needs pactl (the PipeWire/PulseAudio sound tools)"
+        if not self.card_on():
+            return "Off: the slider is Rádio Beat's own volume; on: the sound card's, so its volume knob moves it too"
+        return (f"The slider is the volume of {self.card_name or 'the sound card'}: its volume knob (or the "
+                "desktop's volume) moves the slider, the slider turns the card. Other apps on it change too")
+
+    def volume_now(self) -> int:
+        return self.card_vol if self.card_on() and self.card_vol is not None else self.settings["volume"]
+
     def set_volume(self, v: float):
         v = max(0, min(100, int(v)))
-        if v != self.settings["volume"]:
+        if self.card_on():
+            if v != self.card_vol:
+                self.card_vol, self.card_set_at = v, time.monotonic()
+                self.card.set(v)
+        elif v != self.settings["volume"]:
             self.settings["volume"] = v
             if self.mpv:
                 self.mpv.volume(v)
             save_settings(self.settings)
 
     def nudge_volume(self, d: int):
-        self.set_volume(self.settings["volume"] + d)
+        self.set_volume(self.volume_now() + d)
+        self.update()
+
+    def _card_changed(self, v: int, name: str):
+        self.card_name = name
+        # the echo of the slider's own changes would pull it back while it's being dragged
+        if time.monotonic() - self.card_set_at > 0.6 or self.card_vol is None:
+            self.card_vol = min(100, v)
+        self.update()
+        return False
+
+    def set_card_volume(self, on: bool):
+        self.settings["card_volume"] = on
+        save_settings(self.settings)
+        if on:
+            self.card.start()
+        else:
+            self.card.stop()
+            self.card = CardVolume(self._card_changed)  # its threads end; a new one for turning it on again
+            self.card_vol = None
+        if self.mpv:
+            self.mpv.volume(100 if on else self.settings["volume"])
         self.update()
 
     def quit_all(self):
