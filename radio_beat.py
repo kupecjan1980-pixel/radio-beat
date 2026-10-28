@@ -1545,25 +1545,27 @@ CSS = b"""
 .show-sub { opacity: 0.8; }
 .show-next { opacity: 0.7; }
 .overlay-header button { background: rgba(0,0,0,0.45); color: white; }
+.overlay-header .glass-disc > button, .overlay-header .glass-head > menubutton > button { background: none; box-shadow: none; }
+.overlay-header .glass-disc > button:hover, .overlay-header .glass-head > menubutton > button:hover { background: rgba(255,255,255,0.10); }
 .overlay-header .top-logo { border-radius: 8px; margin-left: 4px; }
-.overlay-header button.close-button { background: #E3051A; color: white; }
+.overlay-header button.close-button { color: white; }
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
 popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
 popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
 .overlay-header:backdrop, .overlay-header:backdrop * { opacity: 1; filter: none; }  /* not faded when unfocused */
-.overlay-header button.close-button:hover { background: #F21C30; }
+
 /* Under the mouse: pause, stop, the speaker and close pump once a second; the gear ticks round like a watch's
    hand, twice a second (12 steps a turn). */
 @keyframes pump { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
 @keyframes tick { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.glass-disc:hover, .overlay-header button.close-button:hover { animation: pump 1s ease-in-out infinite; }
+.glass-disc:hover { animation: pump 1s ease-in-out infinite; }
 /* The volume slider pumps too, gently (it's wide: it would run into the speaker). */
 @keyframes pump-wide { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04, 1.25); } }
 scale.vol-slider:hover { animation: pump-wide 1s ease-in-out infinite; }
 /* The quality list's arrow bobs up and down (never turns). */
 @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
 row:hover .bob-arrow { animation: bob 900ms ease-in-out infinite; }
-.overlay-header menubutton:hover image { animation: tick 500ms steps(12) infinite; }
+.overlay-header menubutton > button:hover image { animation: tick 500ms steps(12) infinite; }  /* its own icon only, not the menu's */
 """
 
 
@@ -2135,8 +2137,18 @@ class Window(Adw.ApplicationWindow):
         close = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="Close (keeps playing in the tray)")
         close.connect("clicked", lambda *_: self.close())
         close.add_css_class("close-button")
-        header.pack_end(close)
-        header.pack_end(self._settings_button())
+        # Close and the gear in glass tiles like the dishes below (close in red glass).
+        self.head_glass = []
+        for child, color, cls in ((close, (227, 5, 26, 0.6), "glass-disc"), (self._settings_button(), None, "glass-head")):
+            tile = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER, hexpand=False)
+            tile.add_css_class(cls)
+            tile.mag, tile.concave, tile.depth, tile.color, tile.sharp_bars = 1.3, True, False, color, True
+            tile.set_homogeneous(True)
+            tile.append(child)
+            self.backdrop.watchers.append(tile)
+            self.cover.watchers.append(tile)
+            self.head_glass.append(tile)
+            header.pack_end(tile)
         self.logo = FlagLogo(34)  # the (enhanced) logo itself, drawn sharp; waves under the mouse
         self.logo.add_css_class("top-logo")
         header.pack_start(self.logo)
@@ -2165,6 +2177,8 @@ class Window(Adw.ApplicationWindow):
         self.show_card = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], spacing=12, margin_bottom=10,
                                    halign=Gtk.Align.END)
         self.show_card.scrim = scrim
+        for tile in self.head_glass:
+            tile.scrim = scrim
         self.backdrop.watchers.append(self.show_card)
         self.cover.watchers.append(self.show_card)
         self.show_card.add_css_class("show-card")
@@ -2556,6 +2570,10 @@ class Window(Adw.ApplicationWindow):
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
         self.logo.set_pixel_size(int(34 * f))
+        for tile in self.head_glass:
+            tile.radius = 12 * f
+            tile.set_size_request(int(34 * f), int(34 * f))
+            tile.queue_draw()
         for disc, size in zip(self.discs, (68, 56, 46)):  # pause, stop (a little smaller), speaker (smaller still)
             disc.radius = size * f / 2
             disc.set_size_request(int(size * f), int(size * f))
@@ -2584,7 +2602,7 @@ class Window(Adw.ApplicationWindow):
         if a.settings.get("font", "beat") == "beat" and a.fonts_ok:
             css += BEAT_CSS
         self.look_css.load_from_data(css.encode())
-        for card in (self.show_card, *self.discs):
+        for card in (self.show_card, *self.discs, *self.head_glass):
             card.shade = k
             card.queue_draw()
 
