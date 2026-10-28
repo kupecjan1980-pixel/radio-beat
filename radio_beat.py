@@ -18,6 +18,7 @@ import math
 import os
 import shutil
 import signal
+import random
 import re
 import socket
 import subprocess
@@ -35,7 +36,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gsk", "4.0")
-from gi.repository import Adw, Gdk, GLib, Gio, Graphene, Gsk, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gio, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
 APP_ID = "local.hanis.RadioBeat"
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -244,6 +245,9 @@ def update_status() -> tuple[bool | None, str]:
             mine = f.read().strip()
     except OSError:
         mine = ""
+    if not re.fullmatch(r"[0-9a-f]{7,40}", mine):
+        # not an installed copy (no VERSION: run from the source folder): never replaced by an update
+        return False, "Running from the source folder: not updated by itself"
     if mine == sha:
         return False, f"Up to date ({info['committer']['date'][:10]})"
     # Only forwards: GitHub's commit must come after the installed one (a newer local build stays).
@@ -345,11 +349,13 @@ def lookup(artist: str, song: str) -> dict | None:
 MB = "https://musicbrainz.org/ws/2"
 MB_UA = "RadioBeat/1.0 ( https://github.com/kupecjan1980-pixel/radio-beat )"  # MusicBrainz wants a real one
 FACTS_CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat",
-                           "facts.json")
+                           "facts-cs.json")
 _mb_lock = threading.Lock()
 _mb_last = [0.0]
-MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
-          "November", "December")
+MONTHS = ("ledna", "února", "března", "dubna", "května", "června", "července", "srpna", "září", "října",
+          "listopadu", "prosince")  # 8. listopadu 1971
+MONTHS_1 = ("leden", "únor", "březen", "duben", "květen", "červen", "červenec", "srpen", "září", "říjen",
+            "listopad", "prosinec")  # listopad 1971
 
 
 def _mb(path: str):
@@ -375,9 +381,9 @@ def _date(d: str) -> str:
     parts = d.split("-")
     try:
         if len(parts) == 3:
-            return f"{int(parts[2])} {MONTHS[int(parts[1]) - 1]} {parts[0]}"
+            return f"{int(parts[2])}. {MONTHS[int(parts[1]) - 1]} {parts[0]}"
         if len(parts) == 2:
-            return f"{MONTHS[int(parts[1]) - 1]} {parts[0]}"
+            return f"{MONTHS_1[int(parts[1]) - 1]} {parts[0]}"
     except (ValueError, IndexError):
         pass
     return parts[0]
@@ -440,8 +446,8 @@ def song_facts(artist: str, song: str) -> str:
         places = _places((got or {}).get("relations"))
         if places:
             break
-    bits = ([f"First released {_date(first)}"] if first else []) + \
-           ([f"Recorded at {' and '.join(places[:2])}"] if places else [])
+    bits = ([f"Poprvé vydáno {_date(first)}"] if first else []) + \
+           ([f"Nahráno v {' a '.join(places[:2])}"] if places else [])
     text = " · ".join(bits)
     cache[key] = text
     try:
@@ -451,6 +457,163 @@ def song_facts(artist: str, song: str) -> str:
         with open(FACTS_CACHE + ".tmp", "w") as f:
             json.dump(cache, f)
         os.replace(FACTS_CACHE + ".tmp", FACTS_CACHE)
+    except OSError:
+        pass
+    return text
+
+
+# --- about the song (Wikipedia), for the show card's song turn ---------------------------
+
+ABOUT_CACHE = os.path.join(os.path.dirname(FACTS_CACHE), "about-cs.json")
+
+
+def to_czech(text: str) -> str:
+    """English → Czech through MyMemory (a free translation service: the text is sent there); '' if it can't."""
+    out, chunk = [], ""
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if len(chunk) + len(sentence) > 450 and chunk:
+            out.append(chunk)
+            chunk = ""
+        chunk = f"{chunk} {sentence}".strip()
+    if chunk:
+        out.append(chunk)
+    done = []
+    for part in out:
+        try:
+            r = _json(f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(part)}&langpair=en|cs")
+            t = (r.get("responseData") or {}).get("translatedText") or ""
+        except (OSError, ValueError):
+            return ""
+        if not t or "MYMEMORY WARNING" in t.upper():
+            return ""
+        done.append(t)
+    return " ".join(done)
+
+
+# Ostravština (default; a switch for standard Czech): the long vowels short, a few of its words.
+OSTRAVA_WORDS = {"velmi": "fest", "hodně": "fest", "moc": "fest", "dobrý": "fajny", "dobrá": "fajna",
+                 "dobré": "fajne", "dobře": "fajně", "pěkný": "fajny", "pěkná": "fajna", "pěkné": "fajne",
+                 "teď": "ted", "kamarád": "kamoš", "kamarádi": "kamoši", "taky": "tež", "také": "tež"}
+_SHORT = str.maketrans("áéíýúůÁÉÍÝÚŮ", "aeiyuuAEIYUU")
+
+
+def ostrava(text: str) -> str:
+    def word(m):
+        w = m.group(0)
+        o = OSTRAVA_WORDS.get(w.lower())
+        return w if o is None else (o.capitalize() if w[0].isupper() else o)
+    return re.sub(r"\w+", word, text).translate(_SHORT)
+ABOUT_LEN = 700  # characters at most, cut at a sentence's end (more than fits: it scrolls while typed)
+
+
+def _wiki(url: str):
+    req = urllib.request.Request(url, headers={"User-Agent": MB_UA})  # Wikipedia wants one with a contact too
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return json.load(r)
+
+
+def _trim_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= ABOUT_LEN:
+        return text
+    cut = text[:ABOUT_LEN]
+    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    return cut[:end + 1] if end > 80 else cut[:cut.rfind(" ")] + "…"
+
+
+def song_about(artist: str, song: str) -> str:
+    """A few sentences about the song from Wikipedia (English, else Czech): its article's summary, only when it
+    names the artist (so it's this song); '' when there's none. Remembered per song."""
+    key = f"{norm(first_artist(artist))}|{norm(song)}"
+    try:
+        with open(ABOUT_CACHE) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    if key in cache:
+        return cache[key]
+    a, t = norm(first_artist(artist)), norm(song)
+    text, reached = "", False
+    for lang, word in (("cs", "píseň"), ("en", "song")):
+        try:
+            q = urllib.parse.quote(f"{song} {first_artist(artist)} {word}")
+            hits = _wiki(f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch={q}"
+                         "&format=json&srlimit=5")["query"]["search"]
+            reached = True
+            for hit in hits:
+                if t not in norm(hit["title"]):
+                    continue
+                summary = _wiki(f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/"
+                                f"{urllib.parse.quote(hit['title'].replace(' ', '_'))}")
+                extract = summary.get("extract", "")
+                if a and a in norm(extract):
+                    text = _trim_text(extract) if lang == "cs" else _trim_text(to_czech(extract) or "")
+                    break
+        except (OSError, ValueError, KeyError):
+            continue
+        if text:
+            break
+    if not reached:
+        return ""  # offline: asked again next time
+    cache[key] = text
+    try:
+        os.makedirs(os.path.dirname(ABOUT_CACHE), exist_ok=True)
+        if len(cache) > 3000:
+            cache = dict(list(cache.items())[-2000:])
+        with open(ABOUT_CACHE + ".tmp", "w") as f:
+            json.dump(cache, f)
+        os.replace(ABOUT_CACHE + ".tmp", ABOUT_CACHE)
+    except OSError:
+        pass
+    return text
+
+
+MUSIC_WORDS = ("band", "singer", "musician", "group", "rock", "songwriter", "guitarist", "drummer", "rapper",
+               "skupina", "zpěvák", "zpěvačka", "hudeb", "kapela", "písničkář", "kytarist")
+HOST_WORDS = ("moderátor", "moderátorka", "rozhlas", "radio", "rádio", "presenter", "broadcaster", "dj ", "kritik",
+              "critic", "publicist", "novinář", "hudebník", "zpěvák", "zpěvačka", "musician", "singer", "journalist")
+
+
+def name_about(name: str, words: tuple, langs=("en", "cs")) -> str:
+    """A few sentences (Czech) from the Wikipedia article named after `name` (a band, a host), only when it
+    reads like one of `words`; '' when there's none. Remembered."""
+    key = f"name|{norm(name)}"
+    try:
+        with open(ABOUT_CACHE) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    if key in cache:
+        return cache[key]
+    n, text, reached = norm(name), "", False
+    for lang in langs:
+        try:
+            hits = _wiki(f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search"
+                         f"&srsearch={urllib.parse.quote(name)}&format=json&srlimit=10")["query"]["search"]
+            reached = True
+            for hit in hits:
+                if norm(re.sub(r"\(.*?\)", "", hit["title"])) != n:
+                    continue
+                summary = _wiki(f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/"
+                                f"{urllib.parse.quote(hit['title'].replace(' ', '_'))}")
+                if summary.get("type") == "disambiguation":  # "may refer to": the right one is further down
+                    continue
+                extract = summary.get("extract", "")
+                if any(w in extract.lower() for w in words):
+                    text = _trim_text(extract) if lang == "cs" else _trim_text(to_czech(extract) or "")
+                    break
+        except (OSError, ValueError, KeyError):
+            continue
+        if text:
+            break
+    if not reached:
+        return ""
+    cache[key] = text
+    try:
+        os.makedirs(os.path.dirname(ABOUT_CACHE), exist_ok=True)
+        with open(ABOUT_CACHE + ".tmp", "w") as f:
+            json.dump(cache, f)
+        os.replace(ABOUT_CACHE + ".tmp", ABOUT_CACHE)
     except OSError:
         pass
     return text
@@ -1180,12 +1343,20 @@ class Enhancer:
                     self._signal(signal.SIGCONT)
 
     def _spawn(self, cmd: list) -> subprocess.Popen:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        # ends with the app (it may be stopped by the duty cycle: it would wait for good)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                                preexec_fn=_die_with_parent)
         with self.plock:
             self.procs.add(proc)
             if self.held:
                 os.kill(proc.pid, signal.SIGSTOP)
         return proc
+
+    def stop_all(self) -> None:
+        """Quitting: whatever runs ends (let go first if it was stopped)."""
+        with self.plock:
+            self._signal(signal.SIGCONT)
+            self._signal(signal.SIGKILL)
 
     def _reap(self, proc) -> None:
         with self.plock:
@@ -2639,7 +2810,7 @@ class Window(Adw.ApplicationWindow):
         self.show_card.append(self.show_pic)
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER, hexpand=True)
         top = Gtk.Box(spacing=8, margin_bottom=4)
-        badge = Gtk.Label(label="ON AIR", valign=Gtk.Align.START)
+        badge = self.badge = Gtk.Label(label="ON AIR", valign=Gtk.Align.START)
         badge.add_css_class("on-air")
         # Text widths capped (in characters, so they grow with the text in full
         # screen): a wrapping label would otherwise ask for its whole text's width.
@@ -2651,7 +2822,11 @@ class Window(Adw.ApplicationWindow):
         self.show_sub.add_css_class("show-sub")
         self.show_next = Gtk.Label(xalign=0, wrap=True, lines=2, ellipsize=3, max_width_chars=38)
         self.show_next.add_css_class("show-next")
-        for w in (top, self.show_sub, self.show_next):
+        # The show's text, or the typed one (it scrolls up as it's typed when there's more than 5 lines).
+        self.show_sub.set_valign(Gtk.Align.START)
+        self.sub_scroll = Gtk.ScrolledWindow(child=self.show_sub, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                             vscrollbar_policy=Gtk.PolicyType.EXTERNAL, propagate_natural_height=True)
+        for w in (top, self.sub_scroll, self.show_next):
             text.append(w)
         self.show_card.append(text)
         self.show_card_text = text
@@ -2734,6 +2909,10 @@ class Window(Adw.ApplicationWindow):
         self._apply_scale()
         self.apply_look()
         self.connect("close-request", self.on_close)
+        self.card_turn, self._turn_secs = "show", 20.0
+        self._type_id = 0
+        self._typing_text = ""
+        self._turn_id = GLib.timeout_add(20000, self._turn)
         self.minimised = False
         self.connect("notify::is-active", lambda w, _: w.is_active() and setattr(w, "minimised", False))
         self.refresh()
@@ -2802,6 +2981,12 @@ class Window(Adw.ApplicationWindow):
         self.npu_row.set_active(self.app.settings.get("npu", False))
         self.npu_row.connect("notify::active", lambda r, _: self.app.set_npu(r.get_active()))
         group.add(self.npu_row)
+        dialect = Adw.SwitchRow(title="Ostravština",
+                                subtitle="The texts about the song, the artist and the show in the Ostrava dialect "
+                                         "(short vowels, fest, fajne); off: standard Czech", subtitle_lines=0)
+        dialect.set_active(self.app.settings.get("ostrava", True))
+        dialect.connect("notify::active", lambda r, _: (self.app.set_look(ostrava=r.get_active()), self.app.update()))
+        group.add(dialect)
         style = Adw.SwitchRow(title="Beat Radio text style",
                               subtitle="Fonts like the station logo's (Anton, Oswald); off: the normal ones"
                               if self.app.fonts_ok else "Off: its fonts are missing (fonts/ folder)",
@@ -2988,6 +3173,77 @@ class Window(Adw.ApplicationWindow):
             self.queue_resize()
         return False
 
+    # The show card takes turns, half the time each: the programme (ON AIR) and the song playing (NOW PLAYING:
+    # a few sentences about it, typed out letter by letter at a fast typist's pace).
+    TYPE_MS = 115  # a letter (about 100 words a minute), a little uneven like a hand's
+    READ_S = 8  # left to read once typed
+
+    def _turn(self) -> bool:
+        a = self.app
+        self._turn_id = 0
+        turn = a.turn_content()
+        if self.card_turn == "song" or not turn:
+            self.card_turn = "show"
+            self._stop_typing()
+            secs = self._turn_secs
+        else:
+            self.card_turn = "song"
+            text = turn[2]
+            self._turn_secs = max(15.0, len(text) * self.TYPE_MS / 1000 * 1.25 + self.READ_S)
+            secs = self._turn_secs
+            self._start_typing(text)
+        self.refresh()
+        self._turn_id = GLib.timeout_add(int(secs * 1000), self._turn)
+        return False
+
+    def _start_typing(self, text: str) -> None:
+        self._stop_typing()
+        lab = self.show_sub
+        lab.set_lines(-1)
+        lab.set_ellipsize(Pango.EllipsizeMode.NONE)
+        # Room for all of it from the first letter (the card doesn't grow line by line), at most 5 lines: more
+        # scrolls up as it's typed.
+        w = lab.get_width() or self.show_card_text.get_width() or 300
+        lab.set_text("X")
+        line = lab.measure(Gtk.Orientation.VERTICAL, w)[1]
+        lab.set_text(text)
+        full = lab.measure(Gtk.Orientation.VERTICAL, w)[1]
+        self.sub_scroll.set_size_request(-1, min(full, line * 5))
+        self._typed, self._typing_text = 0, text
+        lab.set_text("")
+        self._type()
+
+    def _type(self) -> bool:
+        self._type_id = 0
+        text = self._typing_text
+        if self.card_turn != "song" or not text:
+            return False
+        self._typed += 1
+        done = self._typed >= len(text)
+        self.show_sub.set_text(text[:self._typed] + ("" if done else "▌"))
+        GLib.idle_add(self._scroll_typed)
+        if done:
+            return False
+        ch = text[self._typed - 1]
+        delay = self.TYPE_MS * random.uniform(0.6, 1.4) + (260 if ch in ".!?" else 120 if ch in ",;:" else 0)
+        self._type_id = GLib.timeout_add(int(delay), self._type)
+        return False
+
+    def _scroll_typed(self) -> bool:
+        adj = self.sub_scroll.get_vadjustment()
+        adj.set_value(max(0.0, adj.get_upper() - adj.get_page_size()))  # the line being typed stays in view
+        return False
+
+    def _stop_typing(self) -> None:
+        if getattr(self, "_type_id", 0):
+            GLib.source_remove(self._type_id)
+        self._type_id = 0
+        self._typing_text = ""
+        self.show_sub.set_lines(5)
+        self.show_sub.set_ellipsize(Pango.EllipsizeMode.END)
+        self.sub_scroll.set_size_request(-1, -1)
+        self.sub_scroll.get_vadjustment().set_value(0)
+
     def blink(self) -> None:
         """A new song: its lines and the show card flash briefly."""
         labels = (self.song, self.artist, self.album, self.show_title, self.show_sub, self.show_next)
@@ -3113,7 +3369,7 @@ class Window(Adw.ApplicationWindow):
         self.artist.set_text(artist)
         self.album.set_text(info.get("album") or "")
         self.album.set_visible(bool(info.get("album")))
-        self.facts.set_text(a.facts)
+        self.facts.set_text(a.cz(a.facts))
         self.facts.set_visible(bool(a.facts))
         if a.logo_tex is not None and self.logo.get_paintable() is not a.logo_tex:
             self.logo.set_from_paintable(a.logo_tex)
@@ -3123,15 +3379,27 @@ class Window(Adw.ApplicationWindow):
         self.cover.set_paintable(pic, redraw)
         self.backdrop.set_paintable(pic, redraw)
         cur, nxt = on_air(a.schedule, time.localtime())
-        self.show_card.set_visible(cur is not None)
-        if cur:
+        turn = a.turn_content() if self.card_turn == "song" else None
+        self.show_card.set_visible(cur is not None or turn is not None)
+        self.badge.set_text(a.badge(turn[0]) if turn else "ON AIR")
+        if turn:
+            self.show_title.set_text(turn[1])
+            facts = a.cz(a.facts) if turn[0] == "NOW PLAYING" else ""
+            self.show_next.set_text(facts)
+            self.show_next.set_visible(bool(facts))
+            self.show_sub.set_visible(True)  # its text is typed (_type)
+            self.show_pic.set_from_paintable(turn[3])
+        elif cur:
             self.show_title.set_text(cur["title"])
             host = a.host if a.host and norm(a.host) != norm(cur["title"]) else None
             self.show_sub.set_text(" · ".join(x for x in (host, cur["desc"]) if x))
             self.show_sub.set_visible(bool(host or cur["desc"]))
             if nxt:
                 when = f'{nxt["start"] // 60}:{nxt["start"] % 60:02d}'
-                self.show_next.set_text(f'Next {nxt["day"] + " " if nxt["day"] else ""}{when} · {nxt["title"]}')
+                then = "Potym" if a.settings.get("ostrava", True) else "Potom"
+                self.show_next.set_text(a.cz(f'{then} {nxt["day"] + " " if nxt["day"] else ""}{when} · {nxt["title"]}')
+                                        if a.settings.get("ostrava", True) else
+                                        f'{then} {nxt["day"] + " " if nxt["day"] else ""}{when} · {nxt["title"]}')
             self.show_next.set_visible(nxt is not None)
             tex = a.show_pics.get(cur["img"]) if cur["img"] else None
             self.show_pic.set_from_paintable(tex or a.logo_tex)
@@ -3184,6 +3452,8 @@ class App(Adw.Application):
         self.show_done: set[str] = set()  # show pictures sent for enhancing
         self.codec = self.bitrate = None
         self.facts = ""  # first release, where it was recorded
+        self.about = ""  # a few sentences about the song (Wikipedia)
+        self.band_about = self.host_about = ""  # 'Did you know?' about the artist, about who's on air
         self.cover_tex = None
         self.logo_tex = None
         self.refined = None  # (before, after) of the last enhancing step: redrawn in, not morphed
@@ -3530,6 +3800,7 @@ class App(Adw.Application):
         self.quitting = True
         if self._vol_save:  # a volume change not saved yet
             self._save_volume()
+        self.enhancer.stop_all()
         if self.mpv:
             self.mpv.quit()
         self.release()
@@ -3605,10 +3876,18 @@ class App(Adw.Application):
     def _programme_got(self, sched, host):
         if sched:
             self.schedule = sched
-        if host:
-            self.host = host
+        if host and host != self.host:
+            self.host, self.host_about = host, ""
+            threading.Thread(target=lambda h=host: GLib.idle_add(self._got_host_about, h,
+                                                                 name_about(h, HOST_WORDS, ("cs", "en"))),
+                             daemon=True).start()
         self._show_pic()
         self.update()
+        return False
+
+    def _got_host_about(self, host, text):
+        if host == self.host:
+            self.host_about = text
         return False
 
     def _show_pic(self):
@@ -3668,7 +3947,7 @@ class App(Adw.Application):
         # The last cover stays up until the new one is found (no logo flashing
         # in between); the logo only when there's no song or no cover.
         self.info = None
-        self.facts = ""
+        self.facts = self.about = self.band_about = ""
         if not parts:
             self.cover_tex = None
         self.enhancer.drop("cover")
@@ -3687,6 +3966,41 @@ class App(Adw.Application):
     def _facts(self, lid, artist, song):
         text = song_facts(artist, song)
         GLib.idle_add(self._got_facts, lid, text)
+        about = song_about(artist, song)
+        band = "" if about else name_about(first_artist(artist), MUSIC_WORDS)
+        GLib.idle_add(self._got_about, lid, about, band)
+
+    def _got_about(self, lid, text, band):
+        if lid == self._lookup_id:
+            self.about, self.band_about = text, band
+            self.update()
+        return False
+
+    def cz(self, text: str) -> str:
+        """Czech as shown: in ostravština unless that's switched off ('Víte, že…' becomes 'Viš co?')."""
+        if not self.settings.get("ostrava", True):
+            return text
+        return "Viš co? " if text == "Víte, že… " else ostrava(text)
+
+    BADGES = {"NOW PLAYING": ("PRÁVĚ HRAJE", "PRAVĚ HRAJE"), "DID YOU KNOW": ("VÍTE, ŽE…", "VIŠ CO?")}
+
+    def badge(self, name: str) -> str:
+        cs = self.BADGES.get(name)
+        return name if cs is None else cs[1 if self.settings.get("ostrava", True) else 0]
+
+    def turn_content(self):
+        """What the show card's second turn shows: (badge, title, text, picture) or None. The song (Wikipedia
+        about it), else 'Did you know?' about the artist, else about who's on air."""
+        info = self.info or {}
+        if self.about:
+            return "NOW PLAYING", info.get("title") or self.song or "", self.cz(self.about), \
+                self.cover_tex or self.logo_tex
+        if self.band_about:
+            return "DID YOU KNOW", info.get("artist") or first_artist(self.artist_raw or ""), \
+                self.cz("Víte, že… ") + self.cz(self.band_about), self.cover_tex or self.logo_tex
+        if self.host_about and self.host:
+            return "DID YOU KNOW", self.host, self.cz("Víte, že… ") + self.cz(self.host_about), self.logo_tex
+        return None
 
     def _got_facts(self, lid, text):
         if lid == self._lookup_id:
