@@ -1754,6 +1754,23 @@ class GlassCard(Gtk.Box):
         self.draw_glass(snap)
         Gtk.Box.do_snapshot(self, snap)
 
+    def draw_plain(self, snap) -> None:
+        """What lies under the card, as if it weren't there (the cover, the bars, the panel's shading)."""
+        w, h = self.get_width(), self.get_height()
+        if w <= 0 or h <= 0:
+            return
+        snap.push_rounded_clip(self._rounded(0, 0, w, h, self.radius))
+        self._behind(snap, w, h, 1.0, 1.0)
+        ok, sb = self.scrim.compute_bounds(self) if self.scrim else (False, None)
+        if ok:
+            k = self.shade
+            snap.append_linear_gradient(Graphene.Rect().init(0, 0, w, h),
+                                        Graphene.Point().init(0, sb.get_y() + sb.get_height()),
+                                        Graphene.Point().init(0, sb.get_y()),
+                                        [_stop(0.0, 0, 0, 0, 0.92 * k), _stop(0.55, 0, 0, 0, 0.75 * k),
+                                         _stop(1.0, 0, 0, 0, 0.0)])
+        snap.pop()
+
     def draw_glass(self, snap, shadow: bool = True) -> None:
         """The glass alone (what's inside it drawn by the caller)."""
         w, h = self.get_width(), self.get_height()
@@ -1869,8 +1886,8 @@ class MenuGlass(GlassCard):
         return native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, cw * k, ch * k)) if node else None
 
     def _blur_card_text(self, s, content) -> None:
-        """Under the menu the show card's text is out of focus: its glass drawn again over it, its picture
-        sharp again, the text blurred."""
+        """Under the menu the show card is out of focus, glass, edges and text: what lies under it drawn
+        over the sharp one, then the card again, blurred."""
         card = self.win.show_card
         if not card.get_mapped():
             return
@@ -1879,19 +1896,17 @@ class MenuGlass(GlassCard):
             return
         s.save()
         s.translate(cp)
+        card.draw_plain(s)
+        s.push_blur(5.0)
         card.draw_glass(s, shadow=False)
-        for child, blur in ((self.win.show_pic, 0), (self.win.show_card_text, 5.0)):
+        for child in (self.win.show_pic, self.win.show_card_text):
             ok, p = child.compute_point(card, Graphene.Point().init(0, 0))
-            if not ok:
-                continue
-            s.save()
-            s.translate(p)
-            if blur:
-                s.push_blur(blur)
-            Gtk.WidgetPaintable.new(child).snapshot(s, child.get_width(), child.get_height())
-            if blur:
-                s.pop()
-            s.restore()
+            if ok:
+                s.save()
+                s.translate(p)
+                Gtk.WidgetPaintable.new(child).snapshot(s, child.get_width(), child.get_height())
+                s.restore()
+        s.pop()
         s.restore()
 
     def _behind(self, snap, w: float, h: float, sx: float, sy: float) -> None:
@@ -2100,14 +2115,15 @@ class Window(Adw.ApplicationWindow):
         vol_icon = Gtk.Image(icon_name="audio-volume-high-symbolic", halign=Gtk.Align.CENTER,
                              valign=Gtk.Align.CENTER)
         vol_icon.add_css_class("vol-icon")
-        # Pause, stop and the speaker in round dishes of glass (concave: what's behind looks smaller in them,
-        # more towards the rim), pause in red glass; each a little smaller than the one before.
+        # Pause, stop and the speaker in round dishes of glass, magnifying sharply in the middle, bent at the
+        # rim, lit like a dish; pause in red glass; each a little smaller than the one before.
         self.discs = []
         for child, color, margin in ((self.play_btn, (227, 5, 26, 0.55), 0), (stop, None, 0), (vol_icon, None, 6)):
             disc = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER,
                              halign=Gtk.Align.CENTER, margin_start=margin)
             disc.add_css_class("glass-disc")
-            disc.scrim, disc.mag, disc.concave, disc.depth, disc.color = scrim, 0.86, True, False, color
+            disc.scrim, disc.mag, disc.concave, disc.depth, disc.color = scrim, 1.18, True, False, color
+            disc.sharp_bars = True  # through a magnifier even the bars beside the cover show sharp
             disc.set_hexpand(False)  # only the slider takes the row's spare width
             disc.set_homogeneous(True)  # the button or icon fills the dish, centred
             disc.append(child)
