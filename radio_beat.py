@@ -709,57 +709,98 @@ class Tray:
             self.bus.emit_signal(None, self.PATH, "org.kde.StatusNotifierItem", "NewToolTip", None)
 
 
-# --- AI upscaling (Real-ESRGAN on the GPU) --------------------------------------
+# --- picture enhancing (AI upscaling, sharpening, denoising) -----------------------
 # A cover (or the logo) that full screen would stretch by more than
-# UPSCALE_FROM is redrawn 4x by Real-ESRGAN (ncnn, on the GPU through Vulkan),
-# then fitted to the screen; until it's done the plain one shows. All local:
-# the program and its model (about 47 MB download, checked against its
-# SHA-256) go into ~/.local/share/radio-beat by themselves on the first start.
-# One picture at a time at the lowest priority, small tiles (bigger ones time
-# out on older iGPUs and come back black), results cached by picture and size.
+# UPSCALE_FROM is enhanced in steps, each shown as soon as it's done:
+# 1. upscaled: Real-ESRGAN (ncnn) on the GPU through Vulkan, so any GPU or iGPU
+#    with a Vulkan driver (AMD, NVIDIA, Intel Arc); without one, Lanczos on the CPU;
+# 2. sharpened: CAS (contrast adaptive sharpening) on the upscaled picture;
+# 3. denoised: NL-means (on the GPU when ffmpeg can, else the CPU), then CAS
+#    again: the final picture (denoising before sharpening, as it should be).
+# All local. Real-ESRGAN and its model (47 MB download) go into
+# ~/.local/share/radio-beat by themselves, ffmpeg too (42 MB) when the system
+# has none; downloads are checked against their checksums. Everything keeps
+# itself working: files checked at every start (downloaded again if missing or
+# damaged, retried while offline), the GPU tested with a tiny picture (smaller
+# tiles if it times out, remembered), damaged cache files cleared.
 
 ESR_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
 ESR_SHA256 = "e5aa6eb131234b87c0c51f82b89390f5e3e642b7b70f2b9bbe95b6a285a40c96"
 ESR_MODEL = "realesrgan-x4plus"
+FFMPEG_URL = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
 DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat")
 UPSCALED_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat", "upscaled")
 UPSCALE_FROM = 1.05
 UPSCALED_KEEP = 300  # cached pictures
+SHARPEN = "cas=strength=0.5"
+DENOISE = "nlmeans=s=1.0:p=7:r=15"
+DENOISE_VK = "format=rgba,hwupload,nlmeans_vulkan=s=1.0:p=7:r=15,hwdownload,format=rgba"
+SOFTWARE_GPU = re.compile(r"llvmpipe|lavapipe|swiftshader", re.I)
+DISCRETE_GPU = re.compile(r"nvidia|geforce|rtx|gtx|quadro|radeon (rx|pro)|\bDG2\b|\bBMG\b|arc\(tm\) [ab]\d", re.I)
 
 
-class Upscaler:
-    """Keeps itself working: checks its files at every start (downloads them
-    again if missing or damaged, retrying while offline), tests the GPU with a
-    tiny picture (smaller tiles if the GPU times out, remembered), retries a
-    failed picture once with smaller tiles, and clears damaged cache files.
-    status: one line for the settings menu."""
+def _secs(t: float) -> str:
+    return f"{t:.1f} s" if t < 10 else f"{t:.0f} s"
 
+
+def _download(url: str, timeout: int = 120) -> bytes | None:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except (OSError, ValueError) as e:
+        print(f"enhancer: download of {url} failed: {e}", file=sys.stderr)
+        return None
+
+
+class Enhancer:
     MODEL_SIZES = {"param": 116029, "bin": 33424520}  # realesrgan-x4plus as unpacked
     RETRY = (60, 300, 1800)  # s between download tries, the last one repeats
     TILES = (128, 64, 32)
 
-    def __init__(self, on_status=None):
+    def __init__(self, on_status=None, on_picture=None):
         self.dir = os.path.join(DATA_DIR, "realesrgan")
         self.bin = os.path.join(self.dir, "realesrgan-ncnn-vulkan")
         self.models = os.path.join(self.dir, "models")
         self.tile_file = os.path.join(self.dir, "tile")
-        self.broken = False  # no Vulkan GPU: plain scaling
-        self.tested = False
+        self.own_ffmpeg = os.path.join(DATA_DIR, "ffmpeg", "ffmpeg")
+        self.ffmpeg = shutil.which("ffmpeg")
+        self.ai = None  # True: GPU found and tested; False: no usable GPU; None: not known yet
         self.gpu: str | None = None
+        self.gpu_index: int | None = None
+        self.vk_denoise = False
         self.tile = self._load_tile()
         self.status = "Starting…"
-        self.on_status = on_status
-        self.jobs: dict[str, tuple] = {}  # kind ("logo" / "cover") -> (key, data, size, done)
+        self.on_status, self.on_picture = on_status, on_picture
+        self.jobs: dict[str, tuple] = {}  # kind ("logo" / "cover") -> job
         self.running: tuple | None = None
         self.proc: subprocess.Popen | None = None
         self.wake = threading.Event()
         threading.Thread(target=self._worker, daemon=True).start()
 
-    def _set_status(self, text: str) -> None:
+    # --- status ------------------------------------------------------------------------
+
+    def _say(self, text: str) -> None:
         self.status = text
-        print(f"upscaler: {text}", file=sys.stderr)
+        print(f"enhancer: {text}", file=sys.stderr)
         if self.on_status:
             GLib.idle_add(lambda: (self.on_status(text), False)[1])
+
+    def _say_ready(self) -> None:
+        up = (f"AI upscaling on {self.gpu}" if self.ai
+              else "No GPU for AI upscaling here (no Vulkan driver), so smooth upscaling on the CPU")
+        if self.ffmpeg:
+            where = "the GPU" if self.vk_denoise else "the CPU"
+            self._say(f"On. {up}; sharpening on the CPU; denoising on {where}.")
+        else:
+            self._say(f"On. {up}; sharpening and denoising wait for ffmpeg (downloading).")
+
+    def _picture(self, text: str) -> None:
+        kind = self.running[0] if self.running else "cover"
+        if self.on_picture:
+            GLib.idle_add(lambda: (self.on_picture(text, kind), False)[1])
+
+    # --- files ---------------------------------------------------------------------------
 
     def _load_tile(self) -> int:
         try:
@@ -776,10 +817,7 @@ class Upscaler:
         except OSError:
             pass
 
-    def ready(self) -> bool:
-        return not self.broken and self.tested and self._files_ok()
-
-    def _files_ok(self) -> bool:
+    def _esr_ok(self) -> bool:
         try:
             return (os.access(self.bin, os.X_OK)
                     and all(os.path.getsize(os.path.join(self.models, f"{ESR_MODEL}.{ext}")) == n
@@ -787,22 +825,35 @@ class Upscaler:
         except OSError:
             return False
 
-    # --- upkeep (a thread at start) ---------------------------------------------------
+    def _ffmpeg_ok(self) -> bool:
+        self.ffmpeg = shutil.which("ffmpeg") or (self.own_ffmpeg if os.access(self.own_ffmpeg, os.X_OK) else None)
+        return self.ffmpeg is not None
 
     def maintain(self, then=None) -> None:
-        """Clean up, install if needed (retrying while offline), test the GPU.
-        then() runs on the main thread once it's ready."""
+        """Clean up, install what's missing (retrying while offline), test the
+        GPU. then() runs on the main thread whenever enhancing can do more."""
         self._clean()
         tries = 0
-        while not self._files_ok():
-            self._set_status("Downloading the upscaler (47 MB)…")
-            if self._install():
+        while True:
+            need = [n for n, ok in (("Real-ESRGAN (47 MB)", self._esr_ok()), ("ffmpeg (42 MB)", self._ffmpeg_ok())) if not ok]
+            if self.ai is None and self._esr_ok():
+                self._self_test()
+                self._say_ready()
+                if then:
+                    GLib.idle_add(lambda: (then(), False)[1])
+            if not need:
                 break
+            self._say(f"Downloading {' and '.join(need)}…")
+            got = (self._esr_ok() or self._install_esr()) and (self._ffmpeg_ok() or self._install_ffmpeg())
+            if got:
+                continue
             wait = self.RETRY[min(tries, len(self.RETRY) - 1)]
             tries += 1
-            self._set_status(f"Download failed; trying again in {wait // 60} min (plain scaling until then)")
+            self._say(f"Download failed; trying again in {wait // 60} min (pictures shown as they are until then)")
             time.sleep(wait)
-        if self._self_test() and then:
+        self._test_vk_denoise()
+        self._say_ready()
+        if then:
             GLib.idle_add(lambda: (then(), False)[1])
 
     def _clean(self) -> None:
@@ -810,7 +861,7 @@ class Upscaler:
         try:
             for f in os.listdir(UPSCALED_DIR):
                 p = os.path.join(UPSCALED_DIR, f)
-                if f.endswith(".part") or not self._jpeg_ok(p):
+                if f.endswith(".part") or (f.endswith(".jpg") and not self._jpeg_ok(p)):
                     os.remove(p)
         except OSError:
             pass
@@ -821,7 +872,8 @@ class Upscaler:
                     shutil.rmtree(os.path.join(tmp, f), ignore_errors=True)
         except OSError:
             pass
-        shutil.rmtree(self.dir + ".part", ignore_errors=True)
+        for d in (self.dir + ".part", os.path.dirname(self.own_ffmpeg) + ".part"):
+            shutil.rmtree(d, ignore_errors=True)
 
     @staticmethod
     def _jpeg_ok(path: str) -> bool:
@@ -833,19 +885,15 @@ class Upscaler:
         except OSError:
             return False
 
-    def _install(self) -> bool:
+    def _install_esr(self) -> bool:
         import hashlib
         import io
         import zipfile
-        try:
-            req = urllib.request.Request(ESR_URL, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                blob = r.read()
-        except (OSError, ValueError) as e:
-            print(f"upscaler: download failed: {e}", file=sys.stderr)
+        blob = _download(ESR_URL)
+        if blob is None:
             return False
         if hashlib.sha256(blob).hexdigest() != ESR_SHA256:
-            print("upscaler: download doesn't match its checksum, not used", file=sys.stderr)
+            print("enhancer: Real-ESRGAN download doesn't match its checksum, not used", file=sys.stderr)
             return False
         want = {"realesrgan-ncnn-vulkan", f"models/{ESR_MODEL}.param", f"models/{ESR_MODEL}.bin"}
         tmp = self.dir + ".part"
@@ -862,41 +910,97 @@ class Upscaler:
             shutil.rmtree(self.dir, ignore_errors=True)
             os.replace(tmp, self.dir)
         except (OSError, zipfile.BadZipFile) as e:
-            print(f"upscaler: unpacking failed: {e}", file=sys.stderr)
+            print(f"enhancer: unpacking Real-ESRGAN failed: {e}", file=sys.stderr)
             shutil.rmtree(tmp, ignore_errors=True)
             return False
-        self.tile = self.TILES[0]
+        self.tile, self.ai = self.TILES[0], None
         return True
 
-    def _self_test(self) -> bool:
-        """A 64 px picture through the GPU; smaller tiles until it comes back right."""
+    def _install_ffmpeg(self) -> bool:
+        """A static ffmpeg build when the system has none (checked against the
+        site's published MD5)."""
+        import hashlib
+        import io
+        import tarfile
+        md5 = _download(FFMPEG_URL + ".md5", 30)
+        blob = _download(FFMPEG_URL, 300)
+        if not md5 or not blob:
+            return False
+        if hashlib.md5(blob).hexdigest() != md5.split()[0].decode():
+            print("enhancer: ffmpeg download doesn't match its checksum, not used", file=sys.stderr)
+            return False
+        d = os.path.dirname(self.own_ffmpeg)
+        tmp = d + ".part"
+        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            os.makedirs(tmp)
+            with tarfile.open(fileobj=io.BytesIO(blob), mode="r:xz") as t:
+                m = next(m for m in t.getmembers() if m.isfile() and m.name.endswith("/ffmpeg"))
+                with t.extractfile(m) as src, open(os.path.join(tmp, "ffmpeg"), "wb") as out:
+                    shutil.copyfileobj(src, out)
+            os.chmod(os.path.join(tmp, "ffmpeg"), 0o755)
+            shutil.rmtree(d, ignore_errors=True)
+            os.replace(tmp, d)
+        except (OSError, tarfile.TarError, StopIteration) as e:
+            print(f"enhancer: unpacking ffmpeg failed: {e}", file=sys.stderr)
+            shutil.rmtree(tmp, ignore_errors=True)
+            return False
+        return self._ffmpeg_ok()
+
+    # --- GPU ----------------------------------------------------------------------------
+
+    def _self_test(self) -> None:
+        """Which GPUs Vulkan offers (never a software one), and a 64 px picture
+        through the best of them; smaller tiles until it comes back right."""
         from gi.repository import GdkPixbuf
         pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 64, 64)
         pb.fill(0x80B0E0FF)
-        ok, png = pb.save_to_bufferv("png", [], [])
-        start = self.TILES.index(self.tile)
-        for tile in self.TILES[start:]:
-            self.tile = tile
-            out, err = self._run(bytes(png), test=True)
-            if out == "novulkan":
-                self.broken = True
-                self._set_status("Not available: no Vulkan GPU here (plain scaling)")
-                return False
-            if out is not None:
-                self._save_tile()
-                self.tested = True
-                self._set_status(f"Ready on {self.gpu or 'the GPU'}")
-                return True
-        self.broken = True
-        self._set_status(f"Not available: the GPU fails it even with small tiles ({err[-120:]}) (plain scaling)")
-        return False
+        _, png = pb.save_to_bufferv("png", [], [])
+        work = tempfile.mkdtemp(prefix="radio-beat-esr-")
+        try:
+            src = os.path.join(work, "t.png")
+            with open(src, "wb") as f:
+                f.write(png)
+            start = self.TILES.index(self.tile)
+            for tile in self.TILES[start:]:
+                self.tile = tile
+                out, err = self._esr(src, os.path.join(work, "o.png"))
+                gpus = {int(i): n for i, n in re.findall(r"^\[(\d+) ([^\]]+)\]", err, re.M)}
+                real = {i: n for i, n in gpus.items() if not SOFTWARE_GPU.search(n)}
+                if not real:
+                    self.ai = False
+                    return
+                if self.gpu_index not in real:
+                    self.gpu_index = max(real, key=lambda i: (bool(DISCRETE_GPU.search(real[i])), -i))
+                    self.gpu = real[self.gpu_index]
+                    out, err = self._esr(src, os.path.join(work, "o.png"))  # again, on that one
+                if out:
+                    self._save_tile()
+                    self.ai = True
+                    return
+            self.ai = False
+            print(f"enhancer: the GPU fails Real-ESRGAN even with small tiles: {err[-200:]}", file=sys.stderr)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
-    # --- jobs -----------------------------------------------------------------------------
+    def _test_vk_denoise(self) -> None:
+        if not self.ffmpeg or not self.ai:
+            self.vk_denoise = False
+            return
+        work = tempfile.mkdtemp(prefix="radio-beat-esr-")
+        try:
+            out = os.path.join(work, "o.png")
+            self.vk_denoise = self._ff(["-f", "lavfi", "-i", "color=c=gray:s=64x64", "-frames:v", "1"],
+                                       DENOISE_VK, out, vulkan=True) and os.path.exists(out)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
-    def request(self, kind: str, key: str, data: bytes, size: tuple[int, int], done) -> None:
-        """Main thread. done(jpeg bytes) runs on the main thread when it's ready.
-        A newer request of the same kind replaces (and stops) the older one."""
-        self.jobs[kind] = (key, data, size, done)
+    # --- jobs ---------------------------------------------------------------------------
+
+    def request(self, kind: str, key: str, data: bytes, src_size: tuple[int, int], size: tuple[int, int], done) -> None:
+        """Main thread. done(picture bytes) runs on the main thread after each
+        step. A newer request of the same kind replaces (and stops) the older one."""
+        self.jobs[kind] = (key, data, src_size, size, done)
         r = self.running
         if r and r[0] == kind and r[1] != key and self.proc:
             self.proc.kill()
@@ -910,7 +1014,7 @@ class Upscaler:
 
     def _cache_path(self, key: str, size: tuple[int, int]) -> str:
         import hashlib
-        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}".encode()).hexdigest()
+        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}|{'ai' if self.ai else 'plain'}|v2".encode()).hexdigest()
         return os.path.join(UPSCALED_DIR, f"{h}.jpg")
 
     def _worker(self) -> None:
@@ -920,48 +1024,161 @@ class Upscaler:
             while self.jobs:
                 kind = "logo" if "logo" in self.jobs else next(iter(self.jobs))
                 job = self.jobs[kind]
-                key, data, size, done = job
-                self.running = (kind, key)
+                self.running = (kind, job[0])
                 try:
-                    jpeg = self._upscale(kind, key, data, size)
+                    self._enhance(kind, job)
                 except Exception as e:  # never take the app down over a picture
-                    print(f"upscaler: {e}", file=sys.stderr)
-                    jpeg = None
+                    print(f"enhancer: {e}", file=sys.stderr)
                 self.running = None
                 if self.jobs.get(kind) is job:
                     del self.jobs[kind]
-                    if jpeg:
-                        GLib.idle_add(lambda d=done, j=jpeg: (d(j), False)[1])
 
-    def _run(self, data: bytes, test: bool = False) -> tuple[str | None, str]:
-        """Real-ESRGAN on one picture: (path of the 4x PNG, stderr); the path is
-        None on failure, "novulkan" without a Vulkan GPU, "killed" when stopped."""
+    def _current(self, kind: str, job: tuple) -> bool:
+        return self.jobs.get(kind) is job
+
+    def _enhance(self, kind: str, job: tuple) -> None:
+        key, data, (w0, h0), size, done = job
+        what = "Cover" if kind == "cover" else "Logo"
+        head = f"{what}: {w0}×{h0} px → {size[0]}×{size[1]} px"
+        emit = lambda pic: GLib.idle_add(lambda: (done(pic), False)[1])
+        cached = self._cache_path(key, size)
+        if os.path.exists(cached):
+            if self._jpeg_ok(cached):
+                os.utime(cached)
+                with open(cached, "rb") as f:
+                    emit(f.read())
+                note = cached[:-4] + ".txt"
+                try:
+                    with open(note) as f:
+                        steps = f.read().strip()
+                except OSError:
+                    steps = "enhanced"
+                self._picture(f"{head}, {steps} (from the cache)")
+                return
+            os.remove(cached)
         work = tempfile.mkdtemp(prefix="radio-beat-esr-")
-        src, out = os.path.join(work, "in.img"), os.path.join(work, "out.png")
-        with open(src, "wb") as f:
-            f.write(data)
-        self.proc = subprocess.Popen(
-            ["nice", "-n", "19", self.bin, "-i", src, "-o", out, "-n", ESR_MODEL, "-m", self.models,
-             "-t", str(self.tile), "-f", "png"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        try:
+            src = os.path.join(work, "in.img")
+            with open(src, "wb") as f:
+                f.write(data)
+            steps: list[str] = []
+            show = lambda more: self._picture(f"{head}, {', '.join(steps)}{more}")
+
+            # 1. upscale
+            self._picture(f"{head}: upscaling{' on ' + self.gpu if self.ai else ''}…")
+            t = time.monotonic()
+            up = os.path.join(work, "up.png")
+            if self.ai:
+                big = os.path.join(work, "x4.png")
+                out, err = self._esr(src, big)
+                if out is None and self.tile != self.TILES[-1]:
+                    # The GPU timed out (black or failed): smaller tiles from now on, once more.
+                    self.tile = self.TILES[self.TILES.index(self.tile) + 1]
+                    self._save_tile()
+                    out, err = self._esr(src, big)
+                if out == "killed" or not self._current(kind, job):
+                    return
+                ok = out is not None and self._resize(big, size, up)
+                label = "AI-upscaled"
+                if not ok:
+                    print(f"enhancer: Real-ESRGAN failed: {err.strip()[-200:]}", file=sys.stderr)
+            else:
+                ok, label = False, "upscaled"
+            if not ok:
+                ok = self._resize(src, size, up)
+                label = "upscaled (smooth, no AI)" if label == "upscaled" else "upscaled (smooth: AI failed)"
+            if not ok or not self._current(kind, job):
+                if self._current(kind, job):
+                    self._picture(f"{head}: couldn't be upscaled, shown as it is")
+                return
+            steps.append(f"{label} in {_secs(time.monotonic() - t)}")
+            emit(open(up, "rb").read())
+            if not self.ffmpeg:
+                show(" (sharpening and denoising: no ffmpeg yet)")
+                return
+
+            # 2. sharpen
+            show(", sharpening…")
+            t = time.monotonic()
+            sharp = os.path.join(work, "sharp.png")
+            if not self._ff(["-i", up], SHARPEN, sharp) or not self._current(kind, job):
+                if self._current(kind, job):
+                    show(" (sharpening failed)")
+                return
+            steps.append(f"sharpened in {_secs(time.monotonic() - t)}")
+            emit(open(sharp, "rb").read())
+
+            # 3. denoise (on the upscaled picture), then sharpen: the final one
+            show(", denoising…")
+            t = time.monotonic()
+            final = os.path.join(work, "final.jpg")
+            ok = self.vk_denoise and self._ff(["-i", up], f"{DENOISE_VK},{SHARPEN}", final, vulkan=True, jpeg=True)
+            where = "on the GPU"
+            if not ok and self._current(kind, job):
+                ok, where = self._ff(["-i", up], f"{DENOISE},{SHARPEN}", final, jpeg=True), "on the CPU"
+            if not ok or not self._current(kind, job):
+                if self._current(kind, job):
+                    show(" (denoising failed)")
+                return
+            steps.append(f"denoised {where} in {_secs(time.monotonic() - t)}")
+            with open(final, "rb") as f:
+                pic = f.read()
+            emit(pic)
+            show("")
+            os.makedirs(UPSCALED_DIR, exist_ok=True)
+            with open(cached + ".part", "wb") as f:
+                f.write(pic)
+            os.replace(cached + ".part", cached)
+            with open(cached[:-4] + ".txt", "w") as f:
+                f.write(", ".join(steps))
+            self._trim()
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    # --- tools --------------------------------------------------------------------------
+
+    def _esr(self, src: str, out: str) -> tuple[str | None, str]:
+        """Real-ESRGAN 4x: (out, stderr); out None on failure, "killed" when stopped."""
+        cmd = ["nice", "-n", "19", self.bin, "-i", src, "-o", out, "-n", ESR_MODEL, "-m", self.models,
+               "-t", str(self.tile), "-f", "png"]
+        if self.gpu_index is not None:
+            cmd += ["-g", str(self.gpu_index)]
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         _, err = self.proc.communicate()
         rc, self.proc = self.proc.returncode, None
-        m = re.search(r"\[0 ([^\]]+)\]", err)
-        if m:
-            self.gpu = m.group(1)
         if rc < 0:
-            shutil.rmtree(work, ignore_errors=True)
             return "killed", err
-        if "vkCreateInstance failed" in err or "invalid gpu" in err:
-            shutil.rmtree(work, ignore_errors=True)
-            return "novulkan", err
         if rc or "failed" in err or not os.path.exists(out) or not self._not_black(out):
-            shutil.rmtree(work, ignore_errors=True)
             return None, err
-        if test:
-            shutil.rmtree(work, ignore_errors=True)
-            return "ok", err
         return out, err
+
+    def _ff(self, inputs: list[str], vf: str, out: str, vulkan: bool = False, jpeg: bool = False) -> bool:
+        if not self.ffmpeg:
+            return False
+        cmd = ["nice", "-n", "19", self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+        if vulkan:
+            dev = f"vulkan=vk:{self.gpu_index}" if self.gpu_index is not None else "vulkan=vk"
+            cmd += ["-init_hw_device", dev, "-filter_hw_device", "vk"]
+        cmd += inputs + ["-vf", vf, "-frames:v", "1"] + (["-q:v", "2"] if jpeg else []) + [out]
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        _, err = self.proc.communicate()
+        rc, self.proc = self.proc.returncode, None
+        if rc:
+            if rc > 0:
+                print(f"enhancer: ffmpeg {vf}: {err.strip()[-200:]}", file=sys.stderr)
+            return False
+        return os.path.exists(out)
+
+    def _resize(self, src: str, size: tuple[int, int], out: str) -> bool:
+        """To the screen's size: Lanczos through ffmpeg, else GdkPixbuf."""
+        if self._ff(["-i", src], f"scale={size[0]}:{size[1]}:flags=lanczos", out):
+            return True
+        from gi.repository import GdkPixbuf
+        try:
+            pb = GdkPixbuf.Pixbuf.new_from_file(src).scale_simple(size[0], size[1], GdkPixbuf.InterpType.BILINEAR)
+            return pb.savev(out, "png", [], [])
+        except GLib.Error:
+            return False
 
     @staticmethod
     def _not_black(path: str) -> bool:
@@ -972,59 +1189,18 @@ class Upscaler:
             return False
         return any(px[i] for i in range(0, len(px), 4099))
 
-    def _upscale(self, kind: str, key: str, data: bytes, size: tuple[int, int]) -> bytes | None:
-        from gi.repository import GdkPixbuf
-        cached = self._cache_path(key, size)
-        if os.path.exists(cached):
-            if self._jpeg_ok(cached):
-                os.utime(cached)
-                with open(cached, "rb") as f:
-                    return f.read()
-            os.remove(cached)  # damaged: made again
-        if not self.ready():
-            return None
-        what = "the cover" if kind == "cover" else "the logo"
-        self._set_status(f"Upscaling {what} on {self.gpu or 'the GPU'}…")
-        t0 = time.monotonic()
-        out, err = self._run(data)
-        if out is None and self.tile != self.TILES[-1]:
-            # The GPU timed out (black or failed): smaller tiles from now on, once more.
-            self.tile = self.TILES[self.TILES.index(self.tile) + 1]
-            self._save_tile()
-            print(f"upscaler: failed, trying again with {self.tile} px tiles", file=sys.stderr)
-            out, err = self._run(data)
-        if out == "killed":
-            self._set_status(f"Ready on {self.gpu or 'the GPU'}")
-            return None
-        if out in (None, "novulkan"):
-            self._set_status(f"Couldn't upscale {what} ({err.strip()[-120:] or 'no output'}); plain scaling for it")
-            return None
-        try:
-            pb = GdkPixbuf.Pixbuf.new_from_file(out).scale_simple(size[0], size[1], GdkPixbuf.InterpType.BILINEAR)
-            ok, jpeg = pb.save_to_bufferv("jpeg", ["quality"], ["92"])
-        finally:
-            shutil.rmtree(os.path.dirname(out), ignore_errors=True)
-        if not ok:
-            return None
-        os.makedirs(UPSCALED_DIR, exist_ok=True)
-        with open(cached + ".part", "wb") as f:
-            f.write(jpeg)
-        os.replace(cached + ".part", cached)
-        self._trim()
-        self._set_status(f"Ready on {self.gpu or 'the GPU'}. Last: {what} to {size[0]}×{size[1]} px "
-                         f"in {time.monotonic() - t0:.0f} s")
-        return bytes(jpeg)
-
     def _trim(self) -> None:
         try:
-            files = sorted((os.path.join(UPSCALED_DIR, f) for f in os.listdir(UPSCALED_DIR)), key=os.path.getmtime)
+            files = sorted((os.path.join(UPSCALED_DIR, f) for f in os.listdir(UPSCALED_DIR) if f.endswith(".jpg")),
+                           key=os.path.getmtime)
         except OSError:
             return
         for f in files[:-UPSCALED_KEEP]:
-            try:
-                os.remove(f)
-            except OSError:
-                pass
+            for p in (f, f[:-4] + ".txt"):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
 
 # --- window ---------------------------------------------------------------------
@@ -1192,9 +1368,13 @@ class Window(Adw.ApplicationWindow):
             near.set_active(self.app.settings.get("tray_popup", True))
             near.connect("notify::active", lambda r, _: self.app.set_tray_popup(r.get_active()))
             group.add(near)
-        self.upscale_row = Adw.ActionRow(title="AI upscaling", subtitle=self.app.upscaler.status,
+        self.enhance_row = Adw.SwitchRow(title="Enhance pictures", subtitle=self.app.enhance_status(),
                                          subtitle_lines=0)
-        group.add(self.upscale_row)
+        self.enhance_row.set_active(self.app.settings.get("enhance", True))
+        self.enhance_row.connect("notify::active", lambda r, _: self.app.set_enhance(r.get_active()))
+        group.add(self.enhance_row)
+        self.picture_row = Adw.ActionRow(title="Picture now", subtitle=self.app.picture_text, subtitle_lines=0)
+        group.add(self.picture_row)
         self.update_row = Adw.ActionRow(title="Updates")
         self.update_btn = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
         self.update_btn.connect("clicked", lambda *_: self.app.update_clicked())
@@ -1376,8 +1556,10 @@ class App(Adw.Application):
         self.codec = self.bitrate = None
         self.cover_tex = None
         self.logo_tex = None
-        self.upscaler = Upscaler(on_status=self._upscale_status)
+        self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
         self.upscale_src: dict[str, tuple[str, bytes]] = {}  # kind -> (key, picture bytes), for after the install
+        self.orig_tex: dict[str, object] = {}  # kind -> the picture as it came
+        self.picture_text = "No picture yet"
         self._lookup_id = 0
         self._started = False
         self.last_audio = time.monotonic()  # when playback last moved on
@@ -1405,6 +1587,7 @@ class App(Adw.Application):
         for p in (os.path.join(HERE, "logo.png"), os.path.join(HERE, "icons", "hicolor", "256x256", "apps", f"{APP_ID}.png")):
             if os.path.exists(p):
                 self.logo_tex = Gdk.Texture.new_from_filename(p)
+                self.orig_tex["logo"] = self.logo_tex
                 with open(p, "rb") as f:
                     self.upscale_src["logo"] = (p, f.read())
                 break
@@ -1699,8 +1882,9 @@ class App(Adw.Application):
         parts = split_title(icy)
         self.artist_raw, self.song = (parts if parts else (None, icy))
         self.info, self.cover_tex = None, None
-        self.upscaler.drop("cover")
+        self.enhancer.drop("cover")
         self.upscale_src.pop("cover", None)
+        self.orig_tex.pop("cover", None)
         self._lookup_id += 1
         if parts:
             threading.Thread(target=self._lookup, args=(self._lookup_id, *parts), daemon=True).start()
@@ -1718,6 +1902,7 @@ class App(Adw.Application):
             try:
                 self.cover_tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
                 self.upscale_src["cover"] = (info["cover"], data)
+                self.orig_tex["cover"] = self.cover_tex
                 self._enhance("cover")
             except GLib.Error:
                 self.cover_tex = None
@@ -1725,14 +1910,40 @@ class App(Adw.Application):
         return False
 
 
-    # --- AI upscaling ---------------------------------------------------------------
+    # --- picture enhancing -----------------------------------------------------------
 
     def _install_upscaler(self):
-        self.upscaler.maintain(then=lambda: (self._enhance("logo"), self._enhance("cover")))
+        self.enhancer.maintain(then=lambda: (self._enhance("logo"), self._enhance("cover")))
 
-    def _upscale_status(self, text: str) -> None:
+    def enhance_status(self) -> str:
+        return self.enhancer.status if self.settings.get("enhance", True) else \
+            "Off: pictures are shown as they come."
+
+    def _enhance_status_changed(self, _text: str) -> None:
         if self.win:
-            self.win.upscale_row.set_subtitle(text)
+            self.win.enhance_row.set_subtitle(self.enhance_status())
+
+    def _picture_changed(self, text: str, kind: str = "cover") -> None:
+        if kind == "logo" and self.orig_tex.get("cover"):
+            return  # the cover is what's shown
+        self.picture_text = text
+        if self.win:
+            self.win.picture_row.set_subtitle(text)
+
+    def set_enhance(self, on: bool) -> None:
+        self.settings["enhance"] = on
+        save_settings(self.settings)
+        self._enhance_status_changed("")
+        if on:
+            self._enhance("logo")
+            self._enhance("cover")
+            return
+        for kind in ("logo", "cover"):
+            self.enhancer.drop(kind)
+        self.logo_tex = self.orig_tex.get("logo", self.logo_tex)
+        self.cover_tex = self.orig_tex.get("cover", self.cover_tex)
+        self._picture_changed("Shown as it comes (enhancing is off)")
+        self.update()
 
     def screen_px(self) -> tuple[int, int] | None:
         """Pixels of the screen the window is on (or the first one)."""
@@ -1749,22 +1960,34 @@ class App(Adw.Application):
         return round(g.width * sc), round(g.height * sc)
 
     def _enhance(self, kind: str) -> None:
-        """Ask for an upscaled picture if full screen would stretch it."""
-        tex = self.cover_tex if kind == "cover" else self.logo_tex
+        """Ask for an enhanced picture if full screen would stretch it."""
+        tex = self.orig_tex.get(kind)
         src = self.upscale_src.get(kind)
         size = self.screen_px()
-        if not tex or not src or not size or not self.upscaler.ready():
+        if not tex or not src or not size:
             return
         w, h = tex.get_width(), tex.get_height()
+        what = "Cover" if kind == "cover" else "Logo"
         f = min(size[0] / w, size[1] / h)
+        if not self.settings.get("enhance", True):
+            self._picture_changed(f"{what}: {w}×{h} px, shown as it comes (enhancing is off)", kind)
+            return
         if f < UPSCALE_FROM:
+            self._picture_changed(f"{what}: {w}×{h} px, shown as it comes (the screen, "
+                                  f"{size[0]}×{size[1]} px, doesn't need it bigger)", kind)
+            return
+        if self.enhancer.ai is None and not self.enhancer.ffmpeg:
+            self._picture_changed(f"{what}: {w}×{h} px, shown as it comes until the enhancing tools "
+                                  "are downloaded", kind)
             return
         lid = self._lookup_id
 
-        def done(jpeg: bytes):
+        def done(pic: bytes):
             try:
-                t = Gdk.Texture.new_from_bytes(GLib.Bytes.new(jpeg))
+                t = Gdk.Texture.new_from_bytes(GLib.Bytes.new(pic))
             except GLib.Error:
+                return
+            if not self.settings.get("enhance", True):
                 return
             if kind == "cover":
                 if lid != self._lookup_id:
@@ -1774,7 +1997,8 @@ class App(Adw.Application):
                 self.logo_tex = t
             self.update()
 
-        self.upscaler.request(kind, src[0], src[1], (round(w * f), round(h * f)), done)
+        self.enhancer.request(kind, src[0], src[1], (w, h), (round(w * f), round(h * f)), done)
+
 
 if __name__ == "__main__":
     sys.exit(App().run(sys.argv))
