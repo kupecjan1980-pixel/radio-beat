@@ -1751,13 +1751,18 @@ class GlassCard(Gtk.Box):
         return rr
 
     def do_snapshot(self, snap) -> None:
+        self.draw_glass(snap)
+        Gtk.Box.do_snapshot(self, snap)
+
+    def draw_glass(self, snap, shadow: bool = True) -> None:
+        """The glass alone (what's inside it drawn by the caller)."""
         w, h = self.get_width(), self.get_height()
         if w <= 0 or h <= 0:
             return
         box = Graphene.Rect().init(0, 0, w, h)
         rr = self._rounded(0, 0, w, h, self.radius)
         rim = min(self.radius * self.RIM, h / 2, w / 2)
-        if self.depth:  # it floats above the cover: a wide soft shadow and a tight one where it nearly touches
+        if self.depth and shadow:  # it floats above the cover: a wide soft shadow and a tight one where it nearly touches
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
         snap.push_rounded_clip(rr)
@@ -1813,7 +1818,6 @@ class GlassCard(Gtk.Box):
         edge = [_rgba(255, 255, 255, 0.30), _rgba(255, 255, 255, 0.12),
                 _rgba(255, 255, 255, 0.08), _rgba(255, 255, 255, 0.12)]  # top, right, bottom, left
         snap.append_border(rr, [1.0, 1.0, 1.0, 1.0], edge)
-        Gtk.Box.do_snapshot(self, snap)
 
 
 class MenuGlass(GlassCard):
@@ -1860,8 +1864,35 @@ class MenuGlass(GlassCard):
         s = Gtk.Snapshot()
         s.scale(k, k)
         self.paint.snapshot(s, cw, ch)
+        self._blur_card_text(s, content)
         node = s.to_node()
         return native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, cw * k, ch * k)) if node else None
+
+    def _blur_card_text(self, s, content) -> None:
+        """Under the menu the show card's text is out of focus: its glass drawn again over it, its picture
+        sharp again, the text blurred."""
+        card = self.win.show_card
+        if not card.get_mapped():
+            return
+        ok, cp = card.compute_point(content, Graphene.Point().init(0, 0))
+        if not ok:
+            return
+        s.save()
+        s.translate(cp)
+        card.draw_glass(s, shadow=False)
+        for child, blur in ((self.win.show_pic, 0), (self.win.show_card_text, 5.0)):
+            ok, p = child.compute_point(card, Graphene.Point().init(0, 0))
+            if not ok:
+                continue
+            s.save()
+            s.translate(p)
+            if blur:
+                s.push_blur(blur)
+            Gtk.WidgetPaintable.new(child).snapshot(s, child.get_width(), child.get_height())
+            if blur:
+                s.pop()
+            s.restore()
+        s.restore()
 
     def _behind(self, snap, w: float, h: float, sx: float, sy: float) -> None:
         content = self.win.get_content()
