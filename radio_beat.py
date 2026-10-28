@@ -619,6 +619,63 @@ def name_about(name: str, words: tuple, langs=("en", "cs")) -> str:
     return text
 
 
+# --- what was played, and by whom (a database on this computer, newest first) ----------------
+
+class History:
+    """Every song played (when, the artist, the title, the album, the show, who was on air) and every host
+    seen (their shows, when last on), in SQLite under ~/.local/share/radio-beat. The newest come first; the
+    oldest plays go past KEEP. Feeds the show card's mix: artists played earlier, all the station's hosts."""
+
+    KEEP = 50000
+
+    def __init__(self, path: str):
+        import sqlite3
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.lock = threading.Lock()
+        with self.lock, self.db:
+            self.db.execute("CREATE TABLE IF NOT EXISTS plays (at REAL, artist TEXT, title TEXT, album TEXT, "
+                            "show TEXT, host TEXT)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS plays_at ON plays (at DESC)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS hosts (name TEXT PRIMARY KEY, shows TEXT, first REAL, "
+                            "last REAL)")
+
+    def play(self, artist: str, title: str, show: str | None, host: str | None) -> None:
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO plays VALUES (?, ?, ?, NULL, ?, ?)", (time.time(), artist, title, show, host))
+            self.db.execute("DELETE FROM plays WHERE rowid IN (SELECT rowid FROM plays ORDER BY at DESC "
+                            f"LIMIT -1 OFFSET {self.KEEP})")
+
+    def album(self, artist: str, title: str, album: str) -> None:
+        """The album, once the lookup found it (the newest play of that song)."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE plays SET album = ? WHERE rowid = (SELECT rowid FROM plays WHERE artist = ? "
+                            "AND title = ? ORDER BY at DESC LIMIT 1)", (album, artist, title))
+
+    def host(self, name: str, show: str | None) -> None:
+        now = time.time()
+        with self.lock, self.db:
+            row = self.db.execute("SELECT shows FROM hosts WHERE name = ?", (name,)).fetchone()
+            shows = [x for x in (row[0].split("|") if row and row[0] else []) if x]
+            if show and show not in shows:
+                shows.append(show)
+            self.db.execute("INSERT INTO hosts VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET shows = "
+                            "excluded.shows, last = excluded.last", (name, "|".join(shows[-8:]), now, now))
+
+    def artists(self, n: int = 40) -> list[str]:
+        """The artists played lately, newest first (each once)."""
+        with self.lock:
+            rows = self.db.execute("SELECT artist, MAX(at) m FROM plays GROUP BY lower(artist) ORDER BY m DESC "
+                                   "LIMIT ?", (n,)).fetchall()
+        return [r[0] for r in rows]
+
+    def hosts(self) -> list[tuple[str, list[str]]]:
+        """Every host seen, the latest first, with their shows."""
+        with self.lock:
+            rows = self.db.execute("SELECT name, shows FROM hosts ORDER BY last DESC").fetchall()
+        return [(r[0], [x for x in (r[1] or "").split("|") if x]) for r in rows]
+
+
 def fetch(url: str) -> bytes | None:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA})
@@ -2909,11 +2966,13 @@ class Window(Adw.ApplicationWindow):
         self._apply_scale()
         self.apply_look()
         self.connect("close-request", self.on_close)
-        self.card_turn, self._turn_secs = "show", 20.0
-        self._turn_content = None  # what the second turn shows, chosen when it starts
+        self.card_turn = "show"
+        self._turn_content = None  # what the text turn shows, chosen when it starts
+        self._minute_at = time.monotonic()  # when the programme's turn last began
         self._type_id = 0
+        self._type_ms = self.TYPE_MS
         self._typing_text = ""
-        self._turn_id = GLib.timeout_add(20000, self._turn)
+        self._turn_id = GLib.timeout_add(self.PROGRAMME_S * 1000, self._turn)
         self.minimised = False
         self.connect("notify::is-active", lambda w, _: w.is_active() and setattr(w, "minimised", False))
         self.refresh()
@@ -3174,32 +3233,42 @@ class Window(Adw.ApplicationWindow):
             self.queue_resize()
         return False
 
-    # The show card takes turns, half the time each: the programme (ON AIR) and the song playing (NOW PLAYING:
-    # a few sentences about it, typed out letter by letter at a fast typist's pace).
-    TYPE_MS = 115  # a letter (about 100 words a minute), a little uneven like a hand's
-    READ_S = 8  # left to read once typed
+    # The show card: every minute the programme (ON AIR) for 8 s, the rest of the minute a new text every 15 s
+    # (the song playing, then the mix: App.turn_content), typed out letter by letter at a fast typist's pace,
+    # faster when the text is long, so it's done with time left to read.
+    TYPE_MS = 115  # a letter at most (about 100 words a minute), a little uneven like a hand's
+    PROGRAMME_S, TEXT_S, MINUTE_S = 8, 15, 60
+    SONG_S = 45  # the song's own text may be longer: up to this
+    READ_S = 4  # left to read once typed
 
     def _turn(self) -> bool:
         a = self.app
         self._turn_id = 0
-        turn = None if self.card_turn == "song" else a.turn_content()
-        self._turn_content = turn
-        if self.card_turn == "song" or not turn:
-            self.card_turn = "show"
-            self._stop_typing()
-            secs = self._turn_secs
-        else:
-            self.card_turn = "song"
+        now = time.monotonic()
+        left = self._minute_at + self.MINUTE_S - now  # until the programme's next turn
+        turn = a.turn_content() if left >= 6 and (self.card_turn == "song"
+                                                  or now - self._minute_at >= self.PROGRAMME_S - 0.5) else None
+        if turn:
+            slot = min(self.SONG_S if turn[0] == "NOW PLAYING" else self.TEXT_S, left)
+            if left - slot < 8:  # no stub of a turn before the programme: this one lasts to the minute
+                slot = left
+            self.card_turn, self._turn_content = "song", turn
             text = turn[2]
-            self._turn_secs = max(15.0, len(text) * self.TYPE_MS / 1000 * 1.25 + self.READ_S)
-            secs = self._turn_secs
-            self._start_typing(text)
+            self._start_typing(text, min(self.TYPE_MS, (slot - self.READ_S) * 1000 / max(1, len(text)) / 1.15))
+        else:
+            if left < 6 or not turn:  # the minute's up (or nothing else to show): the programme
+                self._minute_at, slot = now, self.PROGRAMME_S if turn or a.turn_content_ready() else self.TEXT_S
+            else:
+                slot = self.PROGRAMME_S
+            self.card_turn, self._turn_content = "show", None
+            self._stop_typing()
         self.refresh()
-        self._turn_id = GLib.timeout_add(int(secs * 1000), self._turn)
+        self._turn_id = GLib.timeout_add(int(slot * 1000), self._turn)
         return False
 
-    def _start_typing(self, text: str) -> None:
+    def _start_typing(self, text: str, ms: float = TYPE_MS) -> None:
         self._stop_typing()
+        self._type_ms = ms
         lab = self.show_sub
         lab.set_lines(-1)
         lab.set_ellipsize(Pango.EllipsizeMode.NONE)
@@ -3227,7 +3296,8 @@ class Window(Adw.ApplicationWindow):
         if done:
             return False
         ch = text[self._typed - 1]
-        delay = self.TYPE_MS * random.uniform(0.6, 1.4) + (260 if ch in ".!?" else 120 if ch in ",;:" else 0)
+        k = self._type_ms / self.TYPE_MS  # pauses shrink with the pace
+        delay = self._type_ms * random.uniform(0.6, 1.4) + k * (260 if ch in ".!?" else 120 if ch in ",;:" else 0)
         self._type_id = GLib.timeout_add(int(delay), self._type)
         return False
 
@@ -3456,7 +3526,9 @@ class App(Adw.Application):
         self.facts = ""  # first release, where it was recorded
         self.about = ""  # a few sentences about the song (Wikipedia)
         self.song_shown = False  # its turn came already (then the mix)
-        self.history: list[str] = []  # artists played lately
+        self.history: list[str] = []  # artists played lately (oldest first, the newest last)
+        self.db = History(os.path.join(DATA_DIR, "history.db"))
+        self.host_info: dict[str, str] = {}  # every host seen -> what Wikipedia says (Czech)
         self.artist_info: dict[str, str] = {}  # artist -> what Wikipedia says (Czech)
         self.trivia_seen: dict[str, set] = {}  # what was shown of each, so the next time is different
         self._last_lead = ""
@@ -3519,6 +3591,7 @@ class App(Adw.Application):
         threading.Thread(target=lambda: GLib.idle_add(setattr, self, "station_about",
                                                       name_about("Rádio Beat", HOST_WORDS + MUSIC_WORDS, ("cs", "en"))),
                          daemon=True).start()
+        threading.Thread(target=self._load_past, daemon=True).start()
         threading.Thread(target=self._install_upscaler, daemon=True).start()
         if self.card_on():
             self.card.start()
@@ -3887,6 +3960,9 @@ class App(Adw.Application):
     def _programme_got(self, sched, host):
         if sched:
             self.schedule = sched
+        if host:
+            cur, _ = on_air(self.schedule, time.localtime())
+            self.db.host(host, cur["title"] if cur else None)
         if host and host != self.host:
             self.host, self.host_about = host, ""
             threading.Thread(target=lambda h=host: GLib.idle_add(self._got_host_about, h,
@@ -3897,6 +3973,7 @@ class App(Adw.Application):
         return False
 
     def _got_host_about(self, host, text):
+        self.host_info[host] = text
         if host == self.host:
             self.host_about = text
         return False
@@ -3962,6 +4039,8 @@ class App(Adw.Application):
         self.song_shown = False
         if parts:
             self._remember_artist(parts[0])
+            cur, _ = on_air(self.schedule, time.localtime())
+            self.db.play(first_artist(parts[0]), parts[1], cur["title"] if cur else None, self.host)
         if not parts:
             self.cover_tex = None
         self.enhancer.drop("cover")
@@ -4010,8 +4089,28 @@ class App(Adw.Application):
     LEADS = {"artist": ("Víte, že… ", "Zajímavost: ", "Mimochodem: ", "Z hudební kroniky: ", "Na okraj: ",
                         "Hrálo se u nás – {n}. ", "Pár slov k interpretovi {n}: "),
              "host": ("U mikrofonu: {n}. ", "Dnes vás provází {n}. ", "Moderuje {n}. ", "Kdo vás teď baví? {n}. "),
+             "hosts": ("Z našich moderátorů: {n}. ", "Na Beatu uslyšíte i {n}. ", "Znáte naše hlasy? {n}. ",
+                       "Moderátor{a} Beatu {n}: "),
              "station": ("Něco o nás: ", "Rádio Beat: ", "Víte, kdo vám hraje? ")}
-    BADGE = {"artist": "ZAJÍMAVOST", "host": "U MIKROFONU", "station": "RÁDIO BEAT"}
+    BADGE = {"artist": "ZAJÍMAVOST", "host": "U MIKROFONU", "hosts": "NAŠE HLASY", "station": "RÁDIO BEAT"}
+
+    def _load_past(self) -> None:
+        """At start: the artists and hosts from the history, and what Wikipedia says about each (remembered,
+        so mostly quick), one after the other."""
+        past = list(reversed(self.db.artists(25)))
+        GLib.idle_add(self._set_history, past)
+        for name in past:
+            if name not in self.artist_info:
+                text = name_about(name, MUSIC_WORDS)
+                GLib.idle_add(self.artist_info.__setitem__, name, text)
+        for name, _shows in self.db.hosts():
+            if name not in self.host_info:
+                text = name_about(name, HOST_WORDS, ("cs", "en"))
+                GLib.idle_add(self.host_info.__setitem__, name, text)
+
+    def _set_history(self, past: list[str]) -> bool:
+        self.history[:] = [a for a in past if a not in self.history] + self.history  # this session's last
+        return False
 
     def _remember_artist(self, artist: str) -> None:
         """A song's artist joins the recent ones; what Wikipedia says about it is fetched (once) for the mix."""
@@ -4036,19 +4135,30 @@ class App(Adw.Application):
             seen.clear()
         i = random.choice(fresh)
         seen.add(i)
-        lead = random.choice(self.LEADS[kind]).format(n=name)
+        if n == 2 and len(" ".join(sentences[i:i + 2])) > 220:  # a 15 s turn: one sentence then
+            n = 1
+        a = "ka" if name.split()[0:1] and name.split()[0].endswith("a") else ""  # Moderátorka Jana, Moderátor Petr
+        lead = random.choice(self.LEADS[kind]).format(n=name, a=a)
         if lead == self._last_lead and len(self.LEADS[kind]) > 1:
-            lead = random.choice([x for x in self.LEADS[kind] if x != lead]).format(n=name)
+            lead = random.choice([x for x in self.LEADS[kind] if x != lead]).format(n=name, a=a)
         self._last_lead = lead
         return self.cz(self.BADGE[kind]), name or "Rádio Beat", self.cz(lead + " ".join(sentences[i:i + n])), \
             self.logo_tex
+
+    def turn_content_ready(self) -> bool:
+        """Anything for the text turns (else the card stays on the programme and looks again later)."""
+        return bool(self.about or self.station_about or self.host_about or any(self.artist_info.values()))
 
     def trivia(self):
         r = random.random()
         if self.station_about and r < 0.05:
             return self._pick("station", "station", self.station_about)
-        if self.host_about and self.host and r < 0.20:
+        if self.host_about and self.host and r < 0.15:
             return self._pick("host", "host:" + self.host, self.host_about, self.host)
+        others = [n for n, t in self.host_info.items() if t and n != self.host]
+        if others and r < 0.30:  # the station's other hosts (from the history)
+            name = random.choice(others)
+            return self._pick("hosts", "host:" + name, self.host_info[name], name)
         now = norm(first_artist(self.artist_raw or ""))
         past = [n for n in self.history if self.artist_info.get(n) and norm(n) != now]
         if past:
@@ -4092,6 +4202,8 @@ class App(Adw.Application):
         if lid != self._lookup_id:
             return False  # song changed meanwhile
         self.info = info
+        if info and info.get("album") and self.artist_raw and self.song:
+            self.db.album(first_artist(self.artist_raw), self.song, info["album"])
         if data:
             try:
                 self.cover_tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
