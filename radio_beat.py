@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -221,6 +222,18 @@ def update_status() -> tuple[bool | None, str]:
         mine = ""
     if mine == sha:
         return False, f"Up to date ({info['committer']['date'][:10]})"
+    # Only forwards: GitHub's commit must come after the installed one (a newer local build stays).
+    if re.fullmatch(r"[0-9a-f]{7,40}", mine):
+        try:
+            status = _json(f"https://api.github.com/repos/{REPO}/compare/{mine}...{sha}")["status"]
+        except urllib.error.HTTPError as e:
+            if e.code == 404:  # not on GitHub: built here, newer than what's published
+                return False, "This version is newer than GitHub's (not published yet)"
+            return None, "Couldn't reach GitHub"
+        except (OSError, ValueError, KeyError):
+            return None, "Couldn't reach GitHub"
+        if status in ("behind", "identical"):
+            return False, "Up to date (newer than GitHub's)" if status == "behind" else "Up to date"
     return True, f"New version from {info['committer']['date'][:10]}:\n{info['message'].splitlines()[0]}"
 
 
@@ -905,6 +918,7 @@ class Enhancer:
         self.gpu_index: int | None = None
         self.soft = False  # AI on the CPU through software Vulkan (no GPU)
         self.vk_denoise = False
+        self.vk_fail_px = 1 << 62  # pictures this big (pixels) came out black from the GPU denoise
         self.tile = self._load_tile()
         self.status = "Starting…"
         self.on_status, self.on_picture = on_status, on_picture
@@ -1226,7 +1240,7 @@ class Enhancer:
         emit = lambda pic, final=False: (kind != "icon" or final) and GLib.idle_add(lambda: (done(pic), False)[1])
         cached = self._cache_path(key, size)
         if os.path.exists(cached):
-            if self._jpeg_ok(cached):
+            if self._jpeg_ok(cached) and self._not_black(cached):  # black ones came from the GPU giving up
                 os.utime(cached)
                 with open(cached, "rb") as f:
                     emit(f.read(), True)
@@ -1364,7 +1378,14 @@ class Enhancer:
         show(", denoising…")
         t = time.monotonic()
         final = os.path.join(work, "final.jpg")
-        ok = self.vk_denoise and self._ff(["-i", base], f"{DENOISE_VK},{SHARPEN}", final, vulkan=True, jpeg=True)
+        from gi.repository import GdkPixbuf
+        _, w, h = GdkPixbuf.Pixbuf.get_file_info(base)
+        ok = self.vk_denoise and w * h < self.vk_fail_px \
+            and self._ff(["-i", base], f"{DENOISE_VK},{SHARPEN}", final, vulkan=True, jpeg=True)
+        if ok and not self._not_black(final):
+            # The GPU gives up on big pictures without an error (all black: a 2160 px logo on Renoir): the CPU
+            # does this one, and ones as big from now on.
+            ok, self.vk_fail_px = False, min(self.vk_fail_px, w * h)
         where = "on the GPU"
         if not ok and live():
             ok, where = self._ff(["-i", base], f"{DENOISE},{SHARPEN}", final, jpeg=True), "on the CPU"
@@ -2421,9 +2442,8 @@ class App(Adw.Application):
         if not self.card.ok:
             return "Off: needs pactl (the PipeWire/PulseAudio sound tools)"
         if not self.card_on():
-            return "Off: the slider is Rádio Beat's own volume; on: the sound card's, so its volume knob moves it too"
-        return (f"The slider is the volume of {self.card_name or 'the sound card'}: its volume knob (or the "
-                "desktop's volume) moves the slider, the slider turns the card. Other apps on it change too")
+            return "Off: the slider is Rádio Beat's own volume"
+        return f"The slider is {self.card_name or 'the sound card'}'s volume: its knob moves the slider too"
 
     def volume_now(self) -> int:
         return self.card_vol if self.card_on() and self.card_vol is not None else self.settings["volume"]
