@@ -1928,9 +1928,12 @@ class Window(Adw.ApplicationWindow):
         box.append(self.enhance_note)
         # Opens leftwards from the gear (at the right edge), so it stays inside the window.
         # A popup takes its content's full natural width; this caps it near the app's width.
+        # Its height stays within the window (it scrolls): a popup with no room below the gear is closed at once
+        # (the window low on the screen, KDE's corner), and the gear then looks dead.
         fit = Gtk.ScrolledWindow(child=box, hscrollbar_policy=Gtk.PolicyType.NEVER,
-                                 vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                 vscrollbar_policy=Gtk.PolicyType.AUTOMATIC, propagate_natural_height=True,
                                  width_request=320)
+        self.menu_fit = fit
         pop = Gtk.Popover(child=fit, has_arrow=False)
         btn = Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings", popover=pop)
         pop.connect("show", lambda p: self._place_menu(btn, p))
@@ -1967,8 +1970,14 @@ class Window(Adw.ApplicationWindow):
             return
         mid = pt.x + btn.get_width() / 2  # a popover is centred on its button
         right = min(self.get_width() - 2, self._top_right(btn))
-        left = max(self.MENU_GAP, right - self.MENU_W)
-        pop.set_offset(int(left + self.MENU_W / 2 - mid), 8)
+        # Over the window and as big as fits in it (it scrolls when it's taller).
+        inner = max(160, min(self.MENU_W, int(right) - self.MENU_GAP) - 2 * 6)
+        self.menu_fit.set_size_request(inner, -1)
+        width = inner + 2 * 6
+        left = max(self.MENU_GAP, right - width)
+        pop.set_offset(int(left + width / 2 - mid), 8)
+        room = self.get_height() - (pt.y + btn.get_height() + 8) - self.MENU_GAP - 2 * 6
+        self.menu_fit.set_max_content_height(max(120, int(room)))
 
     def fill_quality(self) -> None:
         self._filling = True
