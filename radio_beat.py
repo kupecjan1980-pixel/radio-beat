@@ -51,6 +51,15 @@ STREAMS = [
     ("mp3backup", "MP3 128 kbps (backup server)", "https://icecast1.play.cz/beat64.mp3"),
     ("aac64", "AAC 64 kbps (radiobeat.cz)", "https://stream.rcs.revma.com/3d47nqvb938uv"),
 ]
+# What each stream sounds like (the list shows them best first).
+STREAM_NOTES = {
+    "flac": "Best: lossless, exactly as broadcast",
+    "aac128": "Very good: AAC keeps more detail than MP3 at the same rate",
+    "mp3128": "Good: MP3 needs more data than AAC for the same sound",
+    "mp3backup": "Good: the same MP3 from another server",
+    "aac64": "Lowest: half the data, fine on small speakers",
+}
+
 FLAC_CANDIDATES = [
     "https://icecast2.play.cz/beatflac",
     "https://icecast2.play.cz/beat.flac",
@@ -1548,6 +1557,12 @@ popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
 @keyframes pump { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
 @keyframes tick { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .glass-disc:hover, .overlay-header button.close-button:hover { animation: pump 1s ease-in-out infinite; }
+/* The volume slider pumps too, gently (it's wide: it would run into the speaker). */
+@keyframes pump-wide { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04, 1.25); } }
+scale.vol-slider:hover { animation: pump-wide 1s ease-in-out infinite; }
+/* The quality list's arrow bobs up and down (never turns). */
+@keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
+row:hover .bob-arrow { animation: bob 900ms ease-in-out infinite; }
 .overlay-header menubutton:hover image { animation: tick 500ms steps(12) infinite; }
 """
 
@@ -1954,8 +1969,13 @@ class MenuGlass(GlassCard):
             return False, None
         ptx, pty = pop.get_surface_transform()
         wtx, wty = self.win.get_surface_transform()
-        x = surf.get_position_x() + ptx + cp.x - wtx  # the card's corner, in the window
-        y = surf.get_position_y() + pty + cp.y - wty
+        # The popup's place on the window's surface: added up through popups opened from popups.
+        sx = sy = 0
+        while isinstance(surf, Gdk.Popup):
+            sx, sy = sx + surf.get_position_x(), sy + surf.get_position_y()
+            surf = surf.get_parent()
+        x = sx + ptx + cp.x - wtx  # the glass's corner, in the window
+        y = sy + pty + cp.y - wty
         return True, Graphene.Point().init(wp.x - x, wp.y - y)
 
     def _window_texture(self):
@@ -2201,7 +2221,9 @@ class Window(Adw.ApplicationWindow):
         stop.add_css_class("stop-button")
         stop.connect("clicked", lambda *_: app.quit_all())
         self.vol = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.vol.set_round_digits(1)  # follows the mouse pixel by pixel, not in whole percents
         self.vol.set_hexpand(True)
+        self.vol.add_css_class("vol-slider")
         self.vol.set_valign(Gtk.Align.CENTER)
         self.vol.set_value(app.volume_now())
         self.vol.connect("value-changed", lambda s: app.set_volume(s.get_value()))
@@ -2244,11 +2266,38 @@ class Window(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8, margin_bottom=8,
                       margin_start=8, margin_end=8)
         group = Adw.PreferencesGroup()
-        self.quality = Adw.ComboRow(title="Quality")
-        self.quality_model = Gtk.StringList()
-        self.quality.set_model(self.quality_model)
+        # Quality: the stream now and a bobbing arrow; its list opens from the menu's left edge, glass like
+        # the menu, best sound first.
+        self.quality = Adw.ActionRow(title="Quality", activatable=True)
+        self.quality_now = Gtk.Label(xalign=1)
+        self.quality_now.add_css_class("dim-label")
+        arrow = Gtk.Image(icon_name="pan-down-symbolic")
+        arrow.add_css_class("bob-arrow")
+        self.quality.add_suffix(self.quality_now)
+        self.quality.add_suffix(arrow)
+        self.quality_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.quality_list.add_css_class("boxed-list")
+        self.quality_list.connect("row-activated", self.on_quality)
+        head = Gtk.Label(label="Best sound first", xalign=0, margin_start=12, margin_top=8, margin_bottom=4)
+        head.add_css_class("dim-label")
+        head.add_css_class("caption")
+        qbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_top=6, margin_bottom=6, margin_start=6,
+                       margin_end=6)
+        qbox.append(head)
+        qbox.append(self.quality_list)
+        # As wide as the menu (the notes wrap), however long they are.
+        self.quality_fit = Gtk.ScrolledWindow(child=qbox, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                              vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                              hexpand=True)
+        qglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
+        qglass.radius = 16.0
+        qglass.append(self.quality_fit)
+        self.quality_pop = Gtk.Popover(child=qglass, has_arrow=False, position=Gtk.PositionType.BOTTOM)
+        self.quality_pop.add_css_class("glass-menu")
+        self.quality_pop.set_parent(self.quality)
+        self.quality_pop.connect("show", self._place_quality)
+        self.quality.connect("activated", lambda *_: self.quality_pop.popup())
         self.fill_quality()
-        self.quality.connect("notify::selected", self.on_quality)
         group.add(self.quality)
         auto = Adw.SwitchRow(title="Start at login", subtitle="Plays with just the tray icon")
         auto.set_active(autostart_on())
@@ -2378,22 +2427,33 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(lambda: (pop.get_child().queue_draw(), False)[1])  # its glass, once it's placed
 
     def fill_quality(self) -> None:
-        self._filling = True
-        while self.quality_model.get_n_items():
-            self.quality_model.remove(0)
-        for _, label, _ in self.app.streams:
-            self.quality_model.append(label)
-        ids = [s[0] for s in self.app.streams]
+        while (row := self.quality_list.get_row_at_index(0)) is not None:
+            self.quality_list.remove(row)
         q = self.app.settings["quality"]
-        self.quality.set_selected(ids.index(q) if q in ids else 0)
-        self._filling = False
+        ids = [s[0] for s in self.app.streams]
+        now = q if q in ids else ids[0]
+        for sid, label, _ in self.app.streams:
+            row = Adw.ActionRow(title=label, subtitle=STREAM_NOTES.get(sid, ""), subtitle_lines=0, activatable=True)
+            row.sid = sid
+            if sid == now:
+                row.add_suffix(Gtk.Image(icon_name="object-select-symbolic"))
+            self.quality_list.append(row)
+        self.quality_now.set_text(dict((s[0], s[1]) for s in self.app.streams)[now])
 
-    def on_quality(self, row, _pspec) -> None:
-        if getattr(self, "_filling", False):
-            return
-        i = row.get_selected()
-        if 0 <= i < len(self.app.streams):
-            self.app.set_quality(self.app.streams[i][0])
+    def on_quality(self, _list, row) -> None:
+        self.quality_pop.popdown()
+        if getattr(row, "sid", None) and row.sid != self.app.settings["quality"]:
+            self.app.set_quality(row.sid)
+            self.fill_quality()
+
+    def _place_quality(self, pop) -> None:
+        """Its left edge on the menu's, as wide as the menu, below the row."""
+        w = self.quality.get_width()
+        self.quality_fit.set_size_request(w, -1)
+        r = Gdk.Rectangle()
+        r.x, r.y, r.width, r.height = 0, self.quality.get_height(), w, 1
+        pop.set_pointing_to(r)
+        GLib.idle_add(lambda: (pop.get_child().queue_draw(), False)[1])
 
     def toggle_full(self) -> None:
         if self.is_fullscreen():
@@ -2492,7 +2552,7 @@ class Window(Adw.ApplicationWindow):
                 f".vol-icon {{ -gtk-icon-size: {22 * f:.0f}px; }}\n"
                 f".overlay-header button {{ min-width: {34 * f:.0f}px; min-height: {34 * f:.0f}px; }}\n"
                 f".overlay-header button image {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
-                f".show-card {{ border-radius: {28 * f:.0f}px; }}\n")
+                f".show-card {{ border-radius: {28 * max(1.0, f):.0f}px; }}\n")
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
         self.logo.set_pixel_size(int(34 * f))
@@ -2500,7 +2560,7 @@ class Window(Adw.ApplicationWindow):
             disc.radius = size * f / 2
             disc.set_size_request(int(size * f), int(size * f))
             disc.queue_draw()
-        self.show_card.radius = 28 * f
+        self.show_card.radius = 28 * max(1.0, f)  # corners r 28, straight sides between (bigger only in full screen)
         # Room inside the glass (margins, not CSS padding: the glass is drawn in the content box).
         v, hz = int(16 * f), int(20 * f)
         self.show_pic.set_margin_start(hz)
@@ -2639,6 +2699,8 @@ class App(Adw.Application):
         self.card_vol = None  # the sound card's volume, percent (card_on)
         self.card_name = ""
         self.card_set_at = 0.0  # when the slider last set it
+        self._vol_cur = self._vol_target = 0.0  # mpv's volume now, and where it's gliding to
+        self._vol_glide = self._vol_save = 0  # timers
         self.upscale_src: dict[str, tuple[str, bytes]] = {}  # kind -> (key, picture bytes), for after the install
         self.orig_tex: dict[str, object] = {}  # kind -> the picture as it came
         self.picture_text = "No picture yet"
@@ -2803,7 +2865,8 @@ class App(Adw.Application):
     def start_mpv(self):
         try:
             self.mpv = Mpv(self.on_prop)
-            self.mpv.volume(100 if self.card_on() else self.settings["volume"])
+            self._vol_cur = self._vol_target = 100 if self.card_on() else self.settings["volume"]
+            self.mpv.volume(self._vol_cur)
             self.error = None
         except (OSError, RuntimeError) as e:
             self.mpv, self.error = None, str(e)
@@ -2884,16 +2947,40 @@ class App(Adw.Application):
         return self.card_vol if self.card_on() and self.card_vol is not None else self.settings["volume"]
 
     def set_volume(self, v: float):
-        v = max(0, min(100, int(v)))
+        v = round(max(0.0, min(100.0, float(v))), 1)
         if self.card_on():
-            if v != self.card_vol:
-                self.card_vol, self.card_set_at = v, time.monotonic()
-                self.card.set(v)
+            if round(v) != self.card_vol:
+                self.card_vol, self.card_set_at = round(v), time.monotonic()
+                self.card.set(round(v))
         elif v != self.settings["volume"]:
             self.settings["volume"] = v
-            if self.mpv:
-                self.mpv.volume(v)
-            save_settings(self.settings)
+            self.glide_volume(v)
+            if self._vol_save:
+                GLib.source_remove(self._vol_save)
+            self._vol_save = GLib.timeout_add(600, self._save_volume)  # once the dragging stops
+
+    def _save_volume(self) -> bool:
+        self._vol_save = 0
+        save_settings(self.settings)
+        return False
+
+    def glide_volume(self, v: float) -> None:
+        """mpv's volume follows softly (a fifth of a second), not in jumps."""
+        self._vol_target = v
+        if not self._vol_glide:
+            self._vol_glide = GLib.timeout_add(16, self._glide_step)
+
+    def _glide_step(self) -> bool:
+        cur = self._vol_cur + (self._vol_target - self._vol_cur) * 0.22
+        if abs(self._vol_target - cur) < 0.05:
+            cur = self._vol_target
+        self._vol_cur = cur
+        if self.mpv:
+            self.mpv.volume(cur)
+        if cur == self._vol_target:
+            self._vol_glide = 0
+            return False
+        return True
 
     def nudge_volume(self, d: int):
         self.set_volume(self.volume_now() + d)
@@ -2917,11 +3004,14 @@ class App(Adw.Application):
             self.card = CardVolume(self._card_changed)  # its threads end; a new one for turning it on again
             self.card_vol = None
         if self.mpv:
-            self.mpv.volume(100 if on else self.settings["volume"])
+            self._vol_cur = self._vol_target = 100 if on else self.settings["volume"]
+            self.mpv.volume(self._vol_cur)
         self.update()
 
     def quit_all(self):
         self.quitting = True
+        if self._vol_save:  # a volume change not saved yet
+            self._save_volume()
         if self.mpv:
             self.mpv.quit()
         self.release()
