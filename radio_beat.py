@@ -632,6 +632,9 @@ class Mpv:
     def volume(self, v: float) -> None:
         self.cmd("set_property", "volume", v)
 
+    def mute(self, on: bool) -> None:
+        self.cmd("set_property", "mute", on)
+
     def quit(self) -> None:
         self.cmd("quit")
         try:
@@ -709,7 +712,7 @@ class CardVolume:
             return None
         self.sink = str(sink["index"]) if mine else None
         vols = [int(c["value_percent"].rstrip("%")) for c in sink["volume"].values()] or [0]
-        return (0 if sink["mute"] else round(sum(vols) / len(vols))), sink.get("description", "")
+        return round(sum(vols) / len(vols)), sink.get("description", "")  # muted or not: the volume it's set to
 
     def _reader(self) -> None:
         last = None
@@ -2691,6 +2694,7 @@ class Window(Adw.ApplicationWindow):
         vol_icon = Gtk.Image(icon_name="audio-volume-high-symbolic", halign=Gtk.Align.CENTER,
                              valign=Gtk.Align.CENTER)
         vol_icon.add_css_class("vol-icon")
+        self.vol_icon = vol_icon
         # Pause, stop and the speaker in round dishes of glass, magnifying sharply in the middle, bent at the
         # rim, lit like a dish; pause in red glass; each a little smaller than the one before.
         self.discs = []
@@ -2707,6 +2711,12 @@ class Window(Adw.ApplicationWindow):
             self.cover.watchers.append(disc)
             self.discs.append(disc)
             hold_while_hovered(disc)
+            if child is vol_icon:  # a click on the speaker mutes, and again lets it play
+                click = Gtk.GestureClick()
+                click.connect("pressed", lambda g, *_: (g.set_state(Gtk.EventSequenceState.CLAIMED),
+                                                        app.toggle_mute()))
+                disc.add_controller(click)
+                disc.set_tooltip_text("Mute")
             controls.append(disc)
         controls.append(self.vol)
         inner.append(controls)
@@ -3121,6 +3131,8 @@ class Window(Adw.ApplicationWindow):
             self.show_next.set_visible(nxt is not None)
             tex = a.show_pics.get(cur["img"]) if cur["img"] else None
             self.show_pic.set_from_paintable(tex or a.logo_tex)
+        self.vol_icon.set_from_icon_name("audio-volume-muted-symbolic" if a.muted else "audio-volume-high-symbolic")
+        self.discs[2].set_tooltip_text("Sound on" if a.muted else "Mute")
         self.play_btn.set_icon_name("media-playback-start-symbolic" if a.paused else "media-playback-pause-symbolic")
         self.play_btn.set_tooltip_text("Play" if a.paused else "Pause")
         if a.error:
@@ -3183,6 +3195,7 @@ class App(Adw.Application):
         self.card_name = ""
         self.card_set_at = 0.0  # when the slider last set it
         self._vol_cur = self._vol_target = 0.0  # mpv's volume now, and where it's gliding to
+        self.muted = False  # the speaker button
         self._vol_glide = self._vol_save = 0  # timers
         self.upscale_src: dict[str, tuple[str, bytes]] = {}  # kind -> (key, picture bytes), for after the install
         self.orig_tex: dict[str, object] = {}  # kind -> the picture as it came
@@ -3351,6 +3364,8 @@ class App(Adw.Application):
             self.mpv = Mpv(self.on_prop)
             self._vol_cur = self._vol_target = 100 if self.card_on() else self.settings["volume"]
             self.mpv.volume(self._vol_cur)
+            if self.muted and not self.card_on():
+                self.mpv.mute(True)  # a restarted mpv stays muted
             self.error = None
         except (OSError, RuntimeError) as e:
             self.mpv, self.error = None, str(e)
@@ -3469,6 +3484,17 @@ class App(Adw.Application):
             self._vol_glide = 0
             return False
         return True
+
+    def toggle_mute(self) -> None:
+        """The speaker button: silent, and sound again (the volume stays as set)."""
+        self.muted = not self.muted
+        if self.card_on():
+            target = self.card.sink or "@DEFAULT_SINK@"
+            threading.Thread(target=lambda: subprocess.run(["pactl", "set-sink-mute", target, "1" if self.muted else "0"],
+                                                           capture_output=True), daemon=True).start()
+        elif self.mpv:
+            self.mpv.mute(self.muted)
+        self.update()
 
     def nudge_volume(self, d: int):
         self.set_volume(self.volume_now() + d)
