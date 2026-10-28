@@ -1381,6 +1381,9 @@ CSS = b"""
 .scrim { background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.75) 55%, rgba(0,0,0,0) 100%); }
 .scrim label { color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
 .song { font-weight: 800; }
+@keyframes flash { 0% { text-shadow: 0 0 14px rgba(255,255,255,1), 0 0 34px rgba(255,255,255,0.8); }
+                   100% { text-shadow: 0 1px 3px rgba(0,0,0,0.8); } }
+.scrim label.flash { animation: flash 900ms ease-out; }
 .artist { font-weight: 600; }
 .album { opacity: 0.8; }
 .status { opacity: 0.65; }
@@ -1391,7 +1394,7 @@ CSS = b"""
 .stop-button:hover { background: rgba(255,255,255,0.28); }
 .scrim scale trough highlight { background: #E3051A; }
 .overlay-header { background: none; box-shadow: none; }
-.show-card { padding: 10px; }
+.show-card { padding: 0; }
 .show-pic { border-radius: 10px; }
 .on-air { background: #E3051A; color: white; border-radius: 999px; padding: 1px 8px; font-weight: 800; }
 .show-title { font-weight: 700; }
@@ -1494,7 +1497,6 @@ class GlassCard(Gtk.Box):
     (Background shade), a soft top highlight and a thin bright edge. GTK has
     no displacement filter or backdrop-filter, so it's drawn here."""
 
-    LAYERS = 16
     BEND = 1.8  # how far the rim reaches out, in rim widths: a strong, sharp lens edge
 
     def __init__(self, behind: list, **kw):
@@ -1502,6 +1504,17 @@ class GlassCard(Gtk.Box):
         self.behind = behind  # [(CoverView, darken 0..1)], back to front
         self.radius = 16.0
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
+        self.flash = 0.0  # 1 → 0 when the song changes
+        self.flash_anim = None
+
+    def blink(self) -> None:
+        """A brief bright flash (a new song)."""
+        if self.flash_anim:
+            self.flash_anim.pause()
+        target = Adw.CallbackAnimationTarget.new(lambda v: (setattr(self, "flash", v), self.queue_draw()))
+        self.flash_anim = Adw.TimedAnimation.new(self, 1.0, 0.0, 900, target)
+        self.flash_anim.set_easing(Adw.Easing.EASE_OUT_CUBIC)
+        self.flash_anim.play()
 
     def _behind(self, snap, w: float, h: float, reach: float) -> None:
         """What's behind the card, squeezed so its edge shows `reach` px beyond it."""
@@ -1538,27 +1551,20 @@ class GlassCard(Gtk.Box):
         rr = self._rounded(0, 0, w, h, self.radius)
         rim = min(self.radius * 1.1, h / 2, w / 2)
         snap.push_rounded_clip(rr)
-        n = self.LAYERS
-        self._behind(snap, w, h, rim * self.BEND)  # the rim, bent the most
-        masks = hasattr(snap, "push_mask")
-        for i in range(1, n + 1):
-            d = rim * i / n  # this layer from d px in, bent less
-            reach = rim * self.BEND * (1 - i / n) ** 3  # steep: the bend stays at the very edge
-            inner = self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d)
-            if masks:
-                snap.push_mask(Gsk.MaskMode.ALPHA)
-                snap.push_blur(rim / n * 0.7)  # just enough to melt the layers, edges stay crisp
-                snap.push_rounded_clip(inner)
-                snap.append_color(_rgba(0, 0, 0, 1.0), box)
-                snap.pop()
-                snap.pop()
-                snap.pop()
-                self._behind(snap, w, h, reach)
-                snap.pop()
-            else:
-                snap.push_rounded_clip(inner)
-                self._behind(snap, w, h, reach)
-                snap.pop()
+        # Sharp, like a lens: no blending (that ghosts and looks blurred). Hard-
+        # edged layers from the rim in, each bent 1 px less than the one outside
+        # it, so the steps are too small to see.
+        most = rim * self.BEND
+        steps = max(1, math.ceil(most))
+        self._behind(snap, w, h, most)  # the rim, bent the most
+        for k in range(1, steps + 1):
+            reach = most * (1 - k / steps)
+            d = rim * (1 - (reach / most) ** (1 / 3))  # where the cubic bend falls to `reach`
+            snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d))
+            self._behind(snap, w, h, reach)
+            snap.pop()
+        if self.flash > 0:
+            snap.append_color(_rgba(255, 255, 255, 0.28 * self.flash), box)
         snap.append_color(_rgba(18, 18, 22, 0.34 * self.shade), box)
         hl = Graphene.Rect().init(0, 0, w, h * 0.6)
         snap.append_linear_gradient(hl, Graphene.Point().init(0, 0), Graphene.Point().init(0, h * 0.6),
@@ -1684,23 +1690,24 @@ class Window(Adw.ApplicationWindow):
         self.show_pic.add_css_class("show-pic")
         self.show_pic.set_overflow(Gtk.Overflow.HIDDEN)
         self.show_card.append(self.show_pic)
-        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
-        top = Gtk.Box(spacing=8)
-        badge = Gtk.Label(label="ON AIR", valign=Gtk.Align.CENTER)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER, hexpand=True)
+        top = Gtk.Box(spacing=8, margin_bottom=4)
+        badge = Gtk.Label(label="ON AIR", valign=Gtk.Align.START)
         badge.add_css_class("on-air")
         # Text widths capped (in characters, so they grow with the text in full
         # screen): a wrapping label would otherwise ask for its whole text's width.
-        self.show_title = Gtk.Label(xalign=0, ellipsize=3, max_width_chars=26)  # 3 = Pango.EllipsizeMode.END
+        self.show_title = Gtk.Label(xalign=0, wrap=True, lines=3, ellipsize=3, max_width_chars=30, hexpand=True)
         self.show_title.add_css_class("show-title")
         top.append(badge)
         top.append(self.show_title)
-        self.show_sub = Gtk.Label(xalign=0, wrap=True, lines=2, ellipsize=3, max_width_chars=34)
+        self.show_sub = Gtk.Label(xalign=0, wrap=True, lines=5, ellipsize=3, max_width_chars=38)
         self.show_sub.add_css_class("show-sub")
-        self.show_next = Gtk.Label(xalign=0, ellipsize=3, max_width_chars=34)
+        self.show_next = Gtk.Label(xalign=0, wrap=True, lines=2, ellipsize=3, max_width_chars=38)
         self.show_next.add_css_class("show-next")
         for w in (top, self.show_sub, self.show_next):
             text.append(w)
         self.show_card.append(text)
+        self.show_card_text = text
         self.show_card.set_visible(False)
         # The song and the show: side by side in a wide window (the show at the
         # right, level with the song), the show above the song in a narrow one.
@@ -1898,21 +1905,39 @@ class Window(Adw.ApplicationWindow):
             self._scale = f
             GLib.idle_add(self._apply_scale)  # not while laying out
         wide = width >= 1.3 * height
-        if wide != self._wide:
-            self._wide = wide
+        if wide != self._wide or (wide and width != getattr(self, "_arranged_w", 0)):
+            self._wide, self._arranged_w = wide, width
             GLib.idle_add(self._arrange)
 
+    def blink(self) -> None:
+        """A new song: its lines and the show card flash briefly."""
+        labels = (self.song, self.artist, self.album, self.show_title, self.show_sub, self.show_next)
+        for w in labels:
+            w.remove_css_class("flash")
+        GLib.idle_add(lambda: [w.add_css_class("flash") for w in labels] and False)
+        if getattr(self, "_unflash", None):
+            GLib.source_remove(self._unflash)
+        self._unflash = GLib.timeout_add(1000, lambda: ([w.remove_css_class("flash") for w in labels],
+                                                        setattr(self, "_unflash", None))[0] and False)
+        self.show_card.blink()
+
     def _arrange(self) -> bool:
-        """Show card beside the song (wide window) or above it (narrow)."""
+        """Show card beside the song (wide window, as tall as the song's lines,
+        text centred in it) or above it (narrow)."""
         if self._wide:
             self.info_row.set_orientation(Gtk.Orientation.HORIZONTAL)
+            # The show gets 55 % of the width: its text fits.
+            self.show_card.set_size_request(int(self.get_width() * 0.55), -1)
             self.info_row.set_spacing(int(24 * self._scale))
             self.info_row.reorder_child_after(self.show_card, self.info)
-            self.show_card.set_valign(Gtk.Align.START)
+            self.show_card.set_valign(Gtk.Align.FILL)
+            self.show_card.set_halign(Gtk.Align.FILL)
             self.show_card.set_margin_bottom(0)
         else:
             self.info_row.set_orientation(Gtk.Orientation.VERTICAL)
+            self.show_card.set_size_request(-1, -1)
             self.info_row.set_spacing(6)
+            self.show_card.set_halign(Gtk.Align.END)
             self.info_row.reorder_child_after(self.show_card, None)
             self.show_card.set_valign(Gtk.Align.FILL)
             self.show_card.set_margin_bottom(10)
@@ -1931,11 +1956,19 @@ class Window(Adw.ApplicationWindow):
                 f".overlay-header button image {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
                 f".overlay-header windowcontrols image.icon {{ -gtk-icon-size: {34 * f:.0f}px; "
                 f"min-width: {34 * f:.0f}px; min-height: {34 * f:.0f}px; }}\n"
-                f".show-card {{ padding: {10 * f:.0f}px; border-radius: {14 * f:.0f}px; }}\n")
+                f".show-card {{ border-radius: {14 * f:.0f}px; }}\n")
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
         self.show_card.radius = 16 * f
+        # Room inside the glass (margins, not CSS padding: the glass is drawn in the content box).
+        v, hz = int(16 * f), int(20 * f)
+        self.show_pic.set_margin_start(hz)
+        self.show_card_text.set_margin_end(hz)
+        for w in (self.show_pic, self.show_card_text):
+            w.set_margin_top(v)
+            w.set_margin_bottom(v)
         self.show_card.queue_draw()
+        self._arrange()
         return False
 
     def apply_look(self) -> None:
@@ -1974,7 +2007,10 @@ class Window(Adw.ApplicationWindow):
     def refresh(self) -> None:
         a = self.app
         info = a.info or {}
-        self.song.set_text(info.get("title") or a.song or "Rádio Beat")
+        title = info.get("title") or a.song or "Rádio Beat"
+        if title != self.song.get_text() and self.song.get_text():
+            self.blink()
+        self.song.set_text(title)
         artist = info.get("artist") or a.artist_raw or "První bigbeat u nás"
         self.artist.set_text(artist)
         self.album.set_text(info.get("album") or "")
