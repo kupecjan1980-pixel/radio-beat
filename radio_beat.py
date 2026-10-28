@@ -1520,6 +1520,9 @@ CSS = b"""
 .album { opacity: 0.8; }
 .status { opacity: 0.65; }
 .round { min-width: 56px; min-height: 56px; border-radius: 999px; padding: 0; }
+.glass-disc > button.round { background: none; box-shadow: none; }  /* the glass is the button */
+.glass-disc > button.round:hover { background: rgba(255,255,255,0.10); }
+.glass-disc > button.round:active { background: rgba(0,0,0,0.15); }
 .play-button { background: #E3051A; color: white; min-width: 68px; min-height: 68px; }
 .play-button:hover { background: #F21C30; }
 .stop-button { background: rgba(255,255,255,0.16); color: white; }
@@ -1649,6 +1652,9 @@ class GlassCard(Gtk.Box):
         self._blurred = (None, None)  # (key, texture): the blurred backdrop, made once per picture and size
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
         self.tint = 0.34  # the dark tint over the glass (times shade)
+        self.mag = self.MAG  # < 1: a concave lens (things look smaller)
+        self.concave = False  # lit like a dish: shade along the top inside edge, light along the bottom
+        self.color = None  # (r, g, b, alpha): colored glass
         self.scrim = None  # the shaded panel it lies on: its shading copied into the glass (see-through)
         self.sharp_bars = False  # the blurred bars beside the cover seen sharp (the cover filling them) instead
         self.depth = True  # a soft shadow below the card: it floats over the cover
@@ -1760,11 +1766,11 @@ class GlassCard(Gtk.Box):
         # blurred): hard-edged layers from the rim in, each shifted under 1 px from the one outside it.
         most = rim * self.BEND
         rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the rim's zoom
-        steps = max(1, math.ceil(most + (self.MAG - 1) * max(w, h) / 2))
+        steps = max(1, math.ceil(most + abs(self.mag - 1) * max(w, h) / 2))
         for k in range(0, steps + 1):
             bend = 1 - k / steps  # 1 at the rim, 0 in the middle
             d = rim * (1 - bend ** (1 / 3))  # where the cubic bend falls to `bend`
-            sx, sy = self.MAG + (rx - self.MAG) * bend, self.MAG + (ry - self.MAG) * bend
+            sx, sy = self.mag + (rx - self.mag) * bend, self.mag + (ry - self.mag) * bend
             if k:
                 snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d))
             self._behind(snap, w, h, sx, sy)
@@ -1782,6 +1788,8 @@ class GlassCard(Gtk.Box):
                                          _stop(1.0, 0, 0, 0, 0.0)])
         else:
             snap.append_color(_rgba(18, 18, 22, self.tint * self.shade), box)
+        if self.color:
+            snap.append_color(_rgba(*self.color), box)
         # See-through: no milky sheen over it (that made it a gray slab on a dark cover), only a faint one along
         # the top; the light is in the edges.
         hl = Graphene.Rect().init(0, 0, w, rim)
@@ -1790,11 +1798,17 @@ class GlassCard(Gtk.Box):
         # Thick glass, rounded on every side: its curved side wall darker all round, light catching the top edge
         # (a bright line, a softer glow under it), light coming out through the bottom edge (a fainter line),
         # the bottom-right of the wall in shade.
-        snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.32), 0, 0, 0, rim * 0.7)
-        snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.35), -rim * 0.12, -rim * 0.2, 0, rim * 0.5)
-        snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.85), 0, 1.5, 0, 1.0)
-        snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.14), rim * 0.06, rim * 0.1, 0, rim * 0.25)
-        snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.35), 0, -1.5, 0, 1.5)
+        if self.concave:
+            # A dish: the top inside edge in shade, light gathering along the bottom, a bright lip all round.
+            snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.5), 0, rim * 0.18, 0, rim * 0.35)
+            snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.32), 0, -rim * 0.12, 0, rim * 0.3)
+            snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.55), 0, 0, 1.0, 1.0)
+        else:
+            snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.32), 0, 0, 0, rim * 0.7)
+            snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.35), -rim * 0.12, -rim * 0.2, 0, rim * 0.5)
+            snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.85), 0, 1.5, 0, 1.0)
+            snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.14), rim * 0.06, rim * 0.1, 0, rim * 0.25)
+            snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.35), 0, -1.5, 0, 1.5)
         snap.pop()
         edge = [_rgba(255, 255, 255, 0.30), _rgba(255, 255, 255, 0.12),
                 _rgba(255, 255, 255, 0.08), _rgba(255, 255, 255, 0.12)]  # top, right, bottom, left
@@ -2052,11 +2066,24 @@ class Window(Adw.ApplicationWindow):
         self.vol.set_valign(Gtk.Align.CENTER)
         self.vol.set_value(app.volume_now())
         self.vol.connect("value-changed", lambda s: app.set_volume(s.get_value()))
-        controls.append(self.play_btn)
-        controls.append(stop)
-        vol_icon = Gtk.Image(icon_name="audio-volume-high-symbolic", margin_start=6)
+        vol_icon = Gtk.Image(icon_name="audio-volume-high-symbolic", halign=Gtk.Align.CENTER,
+                             valign=Gtk.Align.CENTER)
         vol_icon.add_css_class("vol-icon")
-        controls.append(vol_icon)
+        # Pause, stop and the speaker in round dishes of glass (concave: what's behind looks smaller in them,
+        # more towards the rim), pause in red glass; each a little smaller than the one before.
+        self.discs = []
+        for child, color, margin in ((self.play_btn, (227, 5, 26, 0.55), 0), (stop, None, 0), (vol_icon, None, 6)):
+            disc = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER,
+                             halign=Gtk.Align.CENTER, margin_start=margin)
+            disc.add_css_class("glass-disc")
+            disc.scrim, disc.mag, disc.concave, disc.depth, disc.color = scrim, 0.86, True, False, color
+            disc.set_hexpand(False)  # only the slider takes the row's spare width
+            disc.set_homogeneous(True)  # the button or icon fills the dish, centred
+            disc.append(child)
+            self.backdrop.watchers.append(disc)
+            self.cover.watchers.append(disc)
+            self.discs.append(disc)
+            controls.append(disc)
         controls.append(self.vol)
         inner.append(controls)
         self.status = Gtk.Label(xalign=0)
@@ -2321,13 +2348,18 @@ class Window(Adw.ApplicationWindow):
         # the buttons grow too, so they don't look lost next to the text
         css += (f".round {{ min-width: {56 * f:.0f}px; min-height: {56 * f:.0f}px; }}\n"
                 f".play-button {{ min-width: {68 * f:.0f}px; min-height: {68 * f:.0f}px; }}\n"
-                f".round image, .vol-icon {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
+                f".round image {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
+                f".vol-icon {{ -gtk-icon-size: {22 * f:.0f}px; }}\n"
                 f".overlay-header button {{ min-width: {34 * f:.0f}px; min-height: {34 * f:.0f}px; }}\n"
                 f".overlay-header button image {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
                 f".show-card {{ border-radius: {28 * f:.0f}px; }}\n")
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
         self.logo.set_pixel_size(int(34 * f))
+        for disc, size in zip(self.discs, (68, 56, 46)):  # pause, stop (a little smaller), speaker (smaller still)
+            disc.radius = size * f / 2
+            disc.set_size_request(int(size * f), int(size * f))
+            disc.queue_draw()
         self.show_card.radius = 28 * f
         # Room inside the glass (margins, not CSS padding: the glass is drawn in the content box).
         v, hz = int(16 * f), int(20 * f)
@@ -2352,8 +2384,9 @@ class Window(Adw.ApplicationWindow):
         if a.settings.get("font", "beat") == "beat" and a.fonts_ok:
             css += BEAT_CSS
         self.look_css.load_from_data(css.encode())
-        self.show_card.shade = k
-        self.show_card.queue_draw()
+        for card in (self.show_card, *self.discs):
+            card.shade = k
+            card.queue_draw()
 
     def on_double(self, _gesture, n, x, y) -> None:
         if n != 2:
