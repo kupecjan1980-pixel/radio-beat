@@ -723,7 +723,7 @@ ESR_SHA256 = "e5aa6eb131234b87c0c51f82b89390f5e3e642b7b70f2b9bbe95b6a285a40c96"
 ESR_MODEL = "realesrgan-x4plus"
 DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat")
 UPSCALED_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat", "upscaled")
-UPSCALE_FROM = 1.25
+UPSCALE_FROM = 1.05
 UPSCALED_KEEP = 300  # cached pictures
 
 
