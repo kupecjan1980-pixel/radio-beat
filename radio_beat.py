@@ -2606,6 +2606,10 @@ class Window(Adw.ApplicationWindow):
         dbl = Gtk.GestureClick()
         dbl.connect("pressed", self.on_double)
         self.add_controller(dbl)
+        # A right click anywhere: mute, and again sound (like the speaker button).
+        right = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        right.connect("pressed", lambda *_: app.toggle_mute())
+        self.add_controller(right)
         # The mouse wheel anywhere: volume (the slider itself, and the open menu, scroll their own way).
         wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL
                                           | Gtk.EventControllerScrollFlags.DISCRETE)
