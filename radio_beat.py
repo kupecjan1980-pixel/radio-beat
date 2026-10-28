@@ -1802,11 +1802,11 @@ popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
 @keyframes pump { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
 @keyframes tick { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .glass-disc:hover { animation: pump 1s ease-in-out infinite; }
-/* The volume slider pumps up and down only (sideways it would run into the speaker), its knob along. */
-@keyframes pump-tall { 0%, 100% { transform: scale(1); } 50% { transform: scale(1, 1.8); } }
-@keyframes pump-knob { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.35); } }
+/* The volume slider pumps mostly up and down (a little sideways: more would reach the speaker), its knob
+   like the buttons. */
+@keyframes pump-tall { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.015, 1.8); } }
 scale.vol-slider:hover trough { animation: pump-tall 1s ease-in-out infinite; }
-scale.vol-slider:hover slider { animation: pump-knob 1s ease-in-out infinite; }
+scale.vol-slider:hover slider { animation: pump 1s ease-in-out infinite; }
 /* The quality list's arrow bobs up and down (never turns). */
 @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
 row:hover .bob-arrow { animation: bob 900ms ease-in-out infinite; }
