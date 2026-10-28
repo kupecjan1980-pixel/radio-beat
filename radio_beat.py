@@ -4040,7 +4040,8 @@ class App(Adw.Application):
         if parts:
             self._remember_artist(parts[0])
             cur, _ = on_air(self.schedule, time.localtime())
-            self.db.play(first_artist(parts[0]), parts[1], cur["title"] if cur else None, self.host)
+            if norm(first_artist(parts[0])) not in ("radio beat", "beat"):  # not the station's own jingles
+                self.db.play(first_artist(parts[0]), parts[1], cur["title"] if cur else None, self.host)
         if not parts:
             self.cover_tex = None
         self.enhancer.drop("cover")
