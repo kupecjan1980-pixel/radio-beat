@@ -2910,6 +2910,7 @@ class Window(Adw.ApplicationWindow):
         self.apply_look()
         self.connect("close-request", self.on_close)
         self.card_turn, self._turn_secs = "show", 20.0
+        self._turn_content = None  # what the second turn shows, chosen when it starts
         self._type_id = 0
         self._typing_text = ""
         self._turn_id = GLib.timeout_add(20000, self._turn)
@@ -3181,7 +3182,8 @@ class Window(Adw.ApplicationWindow):
     def _turn(self) -> bool:
         a = self.app
         self._turn_id = 0
-        turn = a.turn_content()
+        turn = None if self.card_turn == "song" else a.turn_content()
+        self._turn_content = turn
         if self.card_turn == "song" or not turn:
             self.card_turn = "show"
             self._stop_typing()
@@ -3379,7 +3381,7 @@ class Window(Adw.ApplicationWindow):
         self.cover.set_paintable(pic, redraw)
         self.backdrop.set_paintable(pic, redraw)
         cur, nxt = on_air(a.schedule, time.localtime())
-        turn = a.turn_content() if self.card_turn == "song" else None
+        turn = self._turn_content if self.card_turn == "song" else None
         self.show_card.set_visible(cur is not None or turn is not None)
         self.badge.set_text(a.badge(turn[0]) if turn else "ON AIR")
         if turn:
@@ -3453,6 +3455,12 @@ class App(Adw.Application):
         self.codec = self.bitrate = None
         self.facts = ""  # first release, where it was recorded
         self.about = ""  # a few sentences about the song (Wikipedia)
+        self.song_shown = False  # its turn came already (then the mix)
+        self.history: list[str] = []  # artists played lately
+        self.artist_info: dict[str, str] = {}  # artist -> what Wikipedia says (Czech)
+        self.trivia_seen: dict[str, set] = {}  # what was shown of each, so the next time is different
+        self._last_lead = ""
+        self.station_about = ""
         self.band_about = self.host_about = ""  # 'Did you know?' about the artist, about who's on air
         self.cover_tex = None
         self.logo_tex = None
@@ -3508,6 +3516,9 @@ class App(Adw.Application):
                     self.upscale_src["logo"] = (p, f.read())
                 break
         GLib.idle_add(lambda: (self._enhance("logo"), False)[1])  # enhanced before: from the cache at once
+        threading.Thread(target=lambda: GLib.idle_add(setattr, self, "station_about",
+                                                      name_about("Rádio Beat", HOST_WORDS + MUSIC_WORDS, ("cs", "en"))),
+                         daemon=True).start()
         threading.Thread(target=self._install_upscaler, daemon=True).start()
         if self.card_on():
             self.card.start()
@@ -3948,6 +3959,9 @@ class App(Adw.Application):
         # in between); the logo only when there's no song or no cover.
         self.info = None
         self.facts = self.about = self.band_about = ""
+        self.song_shown = False
+        if parts:
+            self._remember_artist(parts[0])
         if not parts:
             self.cover_tex = None
         self.enhancer.drop("cover")
@@ -3980,7 +3994,9 @@ class App(Adw.Application):
         """Czech as shown: in ostravština unless that's switched off ('Víte, že…' becomes 'Viš co?')."""
         if not self.settings.get("ostrava", True):
             return text
-        return "Viš co? " if text == "Víte, že… " else ostrava(text)
+        if text.startswith("Víte, že… "):
+            return "Viš co? " + ostrava(text[len("Víte, že… "):])
+        return ostrava(text)
 
     BADGES = {"NOW PLAYING": ("PRÁVĚ HRAJE", "PRAVĚ HRAJE"), "DID YOU KNOW": ("VÍTE, ŽE…", "VIŠ CO?")}
 
@@ -3988,9 +4004,73 @@ class App(Adw.Application):
         cs = self.BADGES.get(name)
         return name if cs is None else cs[1 if self.settings.get("ostrava", True) else 0]
 
+    # A mix for the show card's second turn, so it's never the same for long: the song playing (once), then
+    # about the artists played lately, now and then who's on air (about 15 %) and the station itself (5 %);
+    # each time other sentences and another way of leading in.
+    LEADS = {"artist": ("Víte, že… ", "Zajímavost: ", "Mimochodem: ", "Z hudební kroniky: ", "Na okraj: ",
+                        "Hrálo se u nás – {n}. ", "Pár slov k interpretovi {n}: "),
+             "host": ("U mikrofonu: {n}. ", "Dnes vás provází {n}. ", "Moderuje {n}. ", "Kdo vás teď baví? {n}. "),
+             "station": ("Něco o nás: ", "Rádio Beat: ", "Víte, kdo vám hraje? ")}
+    BADGE = {"artist": "ZAJÍMAVOST", "host": "U MIKROFONU", "station": "RÁDIO BEAT"}
+
+    def _remember_artist(self, artist: str) -> None:
+        """A song's artist joins the recent ones; what Wikipedia says about it is fetched (once) for the mix."""
+        name = first_artist(artist)
+        if not name or norm(name) in ("radio beat", "beat"):
+            return
+        self.history = [n for n in self.history if norm(n) != norm(name)][-24:] + [name]
+        if name not in self.artist_info:
+            self.artist_info[name] = ""
+            threading.Thread(target=lambda: GLib.idle_add(self.artist_info.__setitem__, name,
+                                                          name_about(name, MUSIC_WORDS)), daemon=True).start()
+
+    def _pick(self, kind: str, key: str, text: str, name: str = ""):
+        sentences = [x for x in re.split(r"(?<=[.!?])\s+", text) if len(x) > 20]
+        if not sentences:
+            return None
+        n = random.choice((1, 2))
+        starts = list(range(max(1, len(sentences) - n + 1)))
+        seen = self.trivia_seen.setdefault(key, set())
+        fresh = [i for i in starts if i not in seen] or starts
+        if len(fresh) == len(starts) and seen:
+            seen.clear()
+        i = random.choice(fresh)
+        seen.add(i)
+        lead = random.choice(self.LEADS[kind]).format(n=name)
+        if lead == self._last_lead and len(self.LEADS[kind]) > 1:
+            lead = random.choice([x for x in self.LEADS[kind] if x != lead]).format(n=name)
+        self._last_lead = lead
+        return self.cz(self.BADGE[kind]), name or "Rádio Beat", self.cz(lead + " ".join(sentences[i:i + n])), \
+            self.logo_tex
+
+    def trivia(self):
+        r = random.random()
+        if self.station_about and r < 0.05:
+            return self._pick("station", "station", self.station_about)
+        if self.host_about and self.host and r < 0.20:
+            return self._pick("host", "host:" + self.host, self.host_about, self.host)
+        now = norm(first_artist(self.artist_raw or ""))
+        past = [n for n in self.history if self.artist_info.get(n) and norm(n) != now]
+        if past:
+            name = random.choice(past[-12:])
+            return self._pick("artist", "artist:" + name, self.artist_info[name], name)
+        if self.host_about and self.host:
+            return self._pick("host", "host:" + self.host, self.host_about, self.host)
+        if self.station_about:
+            return self._pick("station", "station", self.station_about)
+        return None
+
     def turn_content(self):
-        """What the show card's second turn shows: (badge, title, text, picture) or None. The song (Wikipedia
-        about it), else 'Did you know?' about the artist, else about who's on air."""
+        """What the show card's second turn shows next: (badge, title, text, picture) or None. The song playing
+        (once a song), else the mix (trivia)."""
+        if self.about and not self.song_shown:
+            self.song_shown = True
+            info = self.info or {}
+            return "NOW PLAYING", info.get("title") or self.song or "", self.cz(self.about), \
+                self.cover_tex or self.logo_tex
+        return self.trivia() or self._old_turn_content()
+
+    def _old_turn_content(self):
         info = self.info or {}
         if self.about:
             return "NOW PLAYING", info.get("title") or self.song or "", self.cz(self.about), \
