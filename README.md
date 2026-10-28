@@ -13,7 +13,7 @@ Not made by or affiliated with the station; it plays the public streams.
   closing the window keeps it playing
 - Audio quality: AAC 128, MP3 128 (two servers), AAC 64; FLAC is listed automatically if the station ever offers one
 - Start at login (plays with only the tray icon)
-- KDE Plasma: opens in the bottom-right corner, flush with the right edge and sitting on the taskbar
+- KDE Plasma: opens in the bottom-left corner, flush with the left edge and sitting on the taskbar
   (a small KWin script the app loads; switch in settings)
 - Updates from settings: Check compares with GitHub, Update installs the new version and restarts the app
 - Media keys and the desktop's player widget (MPRIS): shows as Rádio Beat with the song and cover; mpv itself stays hidden

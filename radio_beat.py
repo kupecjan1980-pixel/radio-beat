@@ -115,10 +115,10 @@ def set_autostart(on: bool) -> None:
         )
 
 
-# --- KDE: open in the bottom-right corner ---------------------------------------
+# --- KDE: open in the bottom-left corner ----------------------------------------
 # A Wayland window can't place itself, and KWin's window rules have no "bottom
-# right" placement. A small KWin script does it: each time the window appears,
-# it goes flush against the right edge, its bottom on the taskbar (KWin's
+# left" placement. A small KWin script does it: each time the window appears,
+# it goes flush against the left edge, its bottom on the taskbar (KWin's
 # MaximizeArea is the screen without the panels). The app loads the script
 # into KWin over D-Bus at start (Plasma 6, and 5's clientAdded).
 # The earlier "under the mouse" rule (KWIN_RULE) is taken out again.
@@ -129,7 +129,7 @@ function place(w) {
     if (!w || w.resourceClass !== "%s") return;
     var a = workspace.clientArea(KWin.MaximizeArea, w);
     var g = w.frameGeometry;
-    w.frameGeometry = {x: a.x + a.width - g.width, y: a.y + a.height - g.height, width: g.width, height: g.height};
+    w.frameGeometry = {x: a.x, y: a.y + a.height - g.height, width: g.width, height: g.height};
 }
 (workspace.windowAdded || workspace.clientAdded).connect(place);
 """ % APP_ID
@@ -142,7 +142,7 @@ def _kwin_scripting(method: str, args=None, reply: str | None = None):
 
 
 def kwin_corner(on: bool) -> None:
-    """Loads (or unloads) the bottom-right placement script into the running KWin."""
+    """Loads (or unloads) the bottom-left placement script into the running KWin."""
     try:
         loaded = _kwin_scripting("isScriptLoaded", GLib.Variant("(s)", (KWIN_SCRIPT_NAME,)), "(b)").unpack()[0]
         if loaded:
@@ -203,6 +203,7 @@ REPO = "kupecjan1980-pixel/radio-beat"
 RAW = f"https://raw.githubusercontent.com/{REPO}/master"
 
 
+AUTO_UPDATE_S = 5 * 60  # how often it looks for a new version
 LATEST: dict = {}  # the newest commit seen by update_status()
 
 
@@ -1495,7 +1496,7 @@ class Enhancer:
 
 CSS = b"""
 .cover-bg { background: #111; }
-.backdrop { filter: blur(36px) brightness(0.55); transform: scale(1.15); }
+.backdrop { filter: blur(36px) brightness(0.55); transform: scale(1.15); }  /* GlassCard draws it the same: BACKDROP_* */
 .scrim { background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.75) 55%, rgba(0,0,0,0) 100%); }
 .scrim label { color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
 .song { font-weight: 800; }
@@ -1519,7 +1520,9 @@ CSS = b"""
 .show-sub { opacity: 0.8; }
 .show-next { opacity: 0.7; }
 .overlay-header button { background: rgba(0,0,0,0.45); color: white; }
-.overlay-header windowcontrols image.icon { -gtk-icon-size: 34px; min-width: 34px; min-height: 34px; border-radius: 8px; }
+.overlay-header .top-logo { border-radius: 8px; margin-start: 4px; }
+.overlay-header button.close-button { background: #E3051A; color: white; }
+.overlay-header button.close-button:hover { background: #F21C30; }
 """
 
 
@@ -1606,6 +1609,9 @@ class CoverView(Gtk.Widget):
             snap.pop()
 
 
+BACKDROP_BLUR, BACKDROP_SCALE = 36.0, 1.15  # the .backdrop CSS above
+
+
 class GlassCard(Gtk.Box):
     """A liquid-glass panel: what's behind it (the backdrop and the cover) is
     not blurred but refracted, like through a lens: sharp and true in the
@@ -1616,11 +1622,13 @@ class GlassCard(Gtk.Box):
     no displacement filter or backdrop-filter, so it's drawn here."""
 
     BEND = 1.8  # how far the rim reaches out, in rim widths: a strong, sharp lens edge
+    RIM = 0.63  # the bent band's width, in corner radii
 
     def __init__(self, behind: list, **kw):
         super().__init__(**kw)
         self.behind = behind  # [(CoverView, darken 0..1)], back to front
-        self.radius = 16.0
+        self.radius = 28.0
+        self._blurred = (None, None)  # (key, texture): the blurred backdrop, made once per picture and size
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
         self.flash = 0.0  # 1 → 0 when the song changes
         self.flash_anim = None
@@ -1648,6 +1656,19 @@ class GlassCard(Gtk.Box):
             if not pic or not ok:
                 continue
             vw, vh = view.get_width(), view.get_height()
+            if view.has_css_class("backdrop"):
+                # The blurred bars beside the cover: blurred here too, like around the card, and not bent
+                # (squeezing undone: they stay where they are).
+                tex = self._backdrop(view, pic, vw, vh, darken)
+                if tex:
+                    snap.save()
+                    if reach > 0.05:
+                        snap.translate(Graphene.Point().init(cx, cy))
+                        snap.scale(1 + 2 * reach / w, 1 + 2 * reach / h)
+                        snap.translate(Graphene.Point().init(-cx, -cy))
+                    snap.append_texture(tex, Graphene.Rect().init(p.x, p.y, vw, vh))
+                    snap.restore()
+                continue
             snap.save()
             snap.translate(p)
             view.draw(snap, pic, vw, vh)
@@ -1655,6 +1676,32 @@ class GlassCard(Gtk.Box):
                 snap.append_color(_rgba(0, 0, 0, darken * self.shade), Graphene.Rect().init(0, 0, vw, vh))
             snap.restore()
         snap.restore()
+
+    def _backdrop(self, view, pic, vw: int, vh: int, darken: float):
+        """The backdrop as the window shows it (blurred, darkened, a bit enlarged), as a texture: drawn once,
+        not once per lens layer."""
+        key = (id(pic), vw, vh, round(darken * self.shade, 3))
+        if self._blurred[0] == key:
+            return self._blurred[1]
+        native = self.get_native()
+        if not native or vw <= 0 or vh <= 0:
+            return None
+        s = Gtk.Snapshot()
+        s.push_clip(Graphene.Rect().init(0, 0, vw, vh))
+        s.push_blur(BACKDROP_BLUR)
+        s.translate(Graphene.Point().init(vw / 2, vh / 2))
+        s.scale(BACKDROP_SCALE, BACKDROP_SCALE)
+        s.translate(Graphene.Point().init(-vw / 2, -vh / 2))
+        view.draw(s, pic, vw, vh)
+        s.pop()
+        s.append_color(_rgba(0, 0, 0, darken * self.shade), Graphene.Rect().init(0, 0, vw, vh))
+        s.pop()
+        node = s.to_node()
+        if node is None:
+            return None
+        tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, vw, vh))
+        self._blurred = (key, tex)
+        return tex
 
     def _rounded(self, x: float, y: float, w: float, h: float, r: float) -> Gsk.RoundedRect:
         rr = Gsk.RoundedRect()
@@ -1667,7 +1714,7 @@ class GlassCard(Gtk.Box):
             return
         box = Graphene.Rect().init(0, 0, w, h)
         rr = self._rounded(0, 0, w, h, self.radius)
-        rim = min(self.radius * 1.1, h / 2, w / 2)
+        rim = min(self.radius * self.RIM, h / 2, w / 2)
         snap.push_rounded_clip(rr)
         # Sharp, like a lens: no blending (that ghosts and looks blurred). Hard-
         # edged layers from the rim in, each bent 1 px less than the one outside
@@ -1756,6 +1803,8 @@ class Window(Adw.ApplicationWindow):
         self.app = app
         self.set_icon_name(APP_ID)
         self._scale = 1.0
+        self._fit = 1.0  # < 1: everything smaller, so it all fits in the window (not in full screen)
+        self._fit_queued = False
         self.scale_css = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.scale_css,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
@@ -1775,13 +1824,19 @@ class Window(Adw.ApplicationWindow):
         bg.add_overlay(self.cover)
         overlay = Gtk.Overlay(child=bg)
 
-        header = self.header = Adw.HeaderBar(show_title=False, valign=Gtk.Align.START)
+        # Above everything: the station logo at the left, the gear menu and a red close (to the tray) at the
+        # right. No other window buttons: a double click anywhere switches full screen and back.
+        header = self.header = Adw.HeaderBar(show_title=False, valign=Gtk.Align.START,
+                                             show_start_title_buttons=False, show_end_title_buttons=False)
         header.add_css_class("overlay-header")
+        close = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="Close (keeps playing in the tray)")
+        close.connect("clicked", lambda *_: self.close())
+        close.add_css_class("close-button")
+        header.pack_end(close)
         header.pack_end(self._settings_button())
-        self.full_btn = Gtk.Button(icon_name="view-fullscreen-symbolic", tooltip_text="Full screen (F11)")
-        self.full_btn.connect("clicked", lambda *_: self.toggle_full())
-        header.pack_end(self.full_btn)
-        overlay.add_overlay(header)
+        self.logo = Gtk.Image(pixel_size=34)  # the (enhanced) logo itself, drawn sharp
+        self.logo.add_css_class("top-logo")
+        header.pack_start(self.logo)
         self.connect("notify::fullscreened", self.on_fullscreened)
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self.on_key)
@@ -1790,8 +1845,13 @@ class Window(Adw.ApplicationWindow):
         dbl = Gtk.GestureClick()
         dbl.connect("pressed", self.on_double)
         self.add_controller(dbl)
+        # The mouse wheel anywhere: volume (the slider itself, and the open menu, scroll their own way).
+        wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL
+                                          | Gtk.EventControllerScrollFlags.DISCRETE)
+        wheel.connect("scroll", self.on_wheel)
+        self.add_controller(wheel)
 
-        scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
+        scrim = self.scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
                         margin_top=0)
         scrim.add_css_class("scrim")
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=90,
@@ -1872,11 +1932,14 @@ class Window(Adw.ApplicationWindow):
         self.status.add_css_class("status")
         inner.append(self.status)
         overlay.add_overlay(scrim)
+        overlay.add_overlay(header)  # last: on top of the text
 
         self.set_content(overlay)
         self._apply_scale()
         self.apply_look()
         self.connect("close-request", self.on_close)
+        self.minimised = False
+        self.connect("notify::is-active", lambda w, _: w.is_active() and setattr(w, "minimised", False))
         self.refresh()
 
     def _settings_button(self) -> Gtk.MenuButton:
@@ -1899,7 +1962,7 @@ class Window(Adw.ApplicationWindow):
         self.card_row.connect("notify::active", lambda r, _: self.app.set_card_volume(r.get_active()))
         group.add(self.card_row)
         if is_kde():
-            near = Adw.SwitchRow(title="Open in the corner", subtitle="Bottom right, on the taskbar")
+            near = Adw.SwitchRow(title="Open in the corner", subtitle="Bottom left, on the taskbar")
             near.set_active(self.app.settings.get("tray_popup", True))
             near.connect("notify::active", lambda r, _: self.app.set_tray_popup(r.get_active()))
             group.add(near)
@@ -1929,6 +1992,12 @@ class Window(Adw.ApplicationWindow):
         self.shade_scale.connect("value-changed", lambda sc: self.app.set_look(shade=round(sc.get_value())))
         shade.add_suffix(self.shade_scale)
         group.add(shade)
+        auto_up = Adw.SwitchRow(title="Update by itself",
+                                subtitle="Looks for a new version every 5 minutes, installs it and restarts",
+                                subtitle_lines=0)
+        auto_up.set_active(self.app.settings.get("auto_update", True))
+        auto_up.connect("notify::active", lambda r, _: self.app.set_look(auto_update=r.get_active()))
+        group.add(auto_up)
         self.update_row = Adw.ActionRow(title="Updates")
         self.update_btn = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
         self.update_btn.connect("clicked", lambda *_: self.app.update_clicked())
@@ -1955,7 +2024,7 @@ class Window(Adw.ApplicationWindow):
                                  vscrollbar_policy=Gtk.PolicyType.AUTOMATIC, propagate_natural_height=True,
                                  width_request=320)
         self.menu_fit = fit
-        pop = Gtk.Popover(child=fit, has_arrow=False)
+        pop = self.menu_pop = Gtk.Popover(child=fit, has_arrow=False)
         btn = Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings", popover=pop)
         pop.connect("show", lambda p: self._place_menu(btn, p))
         return btn
@@ -1964,28 +2033,23 @@ class Window(Adw.ApplicationWindow):
     MENU_GAP = 10  # px kept from the window's edges
 
     def _top_right(self, btn) -> float:
-        """The right edge of the rightmost button at the top (the close button
-        in a window, the gear in full screen): the menu lines up with it."""
-        edge = 0.0
+        """The right edge of the rightmost button at the top (close): the menu lines up with it."""
+        edge = None
         stack = [self.header]
         while stack:
             w = stack.pop()
             if isinstance(w, Gtk.Button) and w.get_mapped():
                 ok, b = w.compute_bounds(self)
                 if ok:
-                    edge = max(edge, b.get_x() + b.get_width())
+                    edge = max(edge or 0.0, b.get_x() + b.get_width())
             c = w.get_first_child()
             while c:
                 stack.append(c)
                 c = c.get_next_sibling()
-        if not edge:
-            ok, b = btn.compute_bounds(self)
-            edge = b.get_x() + b.get_width() if ok else self.get_width() - self.MENU_GAP
-        return edge
+        return self.get_width() - self.MENU_GAP if edge is None else edge
 
     def _place_menu(self, btn, pop) -> None:
-        """Drop the menu below the top buttons, its right edge on theirs (in
-        full screen: the gear's, near the screen's edge), never past the window."""
+        """Drop the menu below the top buttons, its right edge on theirs, never past the window."""
         ok, pt = btn.compute_point(self, Graphene.Point())
         if not ok:
             return
@@ -2026,20 +2090,44 @@ class Window(Adw.ApplicationWindow):
 
     def on_fullscreened(self, *_):
         full = self.is_fullscreen()
-        self.full_btn.set_icon_name("view-restore-symbolic" if full else "view-fullscreen-symbolic")
-        self.full_btn.set_tooltip_text("Leave full screen (F11 / Esc)" if full else "Full screen (F11)")
         (self.add_css_class if full else self.remove_css_class)("full")
 
     def do_size_allocate(self, width, height, baseline):
         Adw.ApplicationWindow.do_size_allocate(self, width, height, baseline)
-        f = round(max(1.0, min(width / BASE_SIZE[0], height / BASE_SIZE[1])), 2)
+        f = round(max(1.0, min(width / BASE_SIZE[0], height / BASE_SIZE[1])) * self._fit, 2)
         if f != self._scale:
             self._scale = f
             GLib.idle_add(self._apply_scale)  # not while laying out
+        if not self._fit_queued:
+            self._fit_queued = True
+            GLib.idle_add(self._check_fit)
         wide = width >= 1.3 * height
         if wide != self._wide or (wide and width != getattr(self, "_arranged_w", 0)):
             self._wide, self._arranged_w = wide, width
             GLib.idle_add(self._arrange)
+
+    FIT_STEP = 0.92
+
+    def _check_fit(self) -> bool:
+        """In a window, the text, the show card and the buttons shrink until they all fit its height (a long
+        title, a short window), and grow back when there's room."""
+        self._fit_queued = False
+        w, h = self.get_width(), self.get_height()
+        if w <= 0 or h <= 0:
+            return False
+        fit = self._fit
+        if self.is_fullscreen():
+            fit = 1.0
+        else:
+            need = self.scrim.measure(Gtk.Orientation.VERTICAL, w)[0]
+            if need > h and fit > 0.5:
+                fit = max(0.5, fit * self.FIT_STEP)
+            elif fit < 1.0 and need / self.FIT_STEP < h * 0.95:  # still fits a step bigger: no back and forth
+                fit = min(1.0, fit / self.FIT_STEP)
+        if fit != self._fit:
+            self._fit = fit
+            self.queue_resize()
+        return False
 
     def blink(self) -> None:
         """A new song: its lines and the show card flash briefly."""
@@ -2086,12 +2174,11 @@ class Window(Adw.ApplicationWindow):
                 f".round image, .vol-icon {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
                 f".overlay-header button {{ min-width: {34 * f:.0f}px; min-height: {34 * f:.0f}px; }}\n"
                 f".overlay-header button image {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
-                f".overlay-header windowcontrols image.icon {{ -gtk-icon-size: {34 * f:.0f}px; "
-                f"min-width: {34 * f:.0f}px; min-height: {34 * f:.0f}px; }}\n"
-                f".show-card {{ border-radius: {14 * f:.0f}px; }}\n")
+                f".show-card {{ border-radius: {28 * f:.0f}px; }}\n")
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
-        self.show_card.radius = 16 * f
+        self.logo.set_pixel_size(int(34 * f))
+        self.show_card.radius = 28 * f
         # Room inside the glass (margins, not CSS padding: the glass is drawn in the content box).
         v, hz = int(16 * f), int(20 * f)
         self.show_pic.set_margin_start(hz)
@@ -2126,6 +2213,12 @@ class Window(Adw.ApplicationWindow):
             w = w.get_parent()
         self.toggle_full()
 
+    def on_wheel(self, _ctl, _dx, dy) -> bool:
+        if self.menu_pop.get_visible() or not dy:
+            return False
+        self.app.nudge_volume(-5 if dy > 0 else 5)
+        return True
+
     def on_key(self, _ctl, keyval, _code, _state):
         if keyval == Gdk.KEY_F11 or (keyval == Gdk.KEY_Escape and self.is_fullscreen()):
             self.toggle_full()
@@ -2147,6 +2240,8 @@ class Window(Adw.ApplicationWindow):
         self.artist.set_text(artist)
         self.album.set_text(info.get("album") or "")
         self.album.set_visible(bool(info.get("album")))
+        if a.logo_tex is not None and self.logo.get_paintable() is not a.logo_tex:
+            self.logo.set_from_paintable(a.logo_tex)
         pic = a.cover_tex or a.logo_tex
         # An enhancing step of the picture already up is redrawn slowly; a new one morphs.
         redraw = pic is not None and a.refined == (self.cover.pic, pic)
@@ -2274,7 +2369,8 @@ class App(Adw.Application):
         threading.Thread(target=self._probe_flac, daemon=True).start()
         if is_kde():
             threading.Thread(target=self._kde_place, args=(self.settings.get("tray_popup", True),), daemon=True).start()
-        GLib.timeout_add_seconds(20, lambda: (self.check_update(), False)[1])  # once, after it settled
+        GLib.timeout_add_seconds(20, lambda: (self.check_update(), False)[1])  # first, after it settled
+        GLib.timeout_add_seconds(AUTO_UPDATE_S, lambda: (self.check_update(), True)[1])  # then every 5 minutes
 
     def do_command_line(self, cmdline):
         args = cmdline.get_arguments()[1:]
@@ -2290,12 +2386,20 @@ class App(Adw.Application):
     def show_window(self):
         if not self.win:
             self.win = Window(self)
+        self.win.minimised = False
         self.win.set_visible(True)
         self.win.present()
 
     def toggle_window(self):
-        if self.win and self.win.get_visible():
-            self.win.set_visible(False)
+        """The tray icon: brings the window up, or minimises it when it's up (like its taskbar button).
+        Wayland doesn't tell an app it's minimised: the app remembers it did it, until the window is active again."""
+        w = self.win
+        if w and w.get_visible() and not w.minimised:
+            if is_kde():
+                w.minimised = True
+                w.minimize()
+            else:
+                w.set_visible(False)  # not every desktop minimises (Hyprland): to the tray
         else:
             self.show_window()
 
@@ -2330,6 +2434,8 @@ class App(Adw.Application):
     def _checked(self, ready, text):
         self.update_busy, self.update_ready, self.update_text = False, ready, text
         self.update()
+        if ready and self.settings.get("auto_update", True):
+            self.update_clicked()  # installs it and restarts
         return False
 
     def update_clicked(self):
@@ -2349,8 +2455,10 @@ class App(Adw.Application):
             self.update_busy, self.update_text = False, f"Update failed: {err}"
             self.update()
             return False
-        # Start the new version once this one is gone (same app id), then quit.
-        subprocess.Popen(["sh", "-c", f"sleep 2; exec {launcher()}"], start_new_session=True,
+        # Start the new version once this one is gone (same app id), then quit; with the window only if it was up.
+        shown = self.win is not None and self.win.get_visible()
+        subprocess.Popen(["sh", "-c", f"sleep 2; exec {launcher()}{'' if shown else ' --autostart'}"],
+                         start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.quit_all()
         return False
@@ -2436,7 +2544,7 @@ class App(Adw.Application):
 
     # volume: Rádio Beat's own (mpv), or the sound card's (card_on: mpv stays at 100 %, a knob on the card moves the slider)
     def card_on(self) -> bool:
-        return self.card.ok and self.settings.get("card_volume", True)
+        return self.card.ok and self.settings.get("card_volume", False)
 
     def card_text(self) -> str:
         if not self.card.ok:
