@@ -1625,9 +1625,9 @@ class GlassCard(Gtk.Box):
     (Background shade), a soft top highlight and a thin bright edge. GTK has
     no displacement filter or backdrop-filter, so it's drawn here."""
 
-    BEND = 1.8  # how far the rim reaches out, in rim widths: a strong, sharp lens edge
-    RIM = 0.63  # the bent band's width, in corner radii
-    MAG = 1.07  # the middle, magnified like through a magnifying glass
+    BEND = 1.6  # how far the rim reaches out, in rim widths: a strong, sharp lens edge
+    RIM = 1.6  # the bent band's width (the glass's curved side wall), in corner radii
+    MAG = 1.12  # the middle, magnified like through a thick magnifying glass
 
     def __init__(self, behind: list, **kw):
         super().__init__(**kw)
@@ -1636,6 +1636,9 @@ class GlassCard(Gtk.Box):
         self._blurred = (None, None)  # (key, texture): the blurred backdrop, made once per picture and size
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
         self.tint = 0.34  # the dark tint over the glass (times shade)
+        self.scrim = None  # the shaded panel it lies on: its shading copied into the glass (see-through)
+        self.sharp_bars = False  # the blurred bars beside the cover seen sharp (the cover filling them) instead
+        self.depth = True  # a soft shadow below the card: it floats over the cover
         self.flash = 0.0  # 1 → 0 when the song changes
         self.flash_anim = None
 
@@ -1662,6 +1665,20 @@ class GlassCard(Gtk.Box):
             if not pic or not ok:
                 continue
             vw, vh = view.get_width(), view.get_height()
+            if view.has_css_class("backdrop") and self.sharp_bars:
+                # Sharp: the cover filling the window (what the bars are a blur of), zoomed like them.
+                ok, p = self._where(view.get_parent())
+                if ok:
+                    snap.save()
+                    snap.translate(p)
+                    snap.translate(Graphene.Point().init(vw / 2, vh / 2))
+                    snap.scale(BACKDROP_SCALE, BACKDROP_SCALE)
+                    snap.translate(Graphene.Point().init(-vw / 2, -vh / 2))
+                    view.draw(snap, pic, vw, vh)
+                    snap.restore()
+                    if darken:
+                        snap.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(p.x, p.y, vw, vh))
+                continue
             if view.has_css_class("backdrop"):
                 # The blurred bars beside the cover: blurred here too, like around the card, and bent like
                 # the cover (thick glass all over, just blurry there).
@@ -1674,8 +1691,8 @@ class GlassCard(Gtk.Box):
             snap.save()
             snap.translate(p)
             view.draw(snap, pic, vw, vh)
-            if darken * self.shade:
-                snap.append_color(_rgba(0, 0, 0, darken * self.shade), Graphene.Rect().init(0, 0, vw, vh))
+            if darken:
+                snap.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(0, 0, vw, vh))
             snap.restore()
         snap.restore()
 
@@ -1686,7 +1703,7 @@ class GlassCard(Gtk.Box):
     def _backdrop(self, view, pic, vw: int, vh: int, darken: float):
         """The backdrop as the window shows it (blurred, darkened, a bit enlarged), as a texture: drawn once,
         not once per lens layer."""
-        key = (id(pic), vw, vh, round(darken * self.shade, 3))
+        key = (id(pic), vw, vh, darken)
         if self._blurred[0] == key:
             return self._blurred[1]
         native = self.get_native()
@@ -1700,7 +1717,7 @@ class GlassCard(Gtk.Box):
         s.translate(Graphene.Point().init(-vw / 2, -vh / 2))
         view.draw(s, pic, vw, vh)
         s.pop()
-        s.append_color(_rgba(0, 0, 0, darken * self.shade), Graphene.Rect().init(0, 0, vw, vh))
+        s.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(0, 0, vw, vh))  # its CSS brightness
         s.pop()
         node = s.to_node()
         if node is None:
@@ -1721,6 +1738,9 @@ class GlassCard(Gtk.Box):
         box = Graphene.Rect().init(0, 0, w, h)
         rr = self._rounded(0, 0, w, h, self.radius)
         rim = min(self.radius * self.RIM, h / 2, w / 2)
+        if self.depth:  # it floats above the cover: a wide soft shadow and a tight one where it nearly touches
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
         snap.push_rounded_clip(rr)
         # A magnifying glass, sharp: the middle magnified (MAG), the rim bent hard the other way (it shows what
         # lies beyond the edge, squeezed in), a cubic curve between. No blending (that ghosts and looks
@@ -1739,13 +1759,32 @@ class GlassCard(Gtk.Box):
                 snap.pop()
         if self.flash > 0:
             snap.append_color(_rgba(255, 255, 255, 0.28 * self.flash), box)
-        snap.append_color(_rgba(18, 18, 22, self.tint * self.shade), box)
-        hl = Graphene.Rect().init(0, 0, w, h * 0.6)
-        snap.append_linear_gradient(hl, Graphene.Point().init(0, 0), Graphene.Point().init(0, h * 0.6),
-                                    [_stop(0.0, 255, 255, 255, 0.16), _stop(1.0, 255, 255, 255, 0.0)])
+        ok, sb = self.scrim.compute_bounds(self) if self.scrim else (False, None)
+        if ok:
+            # See-through: the same shading the window has here (the text panel's gradient), nothing more.
+            k = self.shade
+            top, bottom = sb.get_y(), sb.get_y() + sb.get_height()
+            snap.append_linear_gradient(box, Graphene.Point().init(0, bottom), Graphene.Point().init(0, top),
+                                        [_stop(0.0, 0, 0, 0, 0.92 * k), _stop(0.55, 0, 0, 0, 0.75 * k),
+                                         _stop(1.0, 0, 0, 0, 0.0)])
+        else:
+            snap.append_color(_rgba(18, 18, 22, self.tint * self.shade), box)
+        # See-through: no milky sheen over it (that made it a gray slab on a dark cover), only a faint one along
+        # the top; the light is in the edges.
+        hl = Graphene.Rect().init(0, 0, w, rim)
+        snap.append_linear_gradient(hl, Graphene.Point().init(0, 0), Graphene.Point().init(0, rim),
+                                    [_stop(0.0, 255, 255, 255, 0.07), _stop(1.0, 255, 255, 255, 0.0)])
+        # Thick glass, rounded on every side: its curved side wall darker all round, light catching the top edge
+        # (a bright line, a softer glow under it), light coming out through the bottom edge (a fainter line),
+        # the bottom-right of the wall in shade.
+        snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.32), 0, 0, 0, rim * 0.7)
+        snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.35), -rim * 0.12, -rim * 0.2, 0, rim * 0.5)
+        snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.85), 0, 1.5, 0, 1.0)
+        snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.14), rim * 0.06, rim * 0.1, 0, rim * 0.25)
+        snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.35), 0, -1.5, 0, 1.5)
         snap.pop()
-        edge = [_rgba(255, 255, 255, 0.34), _rgba(255, 255, 255, 0.16),
-                _rgba(255, 255, 255, 0.10), _rgba(255, 255, 255, 0.16)]  # top, right, bottom, left
+        edge = [_rgba(255, 255, 255, 0.30), _rgba(255, 255, 255, 0.12),
+                _rgba(255, 255, 255, 0.08), _rgba(255, 255, 255, 0.12)]  # top, right, bottom, left
         snap.append_border(rr, [1.0, 1.0, 1.0, 1.0], edge)
         Gtk.Box.do_snapshot(self, snap)
 
@@ -1757,7 +1796,9 @@ class MenuGlass(GlassCard):
     def __init__(self, win, behind: list, **kw):
         super().__init__(behind, **kw)
         self.win = win
-        self.tint = 0.62  # darker than the show card: the menu's small text stays readable
+        self.tint = 0.42  # a little darker than the show card: the menu's small text stays readable
+        self.sharp_bars = True
+        self.depth = False  # the popup's own shadow does it
 
     def _where(self, widget):
         pop = self.get_native()
@@ -1842,6 +1883,8 @@ class Window(Adw.ApplicationWindow):
         self._fit = 1.0  # < 1: everything smaller, so it all fits in the window (not in full screen)
         self._fit_queued = False
         self._scale_pending = False
+        self._fit_bad = 9.0  # the smallest fit seen not fitting (a line more wraps): not grown back to
+        self._fit_for = None  # (width, height, title) that was measured for
         self.scale_css = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.scale_css,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
@@ -1898,6 +1941,7 @@ class Window(Adw.ApplicationWindow):
         # Only as wide as it needs, at the right (the song info's right edge): less of the cover hidden.
         self.show_card = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], spacing=12, margin_bottom=10,
                                    halign=Gtk.Align.END)
+        self.show_card.scrim = scrim
         self.backdrop.watchers.append(self.show_card)
         self.cover.watchers.append(self.show_card)
         self.show_card.add_css_class("show-card")
@@ -2163,13 +2207,16 @@ class Window(Adw.ApplicationWindow):
         if w <= 0 or h <= 0:
             return False
         fit = self._fit
+        if (w, h, self.song.get_text()) != self._fit_for:  # a new size or song: everything may fit again
+            self._fit_for, self._fit_bad = (w, h, self.song.get_text()), 9.0
         if self.is_fullscreen():
             fit = 1.0
         else:
             need = self.scrim.measure(Gtk.Orientation.VERTICAL, w)[1]  # natural: what it really takes
             if need > h and fit > 0.5:
+                self._fit_bad = min(self._fit_bad, fit)
                 fit = max(0.5, fit * self.FIT_STEP)
-            elif fit < 1.0 and need < h * 0.85:  # a step bigger still fits: no back and forth
+            elif fit < 1.0 and need < h * 0.85 and fit / self.FIT_STEP < self._fit_bad - 1e-6:
                 fit = min(1.0, fit / self.FIT_STEP)
         if fit != self._fit:
             self._fit = fit
