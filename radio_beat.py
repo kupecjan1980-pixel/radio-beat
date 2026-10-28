@@ -12,6 +12,7 @@ Stop quits. Started at login (--autostart) it plays with only the tray icon.
 """
 
 import ctypes
+import glob
 import json
 import math
 import os
@@ -1070,9 +1071,75 @@ class Enhancer:
         self.procs: set = set()
         self.held = False
         self.held_at = 0.0
+        # NPU (testing, off unless switched on): AMD XDNA through ONNX Runtime's Vitis AI provider.
+        self.npu_wanted = False
+        self.npu_ready = False  # driver, runtime and a model all found
+        self.npu_text = "Off"
+        self.npu_model = None
         self.plock = threading.Lock()
         threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._duty, daemon=True).start()
+
+    NPU_DIR = os.path.join(DATA_DIR, "npu")  # an ONNX super-resolution model built for the NPU goes here
+
+    def npu_probe(self) -> None:
+        """What the NPU path has and lacks (for the gear menu): the amdxdna driver, ONNX Runtime with the Vitis
+        AI provider (AMD's XRT and Ryzen AI Software), and a model for it."""
+        if not self.npu_wanted:
+            self.npu_ready, self.npu_text = False, "Off: AI runs on the GPU"
+            return
+        drivers = {os.path.basename(os.path.realpath(d))
+                   for d in glob.glob("/sys/class/accel/accel*/device/driver")}
+        have_npu = "amdxdna" in drivers
+        try:
+            r = subprocess.run(["python3", "-c", "import onnxruntime as o; print(','.join(o.get_available_providers()))"],
+                               capture_output=True, text=True, timeout=30)
+            providers = r.stdout.strip().split(",") if r.returncode == 0 else []
+        except (OSError, subprocess.SubprocessError):
+            providers = []
+        has_ort, has_vai = bool(providers), "VitisAIExecutionProvider" in providers
+        models = sorted(glob.glob(os.path.join(self.NPU_DIR, "*.onnx")))
+        self.npu_model = models[0] if models else None
+        parts = ["NPU: " + ("found (amdxdna driver)" if have_npu else "not found (no amdxdna device)"),
+                 "runtime: " + ("ONNX Runtime with Vitis AI" if has_vai else
+                                "ONNX Runtime without the Vitis AI provider (AMD's XRT + Ryzen AI Software)" if has_ort
+                                else "missing (ONNX Runtime with Vitis AI: AMD's XRT + Ryzen AI Software)"),
+                 "model: " + (os.path.basename(self.npu_model) if self.npu_model else
+                              f"none (an NPU-built ONNX super-resolution model in {self.NPU_DIR})")]
+        self.npu_ready = have_npu and has_vai and bool(self.npu_model)
+        self.npu_text = " · ".join(parts) + (" — AI upscaling tries the NPU first" if self.npu_ready
+                                              else " — AI stays on the GPU")
+        print(f"enhancer: {self.npu_text}", file=sys.stderr)
+
+    def _npu(self, src: str, out: str, work: str) -> bool:
+        """The AI step on the NPU (npu_upscale.py): True when it ran there and gave a picture."""
+        from gi.repository import GdkPixbuf
+        try:
+            _, w, h = GdkPixbuf.Pixbuf.get_file_info(src)
+        except (GLib.Error, TypeError):
+            return False
+        raw_in, raw_out = os.path.join(work, "npu-in.rgb"), os.path.join(work, "npu-out.rgb")
+        if not self._ff(["-i", src], "format=rgb24", raw_in.replace(".rgb", ".png")):
+            return False
+        r = subprocess.run([self.ffmpeg, "-v", "error", "-y", "-i", raw_in.replace(".rgb", ".png"), "-f", "rawvideo",
+                            "-pix_fmt", "rgb24", raw_in], capture_output=True)
+        if r.returncode:
+            return False
+        proc = self.proc = self._spawn(["nice", "-n", "19", "python3", os.path.join(HERE, "npu_upscale.py"),
+                                        self.npu_model, raw_in, str(w), str(h), raw_out])
+        _, err = proc.communicate()
+        self._reap(proc)
+        if self.proc is proc:
+            self.proc = None
+        if proc.returncode != 0:
+            print(f"enhancer: NPU: {err.strip()[-200:] or proc.returncode} (the GPU does it)", file=sys.stderr)
+            return False
+        n = round(math.sqrt(os.path.getsize(raw_out) / (w * h * 3))) if os.path.exists(raw_out) else 0
+        if n < 1:
+            return False
+        r = subprocess.run([self.ffmpeg, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s",
+                            f"{w * n}x{h * n}", "-i", raw_out, out], capture_output=True)
+        return r.returncode == 0 and self._not_black(out)
 
     SHARE = 0.92  # of the CPU / GPU time the enhancing may take; the rest stays free for the animations
 
@@ -1168,6 +1235,7 @@ class Enhancer:
         else:
             lines.append("• Sharpening and denoising: waiting for ffmpeg")
         lines.append("• Morph between steps: GTK (GSK) cross-fade on the GPU")
+        lines.append(f"• NPU (testing): {self.npu_text}")
         return "\n".join(lines)
 
     def _picture(self, text: str) -> None:
@@ -1542,6 +1610,8 @@ class Enhancer:
             if self._ff(["-i", src], f"scale={w0 // 2}:{h0 // 2}:flags=lanczos,format=rgb24", half):
                 feed, how = half, "redrawn" if size == src_size else "redrawn and upscaled"
         big = os.path.join(work, "x4.png")
+        if self.npu_ready and self._npu(feed, big, work):
+            return how if self._resize(big, size, out) else None
         res, err = self._esr(feed, big, model)
         while res is None and self.tile != self.TILES[-1]:
             # The GPU timed out (black or failed): smaller tiles from now on, and again.
@@ -1959,6 +2029,7 @@ class GlassCard(Gtk.Box):
         self.mag = self.MAG  # < 1: a concave lens (things look smaller)
         self.cache_lens = True  # the lens drawn from a texture while nothing behind it changes
         self.pulse_tick = None  # the mouse on it: the magnification breathes, like a magnifier moved up and down
+        self.lift = 0.0  # the card drawn this much bigger meanwhile (it pumps, outline and all)
         self._lens_cache = (None, None)
         self.concave = False  # lit like a dish: shade along the top inside edge, light along the bottom
         self.color = None  # (r, g, b, alpha): colored glass
@@ -1969,6 +2040,7 @@ class GlassCard(Gtk.Box):
         self.flash_anim = None
 
     PULSE = 0.2  # how much more it magnifies at the top of a breath
+    LIFT = 0.04  # and how much bigger the whole card gets then (outline, text and all), like the buttons' pump
     PULSE_HZ = 1.0
 
     def breathe(self) -> None:
@@ -1990,10 +2062,12 @@ class GlassCard(Gtk.Box):
     def _breath_step(self, _w, clock) -> bool:
         t = clock.get_frame_time() / 1e6
         self._breath_amp += ((1.0 if self._breath_on else 0.0) - self._breath_amp) * 0.1
-        self.mag = self._base_mag + self.PULSE * self._breath_amp * (1 - math.cos(2 * math.pi * self.PULSE_HZ * t)) / 2
+        wave = self._breath_amp * (1 - math.cos(2 * math.pi * self.PULSE_HZ * t)) / 2
+        self.mag = self._base_mag + self.PULSE * wave
+        self.lift = self.LIFT * wave
         self.queue_draw()
         if not self._breath_on and self._breath_amp < 0.01:
-            self.mag, self.pulse_tick = self._base_mag, None
+            self.mag, self.pulse_tick, self.lift = self._base_mag, None, 0.0
             anim_hold(False)
             self.queue_draw()
             return GLib.SOURCE_REMOVE
@@ -2099,8 +2173,16 @@ class GlassCard(Gtk.Box):
         return rr
 
     def do_snapshot(self, snap) -> None:
+        if self.lift:
+            w, h = self.get_width(), self.get_height()
+            snap.save()
+            snap.translate(Graphene.Point().init(w / 2, h / 2))
+            snap.scale(1 + self.lift, 1 + self.lift)
+            snap.translate(Graphene.Point().init(-w / 2, -h / 2))
         self.draw_glass(snap)
         Gtk.Box.do_snapshot(self, snap)
+        if self.lift:
+            snap.restore()
 
     def draw_plain(self, snap) -> None:
         """What lies under the card, as if it weren't there (the cover, the bars, the panel's shading), out to
@@ -2626,6 +2708,11 @@ class Window(Adw.ApplicationWindow):
         group.add(self.enhance_row)
         self.picture_row = Adw.ActionRow(title="Picture now", subtitle=self.app.picture_text, subtitle_lines=0)
         group.add(self.picture_row)
+        self.npu_row = Adw.SwitchRow(title="Use the NPU (testing)", subtitle=self.app.enhancer.npu_text,
+                                     subtitle_lines=0)
+        self.npu_row.set_active(self.app.settings.get("npu", False))
+        self.npu_row.connect("notify::active", lambda r, _: self.app.set_npu(r.get_active()))
+        group.add(self.npu_row)
         style = Adw.SwitchRow(title="Beat Radio text style",
                               subtitle="Fonts like the station logo's (Anton, Oswald); off: the normal ones"
                               if self.app.fonts_ok else "Off: its fonts are missing (fonts/ folder)",
@@ -3008,6 +3095,10 @@ class App(Adw.Application):
         self.logo_tex = None
         self.refined = None  # (before, after) of the last enhancing step: redrawn in, not morphed
         self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
+        if self.settings.get("npu", False):
+            self.enhancer.npu_wanted = True
+            threading.Thread(target=lambda: (self.enhancer.npu_probe(), GLib.idle_add(self._npu_checked)),
+                             daemon=True).start()
         self.card = CardVolume(self._card_changed)
         self._holds = 0  # animations running: the enhancing waits while any is
         _ANIM_HOLD[0] = self.anim_hold
@@ -3535,6 +3626,25 @@ class App(Adw.Application):
         self.picture_text = text
         if self.win:
             self.win.picture_row.set_subtitle(text)
+
+    def set_npu(self, on: bool) -> None:
+        """AI upscaling on the NPU first (testing): checks what's there, says so in the menu."""
+        self.settings["npu"] = on
+        save_settings(self.settings)
+        self.enhancer.npu_wanted = on
+        if self.win:
+            self.win.npu_row.set_subtitle("Checking…" if on else "Off: AI runs on the GPU")
+
+        def work():
+            self.enhancer.npu_probe()
+            GLib.idle_add(self._npu_checked)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _npu_checked(self) -> bool:
+        if self.win:
+            self.win.npu_row.set_subtitle(self.enhancer.npu_text)
+            self.win.enhance_note.set_text(self.enhancer.notes())
+        return False
 
     def set_enhance(self, on: bool) -> None:
         self.settings["enhance"] = on

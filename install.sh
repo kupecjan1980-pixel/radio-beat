@@ -45,7 +45,7 @@ if [ ! -s logo.png ]; then
 fi
 
 mkdir -p "$DEST" "$(dirname "$BIN")" "$(dirname "$DESKTOP")"
-install -m 644 radio_beat.py logo.png "$DEST/"
+install -m 644 radio_beat.py npu_upscale.py logo.png "$DEST/"
 # Fonts like the logo's, for the "Beat Radio" text style (SIL OFL, licences beside them).
 mkdir -p "$DEST/fonts"
 install -m 644 fonts/* "$DEST/fonts/"
