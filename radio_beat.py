@@ -1638,6 +1638,81 @@ class CoverView(Gtk.Widget):
 BACKDROP_BLUR, BACKDROP_SCALE = 36.0, 1.15  # the .backdrop CSS above
 
 
+class FlagLogo(Gtk.Widget):
+    """The station logo at the top left. Under the mouse it waves like a flag in the wind, held at its left
+    edge as on a pole: drawn in thin upright strips, each lifted along a wave running to the free edge and
+    shaded where the cloth folds; it settles flat again when the mouse leaves."""
+
+    STRIPS = 28
+    WAVES = 1.3  # waves across the flag
+    SPEED = 1.6  # waves a second
+    LIFT = 0.09  # how high the free edge lifts, in the logo's height
+
+    def __init__(self, size: int = 34, **kw):
+        super().__init__(**kw)
+        self.pic = None
+        self.size = size
+        self.amp = 0.0  # 0 flat .. 1 waving
+        self.phase = 0.0
+        self.hover = False
+        self.tick = None
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda *_: self._wave(True))
+        motion.connect("leave", lambda *_: self._wave(False))
+        self.add_controller(motion)
+
+    def get_paintable(self):
+        return self.pic
+
+    def set_from_paintable(self, pic) -> None:
+        self.pic = pic
+        self.queue_draw()
+
+    def set_pixel_size(self, size: int) -> None:
+        self.size = size
+        self.queue_resize()
+
+    def do_measure(self, orientation, for_size):
+        return self.size, self.size, -1, -1
+
+    def _wave(self, on: bool) -> None:
+        self.hover = on
+        if self.tick is None:
+            self.tick = self.add_tick_callback(self._step)
+
+    def _step(self, _widget, clock) -> bool:
+        self.phase = clock.get_frame_time() / 1e6 * 2 * math.pi * self.SPEED
+        self.amp += ((1.0 if self.hover else 0.0) - self.amp) * 0.12
+        self.queue_draw()
+        if not self.hover and self.amp < 0.01:
+            self.amp, self.tick = 0.0, None
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def do_snapshot(self, snap) -> None:
+        if not self.pic:
+            return
+        w, h = self.get_width(), self.get_height()
+        if self.amp <= 0:
+            self.pic.snapshot(snap, w, h)
+            return
+        sw = w / self.STRIPS
+        for i in range(self.STRIPS):
+            x = i * sw
+            f = (x + sw / 2) / w  # 0 at the pole, 1 at the free edge
+            ang = self.phase - f * 2 * math.pi * self.WAVES
+            lift = math.sin(ang) * h * self.LIFT * f * self.amp
+            fold = math.cos(ang) * 0.22 * f * self.amp  # light on one side of a fold, shade on the other
+            snap.save()
+            snap.translate(Graphene.Point().init(0, lift))
+            snap.push_clip(Graphene.Rect().init(x, 0, sw + 0.6, h))  # a hair wider: no seams
+            self.pic.snapshot(snap, w, h)
+            snap.append_color(_rgba(255, 255, 255, fold) if fold > 0 else _rgba(0, 0, 0, -fold),
+                              Graphene.Rect().init(x, 0, sw + 0.6, h))
+            snap.pop()
+            snap.restore()
+
+
 class GlassCard(Gtk.Box):
     """A liquid-glass panel: what's behind it (the backdrop and the cover) is
     not blurred but refracted, like through a lens: sharp and true in the
@@ -2034,7 +2109,7 @@ class Window(Adw.ApplicationWindow):
         close.add_css_class("close-button")
         header.pack_end(close)
         header.pack_end(self._settings_button())
-        self.logo = Gtk.Image(pixel_size=34)  # the (enhanced) logo itself, drawn sharp
+        self.logo = FlagLogo(34)  # the (enhanced) logo itself, drawn sharp; waves under the mouse
         self.logo.add_css_class("top-logo")
         header.pack_start(self.logo)
         self.connect("notify::fullscreened", self.on_fullscreened)
