@@ -339,6 +339,122 @@ def lookup(artist: str, song: str) -> dict | None:
     return best if best_score >= 3 else None
 
 
+# --- song facts: first release and where it was recorded (MusicBrainz) ---------------
+
+MB = "https://musicbrainz.org/ws/2"
+MB_UA = "RadioBeat/1.0 ( https://github.com/kupecjan1980-pixel/radio-beat )"  # MusicBrainz wants a real one
+FACTS_CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat",
+                           "facts.json")
+_mb_lock = threading.Lock()
+_mb_last = [0.0]
+MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+          "November", "December")
+
+
+def _mb(path: str):
+    """One MusicBrainz request (at most one a second, as it asks; again after a 503)."""
+    for attempt in range(3):
+        with _mb_lock:
+            time.sleep(max(0.0, _mb_last[0] + 1.1 - time.monotonic()))
+            _mb_last[0] = time.monotonic()
+        try:
+            req = urllib.request.Request(MB + path, headers={"User-Agent": MB_UA, "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code != 503:
+                return None
+            time.sleep(2 * (attempt + 1))
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def _date(d: str) -> str:
+    parts = d.split("-")
+    try:
+        if len(parts) == 3:
+            return f"{int(parts[2])} {MONTHS[int(parts[1]) - 1]} {parts[0]}"
+        if len(parts) == 2:
+            return f"{MONTHS[int(parts[1]) - 1]} {parts[0]}"
+    except (ValueError, IndexError):
+        pass
+    return parts[0]
+
+
+def _places(rels: list) -> list[str]:
+    out = []
+    for r in rels or []:
+        if r.get("type") == "recorded at" and r.get("place"):
+            pl = r["place"]
+            area = (pl.get("area") or {}).get("name")
+            out.append(pl["name"] + (f", {area}" if area and area not in pl["name"] else ""))
+        elif r.get("type") == "recorded in" and r.get("area"):
+            out.append(r["area"]["name"])
+    return list(dict.fromkeys(out))
+
+
+def song_facts(artist: str, song: str) -> str:
+    """'First released 8 November 1971 · Recorded at Olympic Studios, London', what MusicBrainz knows (may be
+    ''), remembered per song."""
+    key = f"{norm(first_artist(artist))}|{norm(song)}"
+    try:
+        with open(FACTS_CACHE) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    if key in cache:
+        return cache[key]
+    a, t = norm(first_artist(artist)), norm(song)
+    base = f'recording:"{song}" AND artist:"{first_artist(artist)}" AND status:official'
+
+    def search(extra: str = ""):
+        found = _mb(f"/recording?query={urllib.parse.quote(base + extra)}&fmt=json&limit=100")
+        if found is None:
+            return None
+        return [r for r in found.get("recordings", [])
+                if norm(r.get("title", "")) == t
+                and any(a in norm(c.get("name", "")) or norm(c.get("name", "")) in a
+                        for c in r.get("artist-credit", []) if isinstance(c, dict))]
+
+    recs = search()
+    if recs is None:
+        return ""  # not reached: asked again next time
+    # Live and later versions crowd the search: asked again for anything older than the oldest found, until
+    # there's nothing older.
+    for _ in range(4):
+        dates = [r["first-release-date"] for r in recs if r.get("first-release-date")]
+        if not dates:
+            break
+        older = search(f" AND firstreleasedate:{{* TO {min(dates)}}}")
+        if not older:
+            break
+        recs += older
+    dates = sorted(r["first-release-date"] for r in recs if r.get("first-release-date"))
+    first = dates[0] if dates else ""
+    # Where: the oldest plain recordings first (not a demo or a live one).
+    places = []
+    for r in sorted(recs, key=lambda r: (bool(r.get("disambiguation")), r.get("first-release-date") or "9999"))[:3]:
+        got = _mb(f"/recording/{r['id']}?inc=place-rels+area-rels&fmt=json")
+        places = _places((got or {}).get("relations"))
+        if places:
+            break
+    bits = ([f"First released {_date(first)}"] if first else []) + \
+           ([f"Recorded at {' and '.join(places[:2])}"] if places else [])
+    text = " · ".join(bits)
+    cache[key] = text
+    try:
+        os.makedirs(os.path.dirname(FACTS_CACHE), exist_ok=True)
+        if len(cache) > 3000:
+            cache = dict(list(cache.items())[-2000:])
+        with open(FACTS_CACHE + ".tmp", "w") as f:
+            json.dump(cache, f)
+        os.replace(FACTS_CACHE + ".tmp", FACTS_CACHE)
+    except OSError:
+        pass
+    return text
+
+
 def fetch(url: str) -> bytes | None:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA})
@@ -949,7 +1065,58 @@ class Enhancer:
         self.running: tuple | None = None
         self.proc: subprocess.Popen | None = None
         self.wake = threading.Event()
+        # Animations come first: the AI and ffmpeg get at most SHARE of the time (stopped for the rest of each
+        # tenth of a second), and none at all while something animates (hold).
+        self.procs: set = set()
+        self.held = False
+        self.held_at = 0.0
+        self.plock = threading.Lock()
         threading.Thread(target=self._worker, daemon=True).start()
+        threading.Thread(target=self._duty, daemon=True).start()
+
+    SHARE = 0.92  # of the CPU / GPU time the enhancing may take; the rest stays free for the animations
+
+    def hold(self, on: bool) -> None:
+        """Stop (or let go on) the enhancing while something animates."""
+        with self.plock:
+            if on and not self.held:
+                self.held_at = time.monotonic()
+            self.held = on
+            self._signal(signal.SIGSTOP if on else signal.SIGCONT)
+
+    def _signal(self, sig) -> None:
+        for p in list(self.procs):
+            try:
+                os.kill(p.pid, sig)
+            except OSError:
+                pass
+
+    def _duty(self) -> None:
+        while True:
+            time.sleep(0.1 * self.SHARE)
+            with self.plock:
+                if self.held and time.monotonic() - self.held_at > 30:
+                    self.held = False  # a lost "mouse left": never wait for good
+                    self._signal(signal.SIGCONT)
+                if not self.procs or self.held:
+                    continue
+                self._signal(signal.SIGSTOP)
+            time.sleep(0.1 * (1 - self.SHARE))
+            with self.plock:
+                if not self.held:
+                    self._signal(signal.SIGCONT)
+
+    def _spawn(self, cmd: list) -> subprocess.Popen:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        with self.plock:
+            self.procs.add(proc)
+            if self.held:
+                os.kill(proc.pid, signal.SIGSTOP)
+        return proc
+
+    def _reap(self, proc) -> None:
+        with self.plock:
+            self.procs.discard(proc)
 
     # --- status ------------------------------------------------------------------------
 
@@ -1440,8 +1607,9 @@ class Enhancer:
         if self.gpu_index is not None:
             cmd += ["-g", str(self.gpu_index)]
         # Its own handle: the start-up tests run alongside the worker; self.proc is for stopping it.
-        proc = self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        proc = self.proc = self._spawn(cmd)
         _, err = proc.communicate()
+        self._reap(proc)
         rc = proc.returncode
         if self.proc is proc:
             self.proc = None
@@ -1460,8 +1628,9 @@ class Enhancer:
             cmd += ["-init_hw_device", dev, "-filter_hw_device", "vk"]
         cmd += inputs + ["-vf", vf, "-frames:v", "1"] + (["-q:v", "2"] if jpeg else []) + [out]
         # Its own handle: the start-up tests run alongside the worker; self.proc is for stopping it.
-        proc = self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        proc = self.proc = self._spawn(cmd)
         _, err = proc.communicate()
+        self._reap(proc)
         rc = proc.returncode
         if self.proc is proc:
             self.proc = None
@@ -1569,6 +1738,23 @@ row:hover .bob-arrow { animation: bob 900ms ease-in-out infinite; }
 """
 
 
+# While anything animates, the picture enhancing waits (App.anim_hold): smooth animations even on a slow chip.
+_ANIM_HOLD: list = [None]
+
+
+def anim_hold(on: bool) -> None:
+    if _ANIM_HOLD[0]:
+        _ANIM_HOLD[0](on)
+
+
+def hold_while_hovered(widget) -> None:
+    """The mouse over `widget` (it pumps, ticks or bobs there): the enhancing waits meanwhile."""
+    m = Gtk.EventControllerMotion()
+    m.connect("enter", lambda *_: anim_hold(True))
+    m.connect("leave", lambda *_: anim_hold(False))
+    widget.add_controller(m)
+
+
 class CoverView(Gtk.Widget):
     """A picture filling the widget, "contain" (whole, at the top in a tall
     space, centred in a wide one; small pictures are stretched too) or "cover"
@@ -1590,6 +1776,7 @@ class CoverView(Gtk.Widget):
         self.blur = self.MORPH_BLUR
         self.anim = None
         self.watchers: list = []  # redrawn along (the glass card behind which this shows)
+        self._holding = False  # the enhancing waits while this morphs
 
     def set_paintable(self, pic, redraw: bool = False) -> None:
         if pic is self.pic:
@@ -1600,18 +1787,26 @@ class CoverView(Gtk.Widget):
             self.anim = None
         if self.old is None or pic is None:
             self.t = 1.0
+            self._hold(False)
             self._changed()
             return
+        self._hold(True)
         target = Adw.CallbackAnimationTarget.new(self._tick)
         self.blur = 0.0 if redraw else self.MORPH_BLUR
         self.anim = Adw.TimedAnimation.new(self, 0.0, 1.0, self.REDRAW_MS if redraw else self.MORPH_MS, target)
         self.anim.set_easing(Adw.Easing.EASE_IN_OUT_CUBIC)
         self.anim.play()
 
+    def _hold(self, on: bool) -> None:
+        if on != self._holding:
+            self._holding = on
+            anim_hold(on)
+
     def _tick(self, value: float) -> None:
         self.t = value
         if value >= 1.0:
             self.old = None
+            self._hold(False)
         self._changed()
 
     def _changed(self) -> None:
@@ -1695,6 +1890,7 @@ class FlagLogo(Gtk.Widget):
     def _wave(self, on: bool) -> None:
         self.hover = on
         if self.tick is None:
+            anim_hold(True)
             self.tick = self.add_tick_callback(self._step)
 
     def _step(self, _widget, clock) -> bool:
@@ -1703,6 +1899,7 @@ class FlagLogo(Gtk.Widget):
         self.queue_draw()
         if not self.hover and self.amp < 0.01:
             self.amp, self.tick = 0.0, None
+            anim_hold(False)
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE
 
@@ -1754,6 +1951,8 @@ class GlassCard(Gtk.Box):
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
         self.tint = 0.34  # the dark tint over the glass (times shade)
         self.mag = self.MAG  # < 1: a concave lens (things look smaller)
+        self.cache_lens = True  # the lens drawn from a texture while nothing behind it changes
+        self._lens_cache = (None, None)
         self.concave = False  # lit like a dish: shade along the top inside edge, light along the bottom
         self.color = None  # (r, g, b, alpha): colored glass
         self.scrim = None  # the shaded panel it lies on: its shading copied into the glass (see-through)
@@ -1769,6 +1968,8 @@ class GlassCard(Gtk.Box):
         target = Adw.CallbackAnimationTarget.new(lambda v: (setattr(self, "flash", v), self.queue_draw()))
         self.flash_anim = Adw.TimedAnimation.new(self, 1.0, 0.0, 900, target)
         self.flash_anim.set_easing(Adw.Easing.EASE_OUT_CUBIC)
+        anim_hold(True)
+        GLib.timeout_add(950, lambda: (anim_hold(False), False)[1])
         self.flash_anim.play()
 
     def _behind(self, snap, w: float, h: float, sx: float, sy: float) -> None:
@@ -1892,6 +2093,45 @@ class GlassCard(Gtk.Box):
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
         snap.push_rounded_clip(rr)
+        tex = self._lens_texture(w, h) if self.cache_lens else None
+        if tex:
+            snap.append_texture(tex, box)
+        else:
+            self._lens(snap, w, h)
+        self._finish(snap, w, h, box, rr, rim)
+
+    def _lens_key(self, w: float, h: float):
+        """What the lens shows depends on: which pictures, where they lie, the glass's size and shape."""
+        key = [w, h, self.radius, self.mag, self.sharp_bars]
+        for view, _ in self.behind:
+            for wdg in (view, view.get_parent()):
+                ok, p = self._where(wdg)
+                key += [round(p.x, 1), round(p.y, 1)] if ok else [None]
+            key += [id(view.pic), view.get_width(), view.get_height()]
+        return tuple(key)
+
+    def _lens_texture(self, w: float, h: float):
+        """The lens layers rendered once into a texture (at the screen's scale, sharp) and drawn from it until
+        something behind it changes: one texture a frame instead of a hundred layers (smooth animations)."""
+        key = self._lens_key(w, h)
+        if self._lens_cache[0] == key:
+            return self._lens_cache[1]
+        native = self.get_native()
+        if not native:
+            return None
+        surf = native.get_surface()
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+        s = Gtk.Snapshot()
+        s.scale(k, k)
+        self._lens(s, w, h)
+        node = s.to_node()
+        if node is None:
+            return None
+        tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, w * k, h * k))
+        self._lens_cache = (key, tex)
+        return tex
+
+    def _lens(self, snap, w: float, h: float) -> None:
         # A fish-eye lens, sharp: the middle magnified most (mag), less and less towards the edges, which are
         # bent the other way (they show what lies beyond, squeezed in). No blending (that ghosts and looks
         # blurred): hard-edged layers from the edge in, each shifted under 1 px from the one outside it.
@@ -1908,6 +2148,9 @@ class GlassCard(Gtk.Box):
             self._behind(snap, w, h, sx, sy)
             if k:
                 snap.pop()
+
+    def _finish(self, snap, w: float, h: float, box, rr, rim: float) -> None:
+        """Over the lens: the flash, the shading, the light on the edges (cheap, drawn each time)."""
         if self.flash > 0:
             snap.append_color(_rgba(255, 255, 255, 0.28 * self.flash), box)
         ok, sb = self.scrim.compute_bounds(self) if self.scrim else (False, None)
@@ -1958,6 +2201,7 @@ class MenuGlass(GlassCard):
         self.win = win
         self.paint = None  # the window's content, live
         self._tex = None
+        self.cache_lens = False  # it shows the live window, a new texture each time anyway
         self.tint = 0.42  # a little darker than the show card: the menu's small text stays readable
         self.sharp_bars = True
         self.depth = False  # the popup's own shadow does it
@@ -2063,7 +2307,7 @@ FONT_FILES = ("Anton-Regular.ttf", "Oswald.ttf")
 BEAT_CSS = """
 .song, .show-title { font-family: "Anton"; font-weight: 400; letter-spacing: 0.02em; }
 .artist { font-family: "Oswald"; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
-.album, .status, .show-sub, .show-next { font-family: "Oswald"; font-weight: 400; letter-spacing: 0.02em; }
+.album, .facts, .status, .show-sub, .show-next { font-family: "Oswald"; font-weight: 400; letter-spacing: 0.02em; }
 .on-air { font-family: "Oswald"; font-weight: 700; letter-spacing: 0.08em; }
 """
 
@@ -2095,7 +2339,7 @@ def load_fonts() -> bool:
 # Sizes at the window's first size (BASE_SIZE); a larger window or full screen
 # scales them all by how much bigger it is (the smaller of width and height).
 BASE_SIZE = (440, 600)
-TEXT_PT = {"song": 24, "artist": 16.5, "album": 13, "status": 10, "on-air": 9,
+TEXT_PT = {"song": 24, "artist": 16.5, "album": 13, "facts": 10.5, "status": 10, "on-air": 9,
            "show-title": 13.5, "show-sub": 10.5, "show-next": 10.5, "pic": 96}
 
 
@@ -2148,6 +2392,7 @@ class Window(Adw.ApplicationWindow):
             self.backdrop.watchers.append(tile)
             self.cover.watchers.append(tile)
             self.head_glass.append(tile)
+            hold_while_hovered(tile)
             header.pack_end(tile)
         self.logo = FlagLogo(34)  # the (enhanced) logo itself, drawn sharp; waves under the mouse
         self.logo.add_css_class("top-logo")
@@ -2221,7 +2466,9 @@ class Window(Adw.ApplicationWindow):
         self.artist.add_css_class("artist")
         self.album = Gtk.Label(wrap=True, xalign=0)
         self.album.add_css_class("album")
-        for w in (self.song, self.artist, self.album):
+        self.facts = Gtk.Label(wrap=True, xalign=0)  # first release, where it was recorded
+        self.facts.add_css_class("facts")
+        for w in (self.song, self.artist, self.album, self.facts):
             self.info.append(w)
 
         controls = Gtk.Box(spacing=12, margin_top=12)
@@ -2238,6 +2485,7 @@ class Window(Adw.ApplicationWindow):
         self.vol.set_round_digits(1)  # follows the mouse pixel by pixel, not in whole percents
         self.vol.set_hexpand(True)
         self.vol.add_css_class("vol-slider")
+        hold_while_hovered(self.vol)
         self.vol.set_valign(Gtk.Align.CENTER)
         self.vol.set_value(app.volume_now())
         self.vol.connect("value-changed", lambda s: app.set_volume(s.get_value()))
@@ -2259,6 +2507,7 @@ class Window(Adw.ApplicationWindow):
             self.backdrop.watchers.append(disc)
             self.cover.watchers.append(disc)
             self.discs.append(disc)
+            hold_while_hovered(disc)
             controls.append(disc)
         controls.append(self.vol)
         inner.append(controls)
@@ -2289,6 +2538,7 @@ class Window(Adw.ApplicationWindow):
         arrow.add_css_class("bob-arrow")
         self.quality.add_suffix(self.quality_now)
         self.quality.add_suffix(arrow)
+        hold_while_hovered(self.quality)
         self.quality_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         self.quality_list.add_css_class("boxed-list")
         self.quality_list.connect("row-activated", self.on_quality)
@@ -2643,6 +2893,8 @@ class Window(Adw.ApplicationWindow):
         self.artist.set_text(artist)
         self.album.set_text(info.get("album") or "")
         self.album.set_visible(bool(info.get("album")))
+        self.facts.set_text(a.facts)
+        self.facts.set_visible(bool(a.facts))
         if a.logo_tex is not None and self.logo.get_paintable() is not a.logo_tex:
             self.logo.set_from_paintable(a.logo_tex)
         pic = a.cover_tex or a.logo_tex
@@ -2709,11 +2961,14 @@ class App(Adw.Application):
         self.show_src: dict[str, bytes] = {}  # show picture url -> its bytes, for enhancing
         self.show_done: set[str] = set()  # show pictures sent for enhancing
         self.codec = self.bitrate = None
+        self.facts = ""  # first release, where it was recorded
         self.cover_tex = None
         self.logo_tex = None
         self.refined = None  # (before, after) of the last enhancing step: redrawn in, not morphed
         self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
         self.card = CardVolume(self._card_changed)
+        self._holds = 0  # animations running: the enhancing waits while any is
+        _ANIM_HOLD[0] = self.anim_hold
         self.card_vol = None  # the sound card's volume, percent (card_on)
         self.card_name = ""
         self.card_set_at = 0.0  # when the slider last set it
@@ -2950,6 +3205,10 @@ class App(Adw.Application):
         save_settings(self.settings)
         self.play()
 
+    def anim_hold(self, on: bool) -> None:
+        self._holds = max(0, self._holds + (1 if on else -1))
+        self.enhancer.hold(self._holds > 0)
+
     # volume: Rádio Beat's own (mpv), or the sound card's (card_on: mpv stays at 100 %, a knob on the card moves the slider)
     def card_on(self) -> bool:
         return self.card.ok and self.settings.get("card_volume", False)
@@ -3168,6 +3427,7 @@ class App(Adw.Application):
         # The last cover stays up until the new one is found (no logo flashing
         # in between); the logo only when there's no song or no cover.
         self.info = None
+        self.facts = ""
         if not parts:
             self.cover_tex = None
         self.enhancer.drop("cover")
@@ -3176,11 +3436,22 @@ class App(Adw.Application):
         self._lookup_id += 1
         if parts:
             threading.Thread(target=self._lookup, args=(self._lookup_id, *parts), daemon=True).start()
+            threading.Thread(target=self._facts, args=(self._lookup_id, *parts), daemon=True).start()
 
     def _lookup(self, lid, artist, song):
         info = lookup(artist, song)
         data = fetch(info["cover"]) if info and info.get("cover") else None
         GLib.idle_add(self._looked_up, lid, info, data)
+
+    def _facts(self, lid, artist, song):
+        text = song_facts(artist, song)
+        GLib.idle_add(self._got_facts, lid, text)
+
+    def _got_facts(self, lid, text):
+        if lid == self._lookup_id:
+            self.facts = text
+            self.update()
+        return False
 
     def _looked_up(self, lid, info, data):
         if lid != self._lookup_id:
