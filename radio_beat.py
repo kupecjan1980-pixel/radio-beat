@@ -999,7 +999,10 @@ FFMPEG_URL = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-sta
 DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat")
 UPSCALED_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat", "upscaled")
 UPSCALE_FROM = 1.05
-UPSCALED_KEEP = 800  # cached pictures (about 1 MB each)
+# The cache (this computer's own disk) may take 80 % of the space it could have (the free space plus what it
+# already takes), never leaving under 2 GB free; the oldest pictures go first.
+UPSCALED_SHARE = 0.8
+UPSCALED_MIN_FREE = 2 << 30
 # Fine and wide unsharp masks, then contrast adaptive sharpening: as sharp as
 # it goes without halos or blown-up JPEG blocks (CAS alone at full strength does that).
 SHARPEN = "unsharp=3:3:1.2:3:3:0,unsharp=9:9:0.5:9:9:0,cas=strength=0.6"
@@ -1768,7 +1771,17 @@ class Enhancer:
                            key=os.path.getmtime)
         except OSError:
             return
-        for f in files[:-UPSCALED_KEEP]:
+        try:
+            free = shutil.disk_usage(UPSCALED_DIR).free
+        except OSError:
+            return
+        sizes = {f: os.path.getsize(f) for f in files if os.path.exists(f)}
+        used = sum(sizes.values())
+        allowed = min(UPSCALED_SHARE * (free + used), free + used - UPSCALED_MIN_FREE)
+        for f in files:  # oldest first
+            if used <= allowed:
+                break
+            used -= sizes.get(f, 0)
             for p in (f, f[:-4] + ".txt"):
                 try:
                     os.remove(p)
