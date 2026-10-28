@@ -1454,7 +1454,7 @@ class Enhancer:
         # not made again.
         hit = self._cache_path(key, size, ai=True)
         if kind != "icon" and os.path.exists(hit) and self._jpeg_ok(hit) and self._not_black(hit):
-            os.utime(hit)
+            self._used(hit)
             with open(hit, "rb") as f:
                 done(f.read())
             try:
@@ -1521,7 +1521,7 @@ class Enhancer:
         cached = self._cache_path(key, size)
         if os.path.exists(cached):
             if self._jpeg_ok(cached) and self._not_black(cached):  # black ones came from the GPU giving up
-                os.utime(cached)
+                self._used(cached)
                 with open(cached, "rb") as f:
                     emit(f.read(), True)
                 try:
@@ -1765,10 +1765,35 @@ class Enhancer:
                     return True
         return False
 
+    USES = os.path.join(UPSCALED_DIR, "uses.json")  # picture -> times shown from the cache
+
+    def _uses(self) -> dict:
+        try:
+            with open(self.USES) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _used(self, path: str) -> None:
+        """A cached picture shown again: counted, and its time set to now."""
+        os.utime(path)
+        uses = self._uses()
+        name = os.path.basename(path)
+        uses[name] = uses.get(name, 0) + 1
+        try:
+            with open(self.USES + ".tmp", "w") as f:
+                json.dump(uses, f)
+            os.replace(self.USES + ".tmp", self.USES)
+        except OSError:
+            pass
+
     def _trim(self) -> None:
+        """When the cache is full: the least used pictures go first (shown the fewest times), and of those the
+        one not shown for the longest."""
+        uses = self._uses()
         try:
             files = sorted((os.path.join(UPSCALED_DIR, f) for f in os.listdir(UPSCALED_DIR) if f.endswith(".jpg")),
-                           key=os.path.getmtime)
+                           key=lambda f: (uses.get(os.path.basename(f), 0), os.path.getmtime(f)))
         except OSError:
             return
         try:
@@ -1778,15 +1803,25 @@ class Enhancer:
         sizes = {f: os.path.getsize(f) for f in files if os.path.exists(f)}
         used = sum(sizes.values())
         allowed = min(UPSCALED_SHARE * (free + used), free + used - UPSCALED_MIN_FREE)
-        for f in files:  # oldest first
+        gone = False
+        for f in files:  # least used first
             if used <= allowed:
                 break
             used -= sizes.get(f, 0)
+            uses.pop(os.path.basename(f), None)
+            gone = True
             for p in (f, f[:-4] + ".txt"):
                 try:
                     os.remove(p)
                 except OSError:
                     pass
+        if gone:
+            try:
+                with open(self.USES + ".tmp", "w") as f:
+                    json.dump(uses, f)
+                os.replace(self.USES + ".tmp", self.USES)
+            except OSError:
+                pass
 
 
 # --- window ---------------------------------------------------------------------
