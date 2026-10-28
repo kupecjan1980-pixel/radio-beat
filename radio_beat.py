@@ -1792,10 +1792,18 @@ class GlassCard(Gtk.Box):
                     snap.append_texture(tex, Graphene.Rect().init(p.x, p.y, vw, vh))
                 continue
             snap.save()
+            if view.fit == "contain":
+                # The cover's own edges stay where they are, straight: the lens bends what's inside them, not
+                # the outline (bent, the cover's side looked like a round end of the card).
+                x, y, dw, dh = view.rect(pic, vw, vh)
+                X, Y = p.x + x, p.y + y
+                snap.push_clip(Graphene.Rect().init(cx + (X - cx) / sx, cy + (Y - cy) / sy, dw / sx, dh / sy))
             snap.translate(p)
             view.draw(snap, pic, vw, vh)
             if darken:
                 snap.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(0, 0, vw, vh))
+            if view.fit == "contain":
+                snap.pop()
             snap.restore()
         snap.restore()
 
