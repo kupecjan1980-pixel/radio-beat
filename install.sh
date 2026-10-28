@@ -46,6 +46,9 @@ fi
 
 mkdir -p "$DEST" "$(dirname "$BIN")" "$(dirname "$DESKTOP")"
 install -m 644 radio_beat.py logo.png "$DEST/"
+# Fonts like the logo's, for the "Beat Radio" text style (SIL OFL, licences beside them).
+mkdir -p "$DEST/fonts"
+install -m 644 fonts/* "$DEST/fonts/"
 # Which commit this is (get.sh passes it; a checkout knows it), for the update check.
 echo "${RADIO_BEAT_VERSION:-$(git rev-parse HEAD 2>/dev/null || echo local)}" > "$DEST/VERSION"
 HAVE_CAIRO=$(python3 -c 'import cairo' 2>/dev/null && echo 1 || true)

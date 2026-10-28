@@ -13,6 +13,7 @@ Stop quits. Started at login (--autostart) it plays with only the tray icon.
 
 import ctypes
 import json
+import math
 import os
 import shutil
 import signal
@@ -31,7 +32,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gio, Graphene, Gtk  # noqa: E402
+gi.require_version("Gsk", "4.0")
+from gi.repository import Adw, Gdk, GLib, Gio, Graphene, Gsk, Gtk  # noqa: E402
 
 APP_ID = "local.hanis.RadioBeat"
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -711,12 +713,22 @@ class Tray:
 
 # --- picture enhancing (AI upscaling, sharpening, denoising) -----------------------
 # A cover (or the logo) that full screen would stretch by more than
-# UPSCALE_FROM is enhanced in steps, each shown as soon as it's done:
-# 1. upscaled: Real-ESRGAN (ncnn) on the GPU through Vulkan, so any GPU or iGPU
-#    with a Vulkan driver (AMD, NVIDIA, Intel Arc); without one, Lanczos on the CPU;
-# 2. sharpened: CAS (contrast adaptive sharpening) on the upscaled picture;
-# 3. denoised: NL-means (on the GPU when ffmpeg can, else the CPU), then CAS
-#    again: the final picture (denoising before sharpening, as it should be).
+# UPSCALE_FROM is enhanced in steps, each shown as soon as it's done (and
+# morphed into the next one on screen):
+# 1. a quick AI pass (realesr-animevideov3, small and fast), so an AI picture
+#    is up within seconds;
+# 2. the full AI pass: Real-ESRGAN x4plus for photos, x4plus-anime for the
+#    logo (flat colours, letters: sharp edges instead of smears), at 4x and
+#    then scaled down to the screen (supersampled), through Vulkan on any GPU
+#    or iGPU (AMD, NVIDIA, Intel Arc); without one, on the CPU through software
+#    Vulkan (lavapipe) when the system has it: slow, but still AI;
+# 3. sharpened: unsharp masks and CAS on the upscaled picture;
+# 4. denoised: NL-means (on the GPU when ffmpeg can, else the CPU), then
+#    sharpened again: the final picture (denoising before sharpening).
+# Never a plain resize while AI can still happen: pictures wait for the GPU
+# test at start, a failed AI pass is tried again with smaller tiles, and a
+# picture that only got a plain resize isn't cached (tried again next time).
+# Only a system without any Vulkan at all gets Lanczos.
 # A picture big enough for the screen already isn't upscaled: sharpened at
 # once, then redrawn by Real-ESRGAN for detail (from half size, back to its own
 # size), then denoised and sharpened. Pictures of REDRAW_FROM px and more go
@@ -730,7 +742,9 @@ class Tray:
 
 ESR_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
 ESR_SHA256 = "e5aa6eb131234b87c0c51f82b89390f5e3e642b7b70f2b9bbe95b6a285a40c96"
-ESR_MODEL = "realesrgan-x4plus"
+ESR_MODEL = "realesrgan-x4plus"  # photos
+ESR_MODEL_ART = "realesrgan-x4plus-anime"  # the logo: flat colours, letters
+ESR_QUICK = "realesr-animevideov3"  # the quick first pass (its -x4 file)
 FFMPEG_URL = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
 DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat")
 UPSCALED_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat", "upscaled")
@@ -744,6 +758,19 @@ DENOISE = "nlmeans=s=1.0:p=7:r=15"
 DENOISE_VK = "format=rgba,hwupload,nlmeans_vulkan=s=1.0:p=7:r=15,hwdownload,format=rgba"
 SOFTWARE_GPU = re.compile(r"llvmpipe|lavapipe|swiftshader", re.I)
 DISCRETE_GPU = re.compile(r"nvidia|geforce|rtx|gtx|quadro|radeon (rx|pro)|\bDG2\b|\bBMG\b|arc\(tm\) [ab]\d", re.I)
+
+
+def _cpu_name() -> str:
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    name = line.split(":", 1)[1].strip()
+                    # "AMD Ryzen 7 8700G w/ Radeon 780M Graphics" -> "AMD Ryzen 7 8700G"
+                    return re.sub(r"\s+(w/|with) .*$|\s+\d+-Core Processor$|\(R\)|\(TM\)", "", name).strip()
+    except OSError:
+        pass
+    return "(unknown)"
 
 
 def _secs(t: float) -> str:
@@ -761,7 +788,11 @@ def _download(url: str, timeout: int = 120) -> bytes | None:
 
 
 class Enhancer:
-    MODEL_SIZES = {"param": 116029, "bin": 33424520}  # realesrgan-x4plus as unpacked
+    MODEL_FILES = {  # as unpacked
+        f"{ESR_MODEL}.param": 116029, f"{ESR_MODEL}.bin": 33424520,
+        f"{ESR_MODEL_ART}.param": 30290, f"{ESR_MODEL_ART}.bin": 8943500,
+        f"{ESR_QUICK}-x4.param": 3077, f"{ESR_QUICK}-x4.bin": 1247368,
+    }
     RETRY = (60, 300, 1800)  # s between download tries, the last one repeats
     TILES = (128, 64, 32)
 
@@ -775,6 +806,7 @@ class Enhancer:
         self.ai = None  # True: GPU found and tested; False: no usable GPU; None: not known yet
         self.gpu: str | None = None
         self.gpu_index: int | None = None
+        self.soft = False  # AI on the CPU through software Vulkan (no GPU)
         self.vk_denoise = False
         self.tile = self._load_tile()
         self.status = "Starting…"
@@ -794,13 +826,48 @@ class Enhancer:
             GLib.idle_add(lambda: (self.on_status(text), False)[1])
 
     def _say_ready(self) -> None:
-        up = (f"AI upscaling on {self.gpu}" if self.ai
-              else "No GPU for AI upscaling here (no Vulkan driver), so smooth upscaling on the CPU")
-        if self.ffmpeg:
-            where = "the GPU" if self.vk_denoise else "the CPU"
-            self._say(f"On. {up}; sharpening on the CPU; denoising on {where}.")
+        """What runs where: the GPU (Vulkan) and the CPU, by name, and for what."""
+        cpu = _cpu_name()
+        gpu = f"GPU {self.gpu} (Vulkan)"
+        if self.ai and self.soft:
+            parts = [f"No GPU for Vulkan here, so AI upscaling (Real-ESRGAN) on {self.gpu}: slow, but AI"]
+        elif self.ai:
+            parts = [f"AI upscaling and AI redraw for detail (Real-ESRGAN: x4plus for covers, "
+                     f"x4plus-anime for the logo): {gpu}"]
         else:
-            self._say(f"On. {up}; sharpening and denoising wait for ffmpeg (downloading).")
+            parts = [f"No Vulkan at all here (not even software), so smooth (Lanczos) upscaling: CPU {cpu}"]
+        if self.ffmpeg:
+            parts.append(f"sharpening: CPU {cpu}")
+            parts.append(f"denoising: {gpu}" if self.vk_denoise else f"denoising: CPU {cpu}")
+        else:
+            parts.append("sharpening and denoising wait for ffmpeg (downloading)")
+        self._say("On. " + "; ".join(parts) + ".")
+
+    def notes(self) -> str:
+        """For the gear menu's notes: every picture step, its tool / AI model, and where it runs."""
+        cpu = f"CPU {_cpu_name()}"
+        on = (self.gpu if self.soft else f"GPU {self.gpu} (Vulkan)") if self.ai else None
+        lines = ["How pictures are made better:"]
+        if self.ai is None:
+            lines.append("• AI: waiting for the GPU test (nothing is resized without AI until then)")
+        elif self.ai:
+            lines += [f"• Quick AI pass: Real-ESRGAN {ESR_QUICK} (ncnn) on {on}",
+                      f"• Covers and show pictures: Real-ESRGAN {ESR_MODEL} (RealESRGAN_x4plus, 4x then "
+                      f"scaled down to the screen, Lanczos) on {on}",
+                      f"• Logo and app icon: Real-ESRGAN {ESR_MODEL_ART} (RealESRGAN_x4plus_anime_6B, "
+                      f"for flat colours and letters) on {on}",
+                      f"• Big pictures: AI redraw for detail from half size, same models, on {on}"]
+        else:
+            lines.append(f"• Upscaling: no Vulkan at all, so Lanczos (ffmpeg, not AI) on the {cpu}")
+        if self.ffmpeg:
+            lines.append(f"• Sharpening: ffmpeg unsharp (fine + wide) and CAS on the {cpu}")
+            lines.append(f"• Denoising: ffmpeg nlmeans_vulkan on GPU {self.gpu}" if self.vk_denoise
+                         else f"• Denoising: ffmpeg NL-means on the {cpu}")
+            lines.append(f"• App icon sizes: Lanczos down from the AI master (ffmpeg) on the {cpu}")
+        else:
+            lines.append("• Sharpening and denoising: waiting for ffmpeg")
+        lines.append("• Morph between steps: GTK (GSK) cross-fade on the GPU")
+        return "\n".join(lines)
 
     def _picture(self, text: str) -> None:
         kind = self.running[0] if self.running else "cover"
@@ -827,8 +894,7 @@ class Enhancer:
     def _esr_ok(self) -> bool:
         try:
             return (os.access(self.bin, os.X_OK)
-                    and all(os.path.getsize(os.path.join(self.models, f"{ESR_MODEL}.{ext}")) == n
-                            for ext, n in self.MODEL_SIZES.items()))
+                    and all(os.path.getsize(os.path.join(self.models, f)) == n for f, n in self.MODEL_FILES.items()))
         except OSError:
             return False
 
@@ -846,6 +912,7 @@ class Enhancer:
             if self.ai is None and self._esr_ok():
                 self._self_test()
                 self._say_ready()
+                self.wake.set()  # pictures waiting for the test
                 if then:
                     GLib.idle_add(lambda: (then(), False)[1])
             if not need:
@@ -902,7 +969,7 @@ class Enhancer:
         if hashlib.sha256(blob).hexdigest() != ESR_SHA256:
             print("enhancer: Real-ESRGAN download doesn't match its checksum, not used", file=sys.stderr)
             return False
-        want = {"realesrgan-ncnn-vulkan", f"models/{ESR_MODEL}.param", f"models/{ESR_MODEL}.bin"}
+        want = {"realesrgan-ncnn-vulkan"} | {f"models/{f}" for f in self.MODEL_FILES}
         tmp = self.dir + ".part"
         shutil.rmtree(tmp, ignore_errors=True)
         try:
@@ -957,8 +1024,9 @@ class Enhancer:
     # --- GPU ----------------------------------------------------------------------------
 
     def _self_test(self) -> None:
-        """Which GPUs Vulkan offers (never a software one), and a 64 px picture
-        through the best of them; smaller tiles until it comes back right."""
+        """Which GPUs Vulkan offers, and a 64 px picture through the best of
+        them; smaller tiles until it comes back right. A software one (the CPU)
+        only when there's no GPU at all."""
         from gi.repository import GdkPixbuf
         pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 64, 64)
         pb.fill(0x80B0E0FF)
@@ -973,13 +1041,15 @@ class Enhancer:
                 self.tile = tile
                 out, err = self._esr(src, os.path.join(work, "o.png"))
                 gpus = {int(i): n for i, n in re.findall(r"^\[(\d+) ([^\]]+)\]", err, re.M)}
-                real = {i: n for i, n in gpus.items() if not SOFTWARE_GPU.search(n)}
+                real = {i: n for i, n in gpus.items() if not SOFTWARE_GPU.search(n)} or gpus
                 if not real:
                     self.ai = False
                     return
                 if self.gpu_index not in real:
                     self.gpu_index = max(real, key=lambda i: (bool(DISCRETE_GPU.search(real[i])), -i))
-                    self.gpu = real[self.gpu_index]
+                    self.soft = bool(SOFTWARE_GPU.search(real[self.gpu_index]))
+                    self.gpu = (f"the CPU {_cpu_name()} (software Vulkan)" if self.soft
+                                else real[self.gpu_index])
                     out, err = self._esr(src, os.path.join(work, "o.png"))  # again, on that one
                 if out:
                     self._save_tile()
@@ -991,7 +1061,7 @@ class Enhancer:
             shutil.rmtree(work, ignore_errors=True)
 
     def _test_vk_denoise(self) -> None:
-        if not self.ffmpeg or not self.ai:
+        if not self.ffmpeg or not self.ai or self.soft:
             self.vk_denoise = False
             return
         work = tempfile.mkdtemp(prefix="radio-beat-esr-")
@@ -1022,15 +1092,16 @@ class Enhancer:
 
     def _cache_path(self, key: str, size: tuple[int, int]) -> str:
         import hashlib
-        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}|{'ai' if self.ai else 'plain'}|v3".encode()).hexdigest()
+        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}|{'ai' if self.ai else 'plain'}|v4".encode()).hexdigest()
         return os.path.join(UPSCALED_DIR, f"{h}.jpg")
 
     def _worker(self) -> None:
         while True:
             self.wake.wait()
             self.wake.clear()
-            while self.jobs:
-                kind = "logo" if "logo" in self.jobs else next(iter(self.jobs))
+            # Nothing before the GPU test is done: no plain resizes while AI may still come.
+            while self.jobs and self.ai is not None:
+                kind = next((k for k in ("logo", "cover", "show") if k in self.jobs), next(iter(self.jobs)))
                 job = self.jobs[kind]
                 self.running = (kind, job[0])
                 try:
@@ -1046,20 +1117,22 @@ class Enhancer:
 
     def _enhance(self, kind: str, job: tuple) -> None:
         key, data, (w0, h0), size, done, screen = job
-        what = "Cover" if kind == "cover" else "Logo"
+        what = {"cover": "Cover", "logo": "Logo"}.get(kind, "Show picture")
+        self.model = ESR_MODEL_ART if kind in ("logo", "icon") else ESR_MODEL
         same = size == (w0, h0)  # big enough already: no upscaling
         if same:
             scr = f"the {screen[0]}×{screen[1]} px screen" if screen else "the screen"
             head = f"{what}: {w0}×{h0} px, no upscaling needed (big enough for {scr})"
         else:
             head = f"{what}: {w0}×{h0} px → {size[0]}×{size[1]} px"
-        emit = lambda pic: GLib.idle_add(lambda: (done(pic), False)[1])
+        # The icon master only wants the final picture; everything else shows each step.
+        emit = lambda pic, final=False: (kind != "icon" or final) and GLib.idle_add(lambda: (done(pic), False)[1])
         cached = self._cache_path(key, size)
         if os.path.exists(cached):
             if self._jpeg_ok(cached):
                 os.utime(cached)
                 with open(cached, "rb") as f:
-                    emit(f.read())
+                    emit(f.read(), True)
                 try:
                     with open(cached[:-4] + ".txt") as f:
                         steps = f.read().strip()
@@ -1084,25 +1157,41 @@ class Enhancer:
             shutil.rmtree(work, ignore_errors=True)
 
     def _bigger(self, src, src_size, size, work, steps, show, live, emit, cached) -> None:
-        """1. upscaled (AI, else smooth), shown; 2. sharpened, shown;
-        3. denoised and sharpened: the final one."""
-        show(f": upscaling{' on ' + self.gpu if self.ai else ''}…")
-        t = time.monotonic()
+        """1. a quick AI pass, shown; 2. the full AI pass, shown; 3. sharpened,
+        shown; 4. denoised and sharpened: the final one."""
         up = os.path.join(work, "up.png")
         label = None
+        t = time.monotonic()
         if self.ai:
-            out = self._ai(src, src_size, size, up, work)
+            show(f": quick AI pass on {self.gpu}…")
+            t = time.monotonic()
+            quick = os.path.join(work, "quick.png")
+            out = self._ai(src, src_size, size, quick, work, ESR_QUICK)
             if out == "killed" or not live():
                 return
             if out:
-                label = f"AI-{out} on {self.gpu}"
+                steps.append(f"quick AI pass in {_secs(time.monotonic() - t)}")
+                emit(open(quick, "rb").read())
+            show(f", AI upscaling ({self.model}) on {self.gpu}…")
+            t = time.monotonic()
+            full = self._ai(src, src_size, size, up, work, self.model)
+            if full == "killed" or not live():
+                return
+            if full:
+                label = f"AI-{full} ({self.model}) on {self.gpu}"
+            elif out:
+                shutil.copyfile(quick, up)
+                label = "(full AI pass failed, the quick one kept)"
+                cached = None  # the full pass again next time
         if label is None:
             if not self._resize(src, size, up) or not live():
                 if live():
                     show(": couldn't be upscaled, shown as it is")
                 return
-            label = "upscaled (smooth, no AI)" if not self.ai else "upscaled (smooth: AI failed)"
-        steps.append(f"{label} in {_secs(time.monotonic() - t)}")
+            label = "upscaled (smooth: no Vulkan here for AI)" if not self.ai else "upscaled (smooth: AI failed)"
+            if self.ai:
+                cached = None  # AI again next time
+        steps.append(f"{label} in {_secs(time.monotonic() - t)}" if label.startswith(("AI", "up")) else label)
         emit(open(up, "rb").read())
         if not self.ffmpeg:
             show(" (sharpening and denoising: no ffmpeg yet)")
@@ -1126,18 +1215,21 @@ class Enhancer:
             show(f", AI redrawing for detail on {self.gpu}…")
             t = time.monotonic()
             redrawn = os.path.join(work, "redrawn.png")
-            out = self._ai(orig, size, size, redrawn, work)
+            out = self._ai(orig, size, size, redrawn, work, self.model)
             if out == "killed" or not live():
                 return
             if out:
-                steps.append(f"AI-redrawn for detail on {self.gpu} in {_secs(time.monotonic() - t)}")
+                steps.append(f"AI-redrawn for detail ({self.model}) on {self.gpu} in {_secs(time.monotonic() - t)}")
                 base = redrawn
+            else:
+                cached = None  # the redraw again next time
         self._final(base, steps, show, live, emit, cached, work)
 
-    def _ai(self, src, src_size, size, out, work) -> str | None:
-        """Real-ESRGAN to `size`: from half size when the picture is big (sharper
-        from a soft source, and 4x less work). Returns what it did ("upscaled" /
-        "redrawn"), "killed", or None when it failed."""
+    def _ai(self, src, src_size, size, out, work, model) -> str | None:
+        """Real-ESRGAN (`model`) at 4x, then down to `size`: from half size when
+        the picture is big (sharper from a soft source, and 4x less work).
+        Returns what it did ("upscaled" / "redrawn"), "killed", or None when it
+        failed even with the smallest tiles."""
         w0, h0 = src_size
         feed, how = src, "upscaled"
         if min(w0, h0) >= REDRAW_FROM:
@@ -1145,12 +1237,12 @@ class Enhancer:
             if self._ff(["-i", src], f"scale={w0 // 2}:{h0 // 2}:flags=lanczos", half):
                 feed, how = half, "redrawn" if size == src_size else "redrawn and upscaled"
         big = os.path.join(work, "x4.png")
-        res, err = self._esr(feed, big)
-        if res is None and self.tile != self.TILES[-1]:
-            # The GPU timed out (black or failed): smaller tiles from now on, once more.
+        res, err = self._esr(feed, big, model)
+        while res is None and self.tile != self.TILES[-1]:
+            # The GPU timed out (black or failed): smaller tiles from now on, and again.
             self.tile = self.TILES[self.TILES.index(self.tile) + 1]
             self._save_tile()
-            res, err = self._esr(feed, big)
+            res, err = self._esr(feed, big, model)
         if res == "killed":
             return "killed"
         if res is None or not self._resize(big, size, out):
@@ -1186,8 +1278,10 @@ class Enhancer:
         steps.append(f"denoised {where} in {_secs(time.monotonic() - t)}")
         with open(final, "rb") as f:
             pic = f.read()
-        emit(pic)
-        show("")
+        emit(pic, True)
+        show("" if cached else " (not cached: tried again next time)")
+        if not cached:
+            return
         os.makedirs(UPSCALED_DIR, exist_ok=True)
         with open(cached + ".part", "wb") as f:
             f.write(pic)
@@ -1198,15 +1292,18 @@ class Enhancer:
 
     # --- tools --------------------------------------------------------------------------
 
-    def _esr(self, src: str, out: str) -> tuple[str | None, str]:
+    def _esr(self, src: str, out: str, model: str = ESR_MODEL) -> tuple[str | None, str]:
         """Real-ESRGAN 4x: (out, stderr); out None on failure, "killed" when stopped."""
-        cmd = ["nice", "-n", "19", self.bin, "-i", src, "-o", out, "-n", ESR_MODEL, "-m", self.models,
+        cmd = ["nice", "-n", "19", self.bin, "-i", src, "-o", out, "-n", model, "-s", "4", "-m", self.models,
                "-t", str(self.tile), "-f", "png"]
         if self.gpu_index is not None:
             cmd += ["-g", str(self.gpu_index)]
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        _, err = self.proc.communicate()
-        rc, self.proc = self.proc.returncode, None
+        # Its own handle: the start-up tests run alongside the worker; self.proc is for stopping it.
+        proc = self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        _, err = proc.communicate()
+        rc = proc.returncode
+        if self.proc is proc:
+            self.proc = None
         if rc < 0:
             return "killed", err
         if rc or "failed" in err or not os.path.exists(out) or not self._not_black(out):
@@ -1221,9 +1318,12 @@ class Enhancer:
             dev = f"vulkan=vk:{self.gpu_index}" if self.gpu_index is not None else "vulkan=vk"
             cmd += ["-init_hw_device", dev, "-filter_hw_device", "vk"]
         cmd += inputs + ["-vf", vf, "-frames:v", "1"] + (["-q:v", "2"] if jpeg else []) + [out]
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        _, err = self.proc.communicate()
-        rc, self.proc = self.proc.returncode, None
+        # Its own handle: the start-up tests run alongside the worker; self.proc is for stopping it.
+        proc = self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        _, err = proc.communicate()
+        rc = proc.returncode
+        if self.proc is proc:
+            self.proc = None
         if rc:
             if rc > 0:
                 print(f"enhancer: ffmpeg {vf}: {err.strip()[-200:]}", file=sys.stderr)
@@ -1282,7 +1382,7 @@ CSS = b"""
 .stop-button:hover { background: rgba(255,255,255,0.28); }
 .scrim scale trough highlight { background: #E3051A; }
 .overlay-header { background: none; box-shadow: none; }
-.show-card { background: rgba(0,0,0,0.45); border-radius: 14px; padding: 10px; }
+.show-card { padding: 10px; }
 .show-pic { border-radius: 10px; }
 .on-air { background: #E3051A; color: white; border-radius: 999px; padding: 1px 8px; font-weight: 800; }
 .show-title { font-weight: 700; }
@@ -1291,6 +1391,185 @@ CSS = b"""
 .overlay-header button { background: rgba(0,0,0,0.45); color: white; }
 .overlay-header windowcontrols image.icon { -gtk-icon-size: 34px; min-width: 34px; min-height: 34px; border-radius: 8px; }
 """
+
+
+class CoverView(Gtk.Widget):
+    """A picture filling the widget, "contain" (whole, at the top in a tall
+    space, centred in a wide one; small pictures are stretched too) or "cover"
+    (filling it, cropped). A new picture morphs in: the old one dissolves into
+    it through a soft blur that peaks halfway. A better version of the same
+    picture (the next enhancing step) is redrawn slowly instead, no blur: the
+    new detail grows in over the old picture."""
+
+    MORPH_MS = 900
+    MORPH_BLUR = 22.0
+    REDRAW_MS = 2600
+
+    def __init__(self, fit: str, **kw):
+        super().__init__(hexpand=True, vexpand=True, overflow=Gtk.Overflow.HIDDEN, **kw)
+        self.fit = fit
+        self.pic = None
+        self.old = None
+        self.t = 1.0
+        self.blur = self.MORPH_BLUR
+        self.anim = None
+        self.watchers: list = []  # redrawn along (the glass card behind which this shows)
+
+    def set_paintable(self, pic, redraw: bool = False) -> None:
+        if pic is self.pic:
+            return
+        self.old, self.pic = self.pic, pic
+        if self.anim:
+            self.anim.pause()
+            self.anim = None
+        if self.old is None or pic is None:
+            self.t = 1.0
+            self._changed()
+            return
+        target = Adw.CallbackAnimationTarget.new(self._tick)
+        self.blur = 0.0 if redraw else self.MORPH_BLUR
+        self.anim = Adw.TimedAnimation.new(self, 0.0, 1.0, self.REDRAW_MS if redraw else self.MORPH_MS, target)
+        self.anim.set_easing(Adw.Easing.EASE_IN_OUT_CUBIC)
+        self.anim.play()
+
+    def _tick(self, value: float) -> None:
+        self.t = value
+        if value >= 1.0:
+            self.old = None
+        self._changed()
+
+    def _changed(self) -> None:
+        self.queue_draw()
+        for w in self.watchers:
+            w.queue_draw()
+
+    def rect(self, pic, w: float, h: float) -> tuple[float, float, float, float]:
+        pw = pic.get_intrinsic_width() or 1
+        ph = pic.get_intrinsic_height() or 1
+        s = max(w / pw, h / ph) if self.fit == "cover" else min(w / pw, h / ph)
+        dw, dh = pw * s, ph * s
+        return (w - dw) / 2, ((h - dh) / 2 if self.fit == "cover" else 0.0), dw, dh
+
+    def draw(self, snap, pic, w: float, h: float) -> None:
+        x, y, dw, dh = self.rect(pic, w, h)
+        snap.save()
+        snap.translate(Graphene.Point().init(x, y))
+        pic.snapshot(snap, dw, dh)
+        snap.restore()
+
+    def do_snapshot(self, snap) -> None:
+        w, h = self.get_width(), self.get_height()
+        if not self.pic or w <= 0 or h <= 0:
+            return
+        if self.old is None or self.t >= 1.0:
+            self.draw(snap, self.pic, w, h)
+            return
+        blur = self.blur * math.sin(math.pi * self.t)
+        if blur > 0.5:
+            snap.push_blur(blur)
+        snap.push_cross_fade(self.t)
+        self.draw(snap, self.old, w, h)
+        snap.pop()
+        self.draw(snap, self.pic, w, h)
+        snap.pop()
+        if blur > 0.5:
+            snap.pop()
+
+
+class GlassCard(Gtk.Box):
+    """A frosted-glass panel (like Apple's materials): what's behind it (the
+    blurred backdrop and the cover) drawn again, blurred, through a rounded
+    clip, with a dark tint, a soft top highlight and a thin bright edge. GTK's
+    CSS has no backdrop-filter, so it's drawn here."""
+
+    BLUR = 26.0
+
+    def __init__(self, behind: list, **kw):
+        super().__init__(**kw)
+        self.behind = behind  # [(CoverView, darken 0..1)], back to front
+        self.radius = 16.0
+        self.shade = 1.0  # scales the darkening (gear menu: Background shade)
+
+    def do_snapshot(self, snap) -> None:
+        w, h = self.get_width(), self.get_height()
+        if w <= 0 or h <= 0:
+            return
+        box = Graphene.Rect().init(0, 0, w, h)
+        rr = Gsk.RoundedRect()
+        rr.init_from_rect(box, self.radius)
+        snap.push_rounded_clip(rr)
+        snap.push_blur(self.BLUR)
+        for view, darken in self.behind:
+            pic = view.pic
+            ok, p = view.compute_point(self, Graphene.Point().init(0, 0))
+            if not pic or not ok:
+                continue
+            vw, vh = view.get_width(), view.get_height()
+            snap.save()
+            snap.translate(p)
+            view.draw(snap, pic, vw, vh)
+            if darken * self.shade:
+                snap.append_color(_rgba(0, 0, 0, darken * self.shade), Graphene.Rect().init(0, 0, vw, vh))
+            snap.restore()
+        snap.pop()
+        snap.append_color(_rgba(18, 18, 22, 0.34 * self.shade), box)
+        hl = Graphene.Rect().init(0, 0, w, h * 0.6)
+        snap.append_linear_gradient(hl, Graphene.Point().init(0, 0), Graphene.Point().init(0, h * 0.6),
+                                    [_stop(0.0, 255, 255, 255, 0.16), _stop(1.0, 255, 255, 255, 0.0)])
+        snap.pop()
+        edge = [_rgba(255, 255, 255, 0.34), _rgba(255, 255, 255, 0.16),
+                _rgba(255, 255, 255, 0.10), _rgba(255, 255, 255, 0.16)]  # top, right, bottom, left
+        snap.append_border(rr, [1.0, 1.0, 1.0, 1.0], edge)
+        Gtk.Box.do_snapshot(self, snap)
+
+
+def _rgba(r: int, g: int, b: int, a: float) -> Gdk.RGBA:
+    c = Gdk.RGBA()
+    c.red, c.green, c.blue, c.alpha = r / 255, g / 255, b / 255, a
+    return c
+
+
+def _stop(offset: float, r: int, g: int, b: int, a: float) -> Gsk.ColorStop:
+    s = Gsk.ColorStop()
+    s.offset, s.color = offset, _rgba(r, g, b, a)
+    return s
+
+
+# Text style "Beat Radio" (the default; a switch in the gear menu): fonts like the station logo's, shipped in fonts/
+# (both SIL Open Font License): Anton, heavy and condensed like "BEAT", for the
+# song and the show; Oswald, condensed like "RADIO", for the rest.
+FONTS_DIR = os.path.join(HERE, "fonts")
+FONT_FILES = ("Anton-Regular.ttf", "Oswald.ttf")
+BEAT_CSS = """
+.song, .show-title { font-family: "Anton"; font-weight: 400; letter-spacing: 0.02em; }
+.artist { font-family: "Oswald"; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.album, .status, .show-sub, .show-next { font-family: "Oswald"; font-weight: 400; letter-spacing: 0.02em; }
+.on-air { font-family: "Oswald"; font-weight: 700; letter-spacing: 0.08em; }
+"""
+
+
+def load_fonts() -> bool:
+    """The Beat Radio fonts for this app only (Pango 1.56+), else copied to
+    ~/.local/share/fonts, where they're found from the next start."""
+    files = [os.path.join(FONTS_DIR, f) for f in FONT_FILES]
+    if not all(os.path.exists(f) for f in files):
+        return False
+    try:
+        gi.require_version("PangoCairo", "1.0")
+        from gi.repository import PangoCairo
+        fm = PangoCairo.FontMap.get_default()
+        if hasattr(fm, "add_font_file"):
+            return all(fm.add_font_file(f) for f in files)
+    except (ValueError, ImportError, GLib.Error):
+        pass
+    dest = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "fonts", "radio-beat")
+    try:
+        os.makedirs(dest, exist_ok=True)
+        for f in files:
+            shutil.copyfile(f, os.path.join(dest, os.path.basename(f)))
+    except OSError:
+        pass
+    return False
 
 
 # Sizes at the window's first size (BASE_SIZE); a larger window or full screen
@@ -1309,24 +1588,23 @@ class Window(Adw.ApplicationWindow):
         self.scale_css = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.scale_css,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        self.look_css = Gtk.CssProvider()  # text style and background shade (gear menu)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.look_css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 2)
 
         # The cover, whole and as big as it fits (at the top in a tall window,
         # centred in a wide one), over a blurred copy of itself that fills the
         # rest of the window, whatever its shape; everything else lies on top.
-        self.backdrop = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True)
+        # A new cover morphs in (CoverView).
+        self.backdrop = CoverView("cover")
         self.backdrop.add_css_class("backdrop")
-        # The frame keeps the picture's shape and gives it all the room there is,
-        # so a small picture is stretched to fit too (a bare Gtk.Picture stops
-        # at its own pixel size); top in a tall window, centred in a wide one.
-        self.cover = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, hexpand=True, vexpand=True)
-        self.cover_frame = Gtk.AspectFrame(child=self.cover, ratio=1.0, obey_child=False, xalign=0.5, yalign=0.0,
-                                           hexpand=True, vexpand=True)
+        self.cover = CoverView("contain")
         bg = Gtk.Overlay(child=self.backdrop, hexpand=True, vexpand=True, overflow=Gtk.Overflow.HIDDEN)
         bg.add_css_class("cover-bg")
-        bg.add_overlay(self.cover_frame)
+        bg.add_overlay(self.cover)
         overlay = Gtk.Overlay(child=bg)
 
-        header = Adw.HeaderBar(show_title=False, valign=Gtk.Align.START)
+        header = self.header = Adw.HeaderBar(show_title=False, valign=Gtk.Align.START)
         header.add_css_class("overlay-header")
         header.pack_end(self._settings_button())
         self.full_btn = Gtk.Button(icon_name="view-fullscreen-symbolic", tooltip_text="Full screen (F11)")
@@ -1349,7 +1627,9 @@ class Window(Adw.ApplicationWindow):
                         margin_bottom=22, margin_start=22, margin_end=22)
         scrim.append(inner)
         # What's on: the show now (picture, name, host) and the next one.
-        self.show_card = Gtk.Box(spacing=12, margin_bottom=10)
+        self.show_card = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], spacing=12, margin_bottom=10)
+        self.backdrop.watchers.append(self.show_card)
+        self.cover.watchers.append(self.show_card)
         self.show_card.add_css_class("show-card")
         self.show_pic = Gtk.Image(pixel_size=TEXT_PT["pic"], valign=Gtk.Align.CENTER)
         self.show_pic.add_css_class("show-pic")
@@ -1411,6 +1691,7 @@ class Window(Adw.ApplicationWindow):
 
         self.set_content(overlay)
         self._apply_scale()
+        self.apply_look()
         self.connect("close-request", self.on_close)
         self.refresh()
 
@@ -1440,6 +1721,25 @@ class Window(Adw.ApplicationWindow):
         group.add(self.enhance_row)
         self.picture_row = Adw.ActionRow(title="Picture now", subtitle=self.app.picture_text, subtitle_lines=0)
         group.add(self.picture_row)
+        style = Adw.SwitchRow(title="Beat Radio text style",
+                              subtitle="Fonts like the station logo's (Anton, Oswald); off: the normal ones"
+                              if self.app.fonts_ok else "Off: its fonts are missing (fonts/ folder)",
+                              subtitle_lines=0, sensitive=self.app.fonts_ok)
+        style.set_active(self.app.fonts_ok and self.app.settings.get("font", "beat") == "beat")
+        style.connect("notify::active", lambda r, _: self.app.set_look(font="beat" if r.get_active() else "default"))
+        group.add(style)
+        shade = Adw.ActionRow(title="Background shade",
+                              subtitle="How much the panels behind the text darken the cover", subtitle_lines=0)
+        self.shade_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
+        self.shade_scale.set_value(self.app.settings.get("shade", 100))
+        self.shade_scale.set_size_request(110, -1)
+        self.shade_scale.set_valign(Gtk.Align.CENTER)
+        self.shade_scale.set_draw_value(True)
+        self.shade_scale.set_value_pos(Gtk.PositionType.LEFT)
+        self.shade_scale.set_format_value_func(lambda _s, v: f"{v:.0f} %")
+        self.shade_scale.connect("value-changed", lambda sc: self.app.set_look(shade=round(sc.get_value())))
+        shade.add_suffix(self.shade_scale)
+        group.add(shade)
         self.update_row = Adw.ActionRow(title="Updates")
         self.update_btn = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
         self.update_btn.connect("clicked", lambda *_: self.app.update_clicked())
@@ -1452,6 +1752,12 @@ class Window(Adw.ApplicationWindow):
         self.update_note.add_css_class("dim-label")
         self.update_note.add_css_class("caption")
         box.append(self.update_note)
+        # Notes at the bottom: what each picture step runs and on what.
+        self.enhance_note = Gtk.Label(label=self.app.enhancer.notes(), xalign=0, wrap=True,
+                                      max_width_chars=1, hexpand=False, margin_start=12, margin_end=12)
+        self.enhance_note.add_css_class("dim-label")
+        self.enhance_note.add_css_class("caption")
+        box.append(self.enhance_note)
         # Opens leftwards from the gear (at the right edge), so it stays inside the window.
         # A popup takes its content's full natural width; this caps it near the app's width.
         fit = Gtk.ScrolledWindow(child=box, hscrollbar_policy=Gtk.PolicyType.NEVER,
@@ -1465,14 +1771,34 @@ class Window(Adw.ApplicationWindow):
     MENU_W = 320 + 2 * 6  # the box above plus the popover's own padding
     MENU_GAP = 10  # px kept from the window's edges
 
+    def _top_right(self, btn) -> float:
+        """The right edge of the rightmost button at the top (the close button
+        in a window, the gear in full screen): the menu lines up with it."""
+        edge = 0.0
+        stack = [self.header]
+        while stack:
+            w = stack.pop()
+            if isinstance(w, Gtk.Button) and w.get_mapped():
+                ok, b = w.compute_bounds(self)
+                if ok:
+                    edge = max(edge, b.get_x() + b.get_width())
+            c = w.get_first_child()
+            while c:
+                stack.append(c)
+                c = c.get_next_sibling()
+        if not edge:
+            ok, b = btn.compute_bounds(self)
+            edge = b.get_x() + b.get_width() if ok else self.get_width() - self.MENU_GAP
+        return edge
+
     def _place_menu(self, btn, pop) -> None:
-        """Drop the menu below the gear, inside the window with a gap from
-        its edges, whatever the window's width and title buttons."""
+        """Drop the menu below the top buttons, its right edge on theirs (in
+        full screen: the gear's, near the screen's edge), never past the window."""
         ok, pt = btn.compute_point(self, Graphene.Point())
         if not ok:
             return
         mid = pt.x + btn.get_width() / 2  # a popover is centred on its button
-        right = min(self.get_width() - self.MENU_GAP, mid + self.MENU_W / 2)
+        right = min(self.get_width() - 2, self._top_right(btn))
         left = max(self.MENU_GAP, right - self.MENU_W)
         pop.set_offset(int(left + self.MENU_W / 2 - mid), 8)
 
@@ -1529,7 +1855,22 @@ class Window(Adw.ApplicationWindow):
                 f".show-card {{ padding: {10 * f:.0f}px; border-radius: {14 * f:.0f}px; }}\n")
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
+        self.show_card.radius = 16 * f
+        self.show_card.queue_draw()
         return False
+
+    def apply_look(self) -> None:
+        """Text style (default / Beat Radio) and how much the backgrounds
+        behind the text darken the cover (0 to 100 %, 100 = as designed)."""
+        a = self.app
+        k = max(0, min(100, a.settings.get("shade", 100))) / 100
+        css = (".scrim { background: linear-gradient(to top, "
+               f"rgba(0,0,0,{0.92 * k:.3f}) 0%, rgba(0,0,0,{0.75 * k:.3f}) 55%, rgba(0,0,0,0) 100%); }}\n")
+        if a.settings.get("font", "beat") == "beat" and a.fonts_ok:
+            css += BEAT_CSS
+        self.look_css.load_from_data(css.encode())
+        self.show_card.shade = k
+        self.show_card.queue_draw()
 
     def on_double(self, _gesture, n, x, y) -> None:
         if n != 2:
@@ -1560,11 +1901,10 @@ class Window(Adw.ApplicationWindow):
         self.album.set_text(info.get("album") or "")
         self.album.set_visible(bool(info.get("album")))
         pic = a.cover_tex or a.logo_tex
-        if pic is not self.cover.get_paintable():
-            self.cover.set_paintable(pic)
-            self.backdrop.set_paintable(pic)
-            if pic:
-                self.cover_frame.set_ratio(pic.get_intrinsic_aspect_ratio() or 1.0)
+        # An enhancing step of the picture already up is redrawn slowly; a new one morphs.
+        redraw = pic is not None and a.refined == (self.cover.pic, pic)
+        self.cover.set_paintable(pic, redraw)
+        self.backdrop.set_paintable(pic, redraw)
         cur, nxt = on_air(a.schedule, time.localtime())
         self.show_card.set_visible(cur is not None)
         if cur:
@@ -1620,13 +1960,17 @@ class App(Adw.Application):
         self.schedule: dict[int, list[dict]] = {}  # radiobeat.cz programme, by weekday
         self.host: str | None = None  # who's on air (the site's homepage)
         self.show_pics: dict[str, object] = {}  # show picture url -> texture
+        self.show_src: dict[str, bytes] = {}  # show picture url -> its bytes, for enhancing
+        self.show_done: set[str] = set()  # show pictures sent for enhancing
         self.codec = self.bitrate = None
         self.cover_tex = None
         self.logo_tex = None
+        self.refined = None  # (before, after) of the last enhancing step: redrawn in, not morphed
         self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
         self.upscale_src: dict[str, tuple[str, bytes]] = {}  # kind -> (key, picture bytes), for after the install
         self.orig_tex: dict[str, object] = {}  # kind -> the picture as it came
         self.picture_text = "No picture yet"
+        self.icon_text = ""
         self._lookup_id = 0
         self._started = False
         self.last_audio = time.monotonic()  # when playback last moved on
@@ -1646,6 +1990,7 @@ class App(Adw.Application):
     # startup / command line
     def do_startup(self):
         Adw.Application.do_startup(self)
+        self.fonts_ok = load_fonts()
         css = Gtk.CssProvider()
         css.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -1701,6 +2046,12 @@ class App(Adw.Application):
             self.show_window()
 
     # updates / tray placement
+    def set_look(self, **changes) -> None:
+        self.settings.update(changes)
+        save_settings(self.settings)
+        if self.win:
+            self.win.apply_look()
+
     def set_tray_popup(self, on: bool):
         self.settings["tray_popup"] = on
         save_settings(self.settings)
@@ -1935,14 +2286,44 @@ class App(Adw.Application):
                     data = fetch(url)
                     GLib.idle_add(self._show_pic_got, url, data)
                 threading.Thread(target=work, daemon=True).start()
+        self._enhance_show()
 
     def _show_pic_got(self, url, data):
         try:
             self.show_pics[url] = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data)) if data else None
         except GLib.Error:
             self.show_pics[url] = None
+        if self.show_pics[url]:
+            self.show_src[url] = data
+        self._enhance_show()
         self.update()
         return False
+
+    def _enhance_show(self) -> None:
+        """The show on air's picture, sharpened and denoised (AI-upscaled if
+        full screen shows it bigger than it is), like the cover."""
+        cur, _ = on_air(self.schedule, time.localtime())
+        url = cur and cur["img"]
+        tex, data, size = self.show_pics.get(url), self.show_src.get(url), self.screen_px()
+        if not url or not tex or not data or not size or url in self.show_done:
+            return
+        if not self.settings.get("enhance", True) or (self.enhancer.ai is None and not self.enhancer.ffmpeg):
+            return
+        self.show_done.add(url)
+        w, h = tex.get_width(), tex.get_height()
+        full = max(1.0, min(size[0] / BASE_SIZE[0], size[1] / BASE_SIZE[1]))
+        px = TEXT_PT["pic"] * full  # its size in full screen
+        f = px / max(w, h)
+        target = (round(w * f), round(h * f)) if f >= UPSCALE_FROM else (w, h)
+
+        def done(pic: bytes):
+            try:
+                self.show_pics[url] = Gdk.Texture.new_from_bytes(GLib.Bytes.new(pic))
+            except GLib.Error:
+                return
+            self.update()
+
+        self.enhancer.request("show", url, data, (w, h), target, done, screen=size)
 
     def new_title(self, icy: str):
         self.icy = icy
@@ -1986,18 +2367,21 @@ class App(Adw.Application):
     # --- picture enhancing -----------------------------------------------------------
 
     def _install_upscaler(self):
-        self.enhancer.maintain(then=lambda: (self._enhance("logo"), self._enhance("cover")))
+        self.enhancer.maintain(then=lambda: (self._enhance("logo"), self._enhance("cover"), self._enhance_show(),
+                                             self._make_icons()))
 
     def enhance_status(self) -> str:
-        return self.enhancer.status if self.settings.get("enhance", True) else \
-            "Off: pictures are shown as they come."
+        if not self.settings.get("enhance", True):
+            return "Off: pictures are shown as they come."
+        return f"{self.enhancer.status} {self.icon_text}".strip()
 
     def _enhance_status_changed(self, _text: str) -> None:
         if self.win:
             self.win.enhance_row.set_subtitle(self.enhance_status())
+            self.win.enhance_note.set_text(self.enhancer.notes())
 
     def _picture_changed(self, text: str, kind: str = "cover") -> None:
-        if kind == "logo" and self.orig_tex.get("cover"):
+        if kind in ("show", "icon") or (kind == "logo" and self.orig_tex.get("cover")):
             return  # the cover is what's shown
         self.picture_text = text
         if self.win:
@@ -2063,13 +2447,123 @@ class App(Adw.Application):
             if kind == "cover":
                 if lid != self._lookup_id:
                     return
+                self.refined = (self.cover_tex, t)
                 self.cover_tex = t
             else:
+                self.refined = (self.logo_tex, t)
                 self.logo_tex = t
             self.update()
 
         target = (round(w * f), round(h * f)) if upscale else (w, h)
         self.enhancer.request(kind, src[0], src[1], (w, h), target, done, screen=size)
+
+    # --- app icon ----------------------------------------------------------------------
+    # The icon (taskbar, launcher, the window's corner): the station logo on a
+    # white rounded square, made from an AI-enhanced master (4x, denoised,
+    # sharpened) and scaled down with Lanczos for every size, so the edges are
+    # clean at 16 px as at 512. Made once; again when the logo changes or an
+    # update put the plain icons back.
+
+    ICON_SIZES = (16, 22, 24, 32, 48, 64, 96, 128, 256, 512)
+    ICON_DIR = os.path.join(os.path.expanduser("~/.local/share/icons"), "hicolor")
+    ICON_MARK = os.path.join(DATA_DIR, "icons.json")
+
+    def _icon_paths(self, size: int) -> list[str]:
+        out = [os.path.join(self.ICON_DIR, f"{size}x{size}", "apps", f"{APP_ID}.png")]
+        own = os.path.join(HERE, "icons", "hicolor")
+        if os.path.isdir(own):
+            out.append(os.path.join(own, f"{size}x{size}", "apps", f"{APP_ID}.png"))
+        return out
+
+    @staticmethod
+    def _sha(path: str) -> str | None:
+        import hashlib
+        try:
+            with open(path, "rb") as f:
+                return hashlib.sha1(f.read()).hexdigest()
+        except OSError:
+            return None
+
+    def _make_icons(self) -> None:
+        logo = os.path.join(HERE, "logo.png")
+        if not os.path.exists(logo) or not self.enhancer.ffmpeg:
+            return
+        try:
+            with open(self.ICON_MARK) as f:
+                mark = json.load(f)
+        except (OSError, ValueError):
+            mark = {}
+        if mark.get("logo") == self._sha(logo) and mark.get("256") == self._sha(self._icon_paths(256)[0]):
+            self.icon_text = "App icon: AI-sharpened in every size."
+            self._enhance_status_changed("")
+            return
+        with open(logo, "rb") as f:
+            data = f.read()
+        tex = Gdk.Texture.new_from_filename(logo)
+        w, h = tex.get_width(), tex.get_height()
+        self.icon_text = "App icon: being made sharper…"
+        self._enhance_status_changed("")
+        self.enhancer.request("icon", f"icon:{self._sha(logo)}", data, (w, h), (w * 4, h * 4),
+                              lambda pic: threading.Thread(target=self._icons_from, args=(pic, logo),
+                                                           daemon=True).start())
+
+    def _icons_from(self, master: bytes, logo: str) -> None:
+        """Every size from the master (in a thread: ffmpeg); drawn on the main thread."""
+        work = tempfile.mkdtemp(prefix="radio-beat-esr-")
+        try:
+            src = os.path.join(work, "master.jpg")
+            with open(src, "wb") as f:
+                f.write(master)
+            inner = {}
+            for size in self.ICON_SIZES:
+                px = max(1, round(size * 0.84))
+                out = os.path.join(work, f"{size}.png")
+                vf = f"scale={px}:{px}:flags=lanczos" + (",unsharp=3:3:0.6:3:3:0" if size <= 48 else "")
+                if self.enhancer._ff(["-i", src], vf, out):
+                    with open(out, "rb") as f:
+                        inner[size] = f.read()
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if len(inner) == len(self.ICON_SIZES):
+            GLib.idle_add(self._draw_icons, inner, logo)
+
+    def _draw_icons(self, inner: dict, logo: str) -> bool:
+        renderer = Gsk.CairoRenderer.new()
+        renderer.realize_for_display(Gdk.Display.get_default())
+        try:
+            for size, data in inner.items():
+                pic = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+                snap = Gtk.Snapshot()
+                pad = size * 0.04
+                box = Graphene.Rect().init(pad, pad, size - 2 * pad, size - 2 * pad)
+                rr = Gsk.RoundedRect()
+                rr.init_from_rect(box, size * 0.2)
+                snap.push_rounded_clip(rr)
+                snap.append_color(_rgba(255, 255, 255, 1.0), box)
+                off = (size - pic.get_width()) / 2
+                snap.append_texture(pic, Graphene.Rect().init(off, off, pic.get_width(), pic.get_height()))
+                snap.pop()
+                out = renderer.render_texture(snap.to_node(), Graphene.Rect().init(0, 0, size, size))
+                for path in self._icon_paths(size):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    out.save_to_png(path)
+        except (GLib.Error, OSError) as e:
+            print(f"icons: {e}", file=sys.stderr)
+            return False
+        finally:
+            renderer.unrealize()
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(self.ICON_MARK, "w") as f:
+            json.dump({"logo": self._sha(logo), "256": self._sha(self._icon_paths(256)[0])}, f)
+        # Desktops read the icons from their caches.
+        for cmd in (["gtk-update-icon-cache", "-q", "-t", self.ICON_DIR], ["kbuildsycoca6"], ["kbuildsycoca5"]):
+            if shutil.which(cmd[0]):
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if cmd[0].startswith("kbuildsycoca"):
+                    break
+        self.icon_text = "App icon: AI-sharpened in every size (new icons show after the next start)."
+        self._enhance_status_changed("")
+        return False
 
 
 if __name__ == "__main__":
