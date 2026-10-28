@@ -1801,7 +1801,7 @@ popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
    hand, twice a second (12 steps a turn). */
 @keyframes pump { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
 @keyframes tick { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.glass-disc:hover { animation: pump 1s ease-in-out infinite; }
+.glass-disc:hover, .glass-head.pumping { animation: pump 1s ease-in-out infinite; }
 /* The volume slider pumps mostly up and down (a little sideways: more would reach the speaker), its knob
    like the buttons. */
 @keyframes pump-tall { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.015, 1.8); } }
@@ -2516,6 +2516,13 @@ class Window(Adw.ApplicationWindow):
             self.cover.watchers.append(tile)
             self.head_glass.append(tile)
             hold_while_hovered(tile)
+            if cls == "glass-head":
+                # The gear pumps while the mouse is on it (not in its menu, which CSS counts as inside it).
+                gear = child.get_first_child() or child
+                m = Gtk.EventControllerMotion()
+                m.connect("enter", lambda *_, t=tile: t.add_css_class("pumping"))
+                m.connect("leave", lambda *_, t=tile: t.remove_css_class("pumping"))
+                gear.add_controller(m)
             header.pack_end(tile)
         self.logo = FlagLogo(34)  # the (enhanced) logo itself, drawn sharp; waves under the mouse
         self.logo.add_css_class("top-logo")
