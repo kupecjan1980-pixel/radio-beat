@@ -1803,12 +1803,16 @@ class GlassCard(Gtk.Box):
 
 
 class MenuGlass(GlassCard):
-    """The gear menu's glass. The menu is a popup surface of its own, so where the window's cover lies behind
-    it comes from where the popup was put (its position on the window's surface)."""
+    """The gear menu's glass, over the whole window: the cover, the text and the show card's glass all show
+    through it, magnified. The menu is a popup surface of its own, so where the window lies behind it comes
+    from where the popup was put (its position on the window's surface); the window is drawn once per redraw
+    into a texture (at the screen's scale, sharp), then bent like the card's."""
 
     def __init__(self, win, behind: list, **kw):
         super().__init__(behind, **kw)
         self.win = win
+        self.paint = None  # the window's content, live
+        self._tex = None
         self.tint = 0.42  # a little darker than the show card: the menu's small text stays readable
         self.sharp_bars = True
         self.depth = False  # the popup's own shadow does it
@@ -1826,9 +1830,42 @@ class MenuGlass(GlassCard):
         y = surf.get_position_y() + pty + cp.y - wty
         return True, Graphene.Point().init(wp.x - x, wp.y - y)
 
+    def _window_texture(self):
+        content, native = self.win.get_content(), self.get_native()
+        if not content or not native:
+            return None
+        if self.paint is None:
+            self.paint = Gtk.WidgetPaintable.new(content)
+            # the window changed (a new cover, a new song): the menu shows it
+            self.paint.connect("invalidate-contents", lambda *_: self.get_mapped() and self.queue_draw())
+        cw, ch = content.get_width(), content.get_height()
+        if cw <= 0 or ch <= 0:
+            return None
+        surf = self.win.get_surface()
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.win.get_scale_factor()
+        s = Gtk.Snapshot()
+        s.scale(k, k)
+        self.paint.snapshot(s, cw, ch)
+        node = s.to_node()
+        return native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, cw * k, ch * k)) if node else None
+
+    def _behind(self, snap, w: float, h: float, sx: float, sy: float) -> None:
+        content = self.win.get_content()
+        ok, p = self._where(content) if content else (False, None)
+        if not (self._tex and ok):
+            return
+        snap.save()
+        snap.translate(Graphene.Point().init(w / 2, h / 2))
+        snap.scale(sx, sy)
+        snap.translate(Graphene.Point().init(-w / 2, -h / 2))
+        snap.append_texture(self._tex, Graphene.Rect().init(p.x, p.y, content.get_width(), content.get_height()))
+        snap.restore()
+
     def do_snapshot(self, snap) -> None:
         self.shade = 1.0  # always readable, whatever Background shade is
+        self._tex = self._window_texture()
         GlassCard.do_snapshot(self, snap)
+        self._tex = None
 
 
 def _rgba(r: int, g: int, b: int, a: float) -> Gdk.RGBA:
