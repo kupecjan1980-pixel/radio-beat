@@ -1543,6 +1543,12 @@ popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { backgroun
 popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
 .overlay-header:backdrop, .overlay-header:backdrop * { opacity: 1; filter: none; }  /* not faded when unfocused */
 .overlay-header button.close-button:hover { background: #F21C30; }
+/* Under the mouse: pause, stop, the speaker and close pump once a second; the gear ticks round like a watch's
+   hand, twice a second (12 steps a turn). */
+@keyframes pump { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+@keyframes tick { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.glass-disc:hover, .overlay-header button.close-button:hover { animation: pump 1s ease-in-out infinite; }
+.overlay-header menubutton:hover image { animation: tick 500ms steps(12) infinite; }
 """
 
 
@@ -1641,9 +1647,12 @@ class GlassCard(Gtk.Box):
     (Background shade), a soft top highlight and a thin bright edge. GTK has
     no displacement filter or backdrop-filter, so it's drawn here."""
 
-    BEND = 1.6  # how far the rim reaches out, in rim widths: a strong, sharp lens edge
-    RIM = 1.6  # the bent band's width (the glass's curved side wall), in corner radii
-    MAG = 1.12  # the middle, magnified like through a thick magnifying glass
+    RIM = 1.6  # the curved side wall's width (its shading), in corner radii
+    MAG = 1.25  # the middle, magnified like through a thick magnifying glass
+    # Fish-eye: the bend runs across the whole glass, not just its rim: the middle magnified most, less and less
+    # towards the edges, which show a little of what lies beyond them.
+    FISH_REACH = 0.45  # how far beyond its edge the glass shows, in half its smaller side
+    FISH_CURVE = 1.7  # how the magnification falls off from the middle (higher: flatter middle)
 
     def __init__(self, behind: list, **kw):
         super().__init__(**kw)
@@ -1783,15 +1792,16 @@ class GlassCard(Gtk.Box):
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
         snap.push_rounded_clip(rr)
-        # A magnifying glass, sharp: the middle magnified (MAG), the rim bent hard the other way (it shows what
-        # lies beyond the edge, squeezed in), a cubic curve between. No blending (that ghosts and looks
-        # blurred): hard-edged layers from the rim in, each shifted under 1 px from the one outside it.
-        most = rim * self.BEND
-        rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the rim's zoom
+        # A fish-eye lens, sharp: the middle magnified most (mag), less and less towards the edges, which are
+        # bent the other way (they show what lies beyond, squeezed in). No blending (that ghosts and looks
+        # blurred): hard-edged layers from the edge in, each shifted under 1 px from the one outside it.
+        lens = min(h / 2, w / 2)
+        most = lens * self.FISH_REACH
+        rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the edge's zoom
         steps = max(1, math.ceil(most + abs(self.mag - 1) * max(w, h) / 2))
         for k in range(0, steps + 1):
-            bend = 1 - k / steps  # 1 at the rim, 0 in the middle
-            d = rim * (1 - bend ** (1 / 3))  # where the cubic bend falls to `bend`
+            bend = 1 - k / steps  # 1 at the edge, 0 in the middle
+            d = lens * (1 - bend ** (1 / self.FISH_CURVE))  # where the curve falls to `bend`
             sx, sy = self.mag + (rx - self.mag) * bend, self.mag + (ry - self.mag) * bend
             if k:
                 snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d))
@@ -2122,7 +2132,7 @@ class Window(Adw.ApplicationWindow):
             disc = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER,
                              halign=Gtk.Align.CENTER, margin_start=margin)
             disc.add_css_class("glass-disc")
-            disc.scrim, disc.mag, disc.concave, disc.depth, disc.color = scrim, 1.18, True, False, color
+            disc.scrim, disc.mag, disc.concave, disc.depth, disc.color = scrim, 1.3, True, False, color
             disc.sharp_bars = True  # through a magnifier even the bars beside the cover show sharp
             disc.set_hexpand(False)  # only the slider takes the row's spare width
             disc.set_homogeneous(True)  # the button or icon fills the dish, centred
