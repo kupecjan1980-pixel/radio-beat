@@ -1477,12 +1477,16 @@ class CoverView(Gtk.Widget):
 
 
 class GlassCard(Gtk.Box):
-    """A frosted-glass panel (like Apple's materials): what's behind it (the
-    blurred backdrop and the cover) drawn again, blurred, through a rounded
-    clip, with a dark tint, a soft top highlight and a thin bright edge. GTK's
-    CSS has no backdrop-filter, so it's drawn here."""
+    """A liquid-glass panel: what's behind it (the backdrop and the cover) is
+    not blurred but refracted, like through a lens: true in the middle, bent
+    more and more towards the rim (it shows what lies further out, squeezed
+    in). Drawn as layers, each from a little further in and a little more
+    bent, blended through soft masks so there are no steps; then a dark tint
+    (Background shade), a soft top highlight and a thin bright edge. GTK has
+    no displacement filter or backdrop-filter, so it's drawn here."""
 
-    BLUR = 26.0
+    LAYERS = 8
+    BEND = 0.9  # how far the rim reaches out, in rim widths
 
     def __init__(self, behind: list, **kw):
         super().__init__(**kw)
@@ -1490,15 +1494,14 @@ class GlassCard(Gtk.Box):
         self.radius = 16.0
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
 
-    def do_snapshot(self, snap) -> None:
-        w, h = self.get_width(), self.get_height()
-        if w <= 0 or h <= 0:
-            return
-        box = Graphene.Rect().init(0, 0, w, h)
-        rr = Gsk.RoundedRect()
-        rr.init_from_rect(box, self.radius)
-        snap.push_rounded_clip(rr)
-        snap.push_blur(self.BLUR)
+    def _behind(self, snap, w: float, h: float, reach: float) -> None:
+        """What's behind the card, squeezed so its edge shows `reach` px beyond it."""
+        cx, cy = w / 2, h / 2
+        snap.save()
+        if reach > 0.05:
+            snap.translate(Graphene.Point().init(cx, cy))
+            snap.scale(1 / (1 + 2 * reach / w), 1 / (1 + 2 * reach / h))
+            snap.translate(Graphene.Point().init(-cx, -cy))
         for view, darken in self.behind:
             pic = view.pic
             ok, p = view.compute_point(self, Graphene.Point().init(0, 0))
@@ -1511,7 +1514,42 @@ class GlassCard(Gtk.Box):
             if darken * self.shade:
                 snap.append_color(_rgba(0, 0, 0, darken * self.shade), Graphene.Rect().init(0, 0, vw, vh))
             snap.restore()
-        snap.pop()
+        snap.restore()
+
+    def _rounded(self, x: float, y: float, w: float, h: float, r: float) -> Gsk.RoundedRect:
+        rr = Gsk.RoundedRect()
+        rr.init_from_rect(Graphene.Rect().init(x, y, max(w, 1), max(h, 1)), max(r, 0))
+        return rr
+
+    def do_snapshot(self, snap) -> None:
+        w, h = self.get_width(), self.get_height()
+        if w <= 0 or h <= 0:
+            return
+        box = Graphene.Rect().init(0, 0, w, h)
+        rr = self._rounded(0, 0, w, h, self.radius)
+        rim = min(self.radius * 1.6, h / 2, w / 2)
+        snap.push_rounded_clip(rr)
+        n = self.LAYERS
+        self._behind(snap, w, h, rim * self.BEND)  # the rim, bent the most
+        masks = hasattr(snap, "push_mask")
+        for i in range(1, n + 1):
+            d = rim * i / n  # this layer from d px in, bent less
+            reach = rim * self.BEND * (1 - i / n) ** 2
+            inner = self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d)
+            if masks:
+                snap.push_mask(Gsk.MaskMode.ALPHA)
+                snap.push_blur(rim / n)  # a soft edge: the layers melt into each other
+                snap.push_rounded_clip(inner)
+                snap.append_color(_rgba(0, 0, 0, 1.0), box)
+                snap.pop()
+                snap.pop()
+                snap.pop()
+                self._behind(snap, w, h, reach)
+                snap.pop()
+            else:
+                snap.push_rounded_clip(inner)
+                self._behind(snap, w, h, reach)
+                snap.pop()
         snap.append_color(_rgba(18, 18, 22, 0.34 * self.shade), box)
         hl = Graphene.Rect().init(0, 0, w, h * 0.6)
         snap.append_linear_gradient(hl, Graphene.Point().init(0, 0), Graphene.Point().init(0, h * 0.6),
@@ -1627,7 +1665,9 @@ class Window(Adw.ApplicationWindow):
                         margin_bottom=22, margin_start=22, margin_end=22)
         scrim.append(inner)
         # What's on: the show now (picture, name, host) and the next one.
-        self.show_card = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], spacing=12, margin_bottom=10)
+        # Only as wide as it needs, at the right (the song info's right edge): less of the cover hidden.
+        self.show_card = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], spacing=12, margin_bottom=10,
+                                   halign=Gtk.Align.END)
         self.backdrop.watchers.append(self.show_card)
         self.cover.watchers.append(self.show_card)
         self.show_card.add_css_class("show-card")
@@ -1635,11 +1675,11 @@ class Window(Adw.ApplicationWindow):
         self.show_pic.add_css_class("show-pic")
         self.show_pic.set_overflow(Gtk.Overflow.HIDDEN)
         self.show_card.append(self.show_pic)
-        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
         top = Gtk.Box(spacing=8)
         badge = Gtk.Label(label="ON AIR", valign=Gtk.Align.CENTER)
         badge.add_css_class("on-air")
-        self.show_title = Gtk.Label(xalign=0, ellipsize=3, hexpand=True)  # 3 = Pango.EllipsizeMode.END
+        self.show_title = Gtk.Label(xalign=0, ellipsize=3)  # 3 = Pango.EllipsizeMode.END
         self.show_title.add_css_class("show-title")
         top.append(badge)
         top.append(self.show_title)
