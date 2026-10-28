@@ -709,6 +709,167 @@ class Tray:
             self.bus.emit_signal(None, self.PATH, "org.kde.StatusNotifierItem", "NewToolTip", None)
 
 
+# --- AI upscaling (Real-ESRGAN on the GPU) --------------------------------------
+# A cover (or the logo) that full screen would stretch by more than
+# UPSCALE_FROM is redrawn 4x by Real-ESRGAN (ncnn, on the GPU through Vulkan),
+# then fitted to the screen; until it's done the plain one shows. All local:
+# the program and its model (about 47 MB download, checked against its
+# SHA-256) go into ~/.local/share/radio-beat by themselves on the first start.
+# One picture at a time at the lowest priority, small tiles (bigger ones time
+# out on older iGPUs and come back black), results cached by picture and size.
+
+ESR_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
+ESR_SHA256 = "e5aa6eb131234b87c0c51f82b89390f5e3e642b7b70f2b9bbe95b6a285a40c96"
+ESR_MODEL = "realesrgan-x4plus"
+DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat")
+UPSCALED_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat", "upscaled")
+UPSCALE_FROM = 1.25
+UPSCALED_KEEP = 300  # cached pictures
+
+
+class Upscaler:
+    def __init__(self):
+        self.dir = os.path.join(DATA_DIR, "realesrgan")
+        self.bin = os.path.join(self.dir, "realesrgan-ncnn-vulkan")
+        self.broken = False
+        self.jobs: dict[str, tuple] = {}  # kind ("logo" / "cover") -> (key, data, size, done)
+        self.running: tuple | None = None
+        self.proc: subprocess.Popen | None = None
+        self.wake = threading.Event()
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def ready(self) -> bool:
+        return not self.broken and os.access(self.bin, os.X_OK)
+
+    def install(self) -> bool:
+        """Download and unpack it (blocking: call from a thread)."""
+        import hashlib
+        import zipfile
+        if self.ready():
+            return True
+        try:
+            req = urllib.request.Request(ESR_URL, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                blob = r.read()
+        except (OSError, ValueError) as e:
+            print(f"upscaler: download failed: {e}", file=sys.stderr)
+            return False
+        if hashlib.sha256(blob).hexdigest() != ESR_SHA256:
+            print("upscaler: download doesn't match its checksum, not used", file=sys.stderr)
+            return False
+        import io
+        want = {"realesrgan-ncnn-vulkan", f"models/{ESR_MODEL}.param", f"models/{ESR_MODEL}.bin"}
+        tmp = self.dir + ".part"
+        shutil.rmtree(tmp, ignore_errors=True)
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            for name in z.namelist():
+                if name in want:
+                    dest = os.path.join(tmp, name)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with z.open(name) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+        os.chmod(os.path.join(tmp, "realesrgan-ncnn-vulkan"), 0o755)
+        shutil.rmtree(self.dir, ignore_errors=True)
+        os.replace(tmp, self.dir)
+        return True
+
+    def request(self, kind: str, key: str, data: bytes, size: tuple[int, int], done) -> None:
+        """Main thread. done(jpeg bytes) runs on the main thread when it's ready.
+        A newer request of the same kind replaces (and stops) the older one."""
+        self.jobs[kind] = (key, data, size, done)
+        r = self.running
+        if r and r[0] == kind and r[1] != key and self.proc:
+            self.proc.kill()
+        self.wake.set()
+
+    def drop(self, kind: str) -> None:
+        self.jobs.pop(kind, None)
+        r = self.running
+        if r and r[0] == kind and self.proc:
+            self.proc.kill()
+
+    def _cache_path(self, key: str, size: tuple[int, int]) -> str:
+        import hashlib
+        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}".encode()).hexdigest()
+        return os.path.join(UPSCALED_DIR, f"{h}.jpg")
+
+    def _worker(self) -> None:
+        while True:
+            self.wake.wait()
+            self.wake.clear()
+            while self.jobs:
+                kind = "logo" if "logo" in self.jobs else next(iter(self.jobs))
+                job = self.jobs[kind]
+                key, data, size, done = job
+                self.running = (kind, key)
+                try:
+                    jpeg = self._upscale(key, data, size)
+                except Exception as e:  # never take the app down over a picture
+                    print(f"upscaler: {e}", file=sys.stderr)
+                    jpeg = None
+                self.running = None
+                if self.jobs.get(kind) is job:
+                    del self.jobs[kind]
+                    if jpeg:
+                        GLib.idle_add(lambda d=done, j=jpeg: (d(j), False)[1])
+
+    def _upscale(self, key: str, data: bytes, size: tuple[int, int]) -> bytes | None:
+        from gi.repository import GdkPixbuf
+        cached = self._cache_path(key, size)
+        if os.path.exists(cached):
+            os.utime(cached)
+            with open(cached, "rb") as f:
+                return f.read()
+        if not self.ready():
+            return None
+        work = tempfile.mkdtemp(prefix="radio-beat-esr-")
+        try:
+            src, out = os.path.join(work, "in.img"), os.path.join(work, "out.png")
+            with open(src, "wb") as f:
+                f.write(data)
+            self.proc = subprocess.Popen(
+                ["nice", "-n", "19", self.bin, "-i", src, "-o", out, "-n", ESR_MODEL, "-m", os.path.join(self.dir, "models"),
+                 "-t", "128", "-f", "png"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            _, err = self.proc.communicate()
+            rc, self.proc = self.proc.returncode, None
+            if rc < 0:
+                return None  # stopped: the song changed
+            if rc or "failed" in err or not os.path.exists(out):
+                print(f"upscaler: Real-ESRGAN failed ({rc}): {err.strip()[-200:]}", file=sys.stderr)
+                if "vkCreateInstance failed" in err or "invalid gpu" in err:
+                    self.broken = True  # no Vulkan GPU: plain scaling from now on
+                return None
+            pb = GdkPixbuf.Pixbuf.new_from_file(out)
+            px = pb.get_pixels()
+            if not any(px[i] for i in range(0, len(px), 4099)):
+                print("upscaler: came back black (GPU timed out), not used", file=sys.stderr)
+                return None
+            pb = pb.scale_simple(size[0], size[1], GdkPixbuf.InterpType.BILINEAR)
+            os.makedirs(UPSCALED_DIR, exist_ok=True)
+            ok, jpeg = pb.save_to_bufferv("jpeg", ["quality"], ["92"])
+            if not ok:
+                return None
+            with open(cached + ".part", "wb") as f:
+                f.write(jpeg)
+            os.replace(cached + ".part", cached)
+            self._trim()
+            return bytes(jpeg)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _trim(self) -> None:
+        try:
+            files = sorted((os.path.join(UPSCALED_DIR, f) for f in os.listdir(UPSCALED_DIR)), key=os.path.getmtime)
+        except OSError:
+            return
+        for f in files[:-UPSCALED_KEEP]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+
 # --- window ---------------------------------------------------------------------
 
 CSS = b"""
@@ -1055,6 +1216,8 @@ class App(Adw.Application):
         self.codec = self.bitrate = None
         self.cover_tex = None
         self.logo_tex = None
+        self.upscaler = Upscaler()
+        self.upscale_src: dict[str, tuple[str, bytes]] = {}  # kind -> (key, picture bytes), for after the install
         self._lookup_id = 0
         self._started = False
         self.last_audio = time.monotonic()  # when playback last moved on
@@ -1082,7 +1245,10 @@ class App(Adw.Application):
         for p in (os.path.join(HERE, "logo.png"), os.path.join(HERE, "icons", "hicolor", "256x256", "apps", f"{APP_ID}.png")):
             if os.path.exists(p):
                 self.logo_tex = Gdk.Texture.new_from_filename(p)
+                with open(p, "rb") as f:
+                    self.upscale_src["logo"] = (p, f.read())
                 break
+        threading.Thread(target=self._install_upscaler, daemon=True).start()
         self.start_mpv()
         GLib.timeout_add_seconds(5, self._watchdog)
         self._programme()
@@ -1373,6 +1539,8 @@ class App(Adw.Application):
         parts = split_title(icy)
         self.artist_raw, self.song = (parts if parts else (None, icy))
         self.info, self.cover_tex = None, None
+        self.upscaler.drop("cover")
+        self.upscale_src.pop("cover", None)
         self._lookup_id += 1
         if parts:
             threading.Thread(target=self._lookup, args=(self._lookup_id, *parts), daemon=True).start()
@@ -1389,11 +1557,61 @@ class App(Adw.Application):
         if data:
             try:
                 self.cover_tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+                self.upscale_src["cover"] = (info["cover"], data)
+                self._enhance("cover")
             except GLib.Error:
                 self.cover_tex = None
         self.update()
         return False
 
+
+    # --- AI upscaling ---------------------------------------------------------------
+
+    def _install_upscaler(self):
+        if self.upscaler.install():
+            GLib.idle_add(lambda: (self._enhance("logo"), self._enhance("cover"), False)[2])
+
+    def screen_px(self) -> tuple[int, int] | None:
+        """Pixels of the screen the window is on (or the first one)."""
+        disp = Gdk.Display.get_default()
+        surf = self.win.get_surface() if self.win else None
+        mon = disp.get_monitor_at_surface(surf) if surf else None
+        if mon is None:
+            mons = disp.get_monitors()
+            mon = mons.get_item(0) if mons.get_n_items() else None
+        if mon is None:
+            return None
+        g = mon.get_geometry()
+        sc = mon.get_scale() if hasattr(mon, "get_scale") else mon.get_scale_factor()
+        return round(g.width * sc), round(g.height * sc)
+
+    def _enhance(self, kind: str) -> None:
+        """Ask for an upscaled picture if full screen would stretch it."""
+        tex = self.cover_tex if kind == "cover" else self.logo_tex
+        src = self.upscale_src.get(kind)
+        size = self.screen_px()
+        if not tex or not src or not size or not self.upscaler.ready():
+            return
+        w, h = tex.get_width(), tex.get_height()
+        f = min(size[0] / w, size[1] / h)
+        if f < UPSCALE_FROM:
+            return
+        lid = self._lookup_id
+
+        def done(jpeg: bytes):
+            try:
+                t = Gdk.Texture.new_from_bytes(GLib.Bytes.new(jpeg))
+            except GLib.Error:
+                return
+            if kind == "cover":
+                if lid != self._lookup_id:
+                    return
+                self.cover_tex = t
+            else:
+                self.logo_tex = t
+            self.update()
+
+        self.upscaler.request(kind, src[0], src[1], (round(w * f), round(h * f)), done)
 
 if __name__ == "__main__":
     sys.exit(App().run(sys.argv))
