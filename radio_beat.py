@@ -1498,10 +1498,10 @@ CSS = b"""
 .cover-bg { background: #111; }
 .backdrop { filter: blur(36px) brightness(0.55); transform: scale(1.15); }  /* GlassCard draws it the same: BACKDROP_* */
 .scrim { background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.75) 55%, rgba(0,0,0,0) 100%); }
-.scrim label { color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+.scrim label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65), 0 0 2px rgba(0,0,0,0.5); }  /* left and bottom: readable on pale covers */
 .song { font-weight: 800; }
 @keyframes flash { 0% { text-shadow: 0 0 14px rgba(255,255,255,1), 0 0 34px rgba(255,255,255,0.8); }
-                   100% { text-shadow: 0 1px 3px rgba(0,0,0,0.8); } }
+                   100% { text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65), 0 0 2px rgba(0,0,0,0.5); } }
 .scrim label.flash { animation: flash 900ms ease-out; }
 .artist { font-weight: 600; }
 .album { opacity: 0.8; }
@@ -1522,6 +1522,9 @@ CSS = b"""
 .overlay-header button { background: rgba(0,0,0,0.45); color: white; }
 .overlay-header .top-logo { border-radius: 8px; margin-left: 4px; }
 .overlay-header button.close-button { background: #E3051A; color: white; }
+popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
+popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
+popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
 .overlay-header:backdrop, .overlay-header:backdrop * { opacity: 1; filter: none; }  /* not faded when unfocused */
 .overlay-header button.close-button:hover { background: #F21C30; }
 """
@@ -1632,6 +1635,7 @@ class GlassCard(Gtk.Box):
         self.radius = 28.0
         self._blurred = (None, None)  # (key, texture): the blurred backdrop, made once per picture and size
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
+        self.tint = 0.34  # the dark tint over the glass (times shade)
         self.flash = 0.0  # 1 → 0 when the song changes
         self.flash_anim = None
 
@@ -1654,7 +1658,7 @@ class GlassCard(Gtk.Box):
             snap.translate(Graphene.Point().init(-cx, -cy))
         for view, darken in self.behind:
             pic = view.pic
-            ok, p = view.compute_point(self, Graphene.Point().init(0, 0))
+            ok, p = self._where(view)
             if not pic or not ok:
                 continue
             vw, vh = view.get_width(), view.get_height()
@@ -1663,7 +1667,7 @@ class GlassCard(Gtk.Box):
                 # the cover (thick glass all over, just blurry there).
                 tex = self._backdrop(view, pic, vw, vh, darken)
                 # Where it sits before its CSS zoom (the parent's origin): the texture has the zoom in it.
-                ok, p = view.get_parent().compute_point(self, Graphene.Point().init(0, 0))
+                ok, p = self._where(view.get_parent())
                 if tex and ok:
                     snap.append_texture(tex, Graphene.Rect().init(p.x, p.y, vw, vh))
                 continue
@@ -1674,6 +1678,10 @@ class GlassCard(Gtk.Box):
                 snap.append_color(_rgba(0, 0, 0, darken * self.shade), Graphene.Rect().init(0, 0, vw, vh))
             snap.restore()
         snap.restore()
+
+    def _where(self, widget):
+        """Where `widget` (behind the card) starts, in the card's coordinates."""
+        return widget.compute_point(self, Graphene.Point().init(0, 0))
 
     def _backdrop(self, view, pic, vw: int, vh: int, darken: float):
         """The backdrop as the window shows it (blurred, darkened, a bit enlarged), as a texture: drawn once,
@@ -1731,7 +1739,7 @@ class GlassCard(Gtk.Box):
                 snap.pop()
         if self.flash > 0:
             snap.append_color(_rgba(255, 255, 255, 0.28 * self.flash), box)
-        snap.append_color(_rgba(18, 18, 22, 0.34 * self.shade), box)
+        snap.append_color(_rgba(18, 18, 22, self.tint * self.shade), box)
         hl = Graphene.Rect().init(0, 0, w, h * 0.6)
         snap.append_linear_gradient(hl, Graphene.Point().init(0, 0), Graphene.Point().init(0, h * 0.6),
                                     [_stop(0.0, 255, 255, 255, 0.16), _stop(1.0, 255, 255, 255, 0.0)])
@@ -1740,6 +1748,33 @@ class GlassCard(Gtk.Box):
                 _rgba(255, 255, 255, 0.10), _rgba(255, 255, 255, 0.16)]  # top, right, bottom, left
         snap.append_border(rr, [1.0, 1.0, 1.0, 1.0], edge)
         Gtk.Box.do_snapshot(self, snap)
+
+
+class MenuGlass(GlassCard):
+    """The gear menu's glass. The menu is a popup surface of its own, so where the window's cover lies behind
+    it comes from where the popup was put (its position on the window's surface)."""
+
+    def __init__(self, win, behind: list, **kw):
+        super().__init__(behind, **kw)
+        self.win = win
+        self.tint = 0.62  # darker than the show card: the menu's small text stays readable
+
+    def _where(self, widget):
+        pop = self.get_native()
+        surf = pop.get_surface() if pop else None
+        ok_w, wp = widget.compute_point(self.win, Graphene.Point().init(0, 0))
+        ok_c, cp = self.compute_point(pop, Graphene.Point().init(0, 0)) if pop else (False, None)
+        if not (surf and ok_w and ok_c and hasattr(surf, "get_position_x")):
+            return False, None
+        ptx, pty = pop.get_surface_transform()
+        wtx, wty = self.win.get_surface_transform()
+        x = surf.get_position_x() + ptx + cp.x - wtx  # the card's corner, in the window
+        y = surf.get_position_y() + pty + cp.y - wty
+        return True, Graphene.Point().init(wp.x - x, wp.y - y)
+
+    def do_snapshot(self, snap) -> None:
+        self.shade = 1.0  # always readable, whatever Background shade is
+        GlassCard.do_snapshot(self, snap)
 
 
 def _rgba(r: int, g: int, b: int, a: float) -> Gdk.RGBA:
@@ -2026,7 +2061,15 @@ class Window(Adw.ApplicationWindow):
                                  vscrollbar_policy=Gtk.PolicyType.AUTOMATIC, propagate_natural_height=True,
                                  width_request=320)
         self.menu_fit = fit
-        pop = self.menu_pop = Gtk.Popover(child=fit, has_arrow=False)
+        # Glass like the show card (the popup's own background taken off).
+        glass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
+        glass.radius = 16.0
+        glass.append(fit)
+        fit.set_hexpand(True)
+        self.backdrop.watchers.append(glass)
+        self.cover.watchers.append(glass)
+        pop = self.menu_pop = Gtk.Popover(child=glass, has_arrow=False)
+        pop.add_css_class("glass-menu")
         btn = Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings", popover=pop)
         pop.connect("show", lambda p: self._place_menu(btn, p))
         return btn
@@ -2065,6 +2108,7 @@ class Window(Adw.ApplicationWindow):
         pop.set_offset(int(left + width / 2 - mid), 8)
         room = self.get_height() - (pt.y + btn.get_height() + 8) - self.MENU_GAP - 2 * 6
         self.menu_fit.set_max_content_height(max(120, int(room)))
+        GLib.idle_add(lambda: (pop.get_child().queue_draw(), False)[1])  # its glass, once it's placed
 
     def fill_quality(self) -> None:
         self._filling = True
