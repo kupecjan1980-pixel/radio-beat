@@ -2927,7 +2927,9 @@ class Window(Adw.ApplicationWindow):
             self.info_row.set_orientation(Gtk.Orientation.VERTICAL)
             self.show_card.set_size_request(-1, -1)
             self.info_row.set_spacing(6)
-            self.show_card.set_halign(Gtk.Align.END)
+            # The window's width (not its own): the wrapped text's height is then worked out for the width it
+            # really gets, and the lines don't overlap.
+            self.show_card.set_halign(Gtk.Align.FILL)
             self.info_row.reorder_child_after(self.show_card, None)
             self.show_card.set_valign(Gtk.Align.FILL)
             self.show_card.set_margin_bottom(10)
