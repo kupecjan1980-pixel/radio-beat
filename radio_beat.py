@@ -717,8 +717,10 @@ class Tray:
 # 2. sharpened: CAS (contrast adaptive sharpening) on the upscaled picture;
 # 3. denoised: NL-means (on the GPU when ffmpeg can, else the CPU), then CAS
 #    again: the final picture (denoising before sharpening, as it should be).
-# A picture big enough for the screen already skips step 1: only sharpened
-# and denoised, at its own size.
+# A picture big enough for the screen already isn't upscaled: sharpened at
+# once, then redrawn by Real-ESRGAN for detail (from half size, back to its own
+# size), then denoised and sharpened. Pictures of REDRAW_FROM px and more go
+# through Real-ESRGAN from half size either way: sharper, and 4x less work.
 # All local. Real-ESRGAN and its model (47 MB download) go into
 # ~/.local/share/radio-beat by themselves, ffmpeg too (42 MB) when the system
 # has none; downloads are checked against their checksums. Everything keeps
@@ -734,7 +736,10 @@ DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~
 UPSCALED_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat", "upscaled")
 UPSCALE_FROM = 1.05
 UPSCALED_KEEP = 300  # cached pictures
-SHARPEN = "cas=strength=0.5"
+# Fine and wide unsharp masks, then contrast adaptive sharpening: as sharp as
+# it goes without halos or blown-up JPEG blocks (CAS alone at full strength does that).
+SHARPEN = "unsharp=3:3:1.2:3:3:0,unsharp=9:9:0.5:9:9:0,cas=strength=0.6"
+REDRAW_FROM = 1000  # px: bigger pictures go through Real-ESRGAN from half size
 DENOISE = "nlmeans=s=1.0:p=7:r=15"
 DENOISE_VK = "format=rgba,hwupload,nlmeans_vulkan=s=1.0:p=7:r=15,hwdownload,format=rgba"
 SOFTWARE_GPU = re.compile(r"llvmpipe|lavapipe|swiftshader", re.I)
@@ -1017,7 +1022,7 @@ class Enhancer:
 
     def _cache_path(self, key: str, size: tuple[int, int]) -> str:
         import hashlib
-        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}|{'ai' if self.ai else 'plain'}|v2".encode()).hexdigest()
+        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}|{'ai' if self.ai else 'plain'}|v3".encode()).hexdigest()
         return os.path.join(UPSCALED_DIR, f"{h}.jpg")
 
     def _worker(self) -> None:
@@ -1042,7 +1047,7 @@ class Enhancer:
     def _enhance(self, kind: str, job: tuple) -> None:
         key, data, (w0, h0), size, done, screen = job
         what = "Cover" if kind == "cover" else "Logo"
-        same = size == (w0, h0)  # big enough already: only sharpened and denoised
+        same = size == (w0, h0)  # big enough already: no upscaling
         if same:
             scr = f"the {screen[0]}×{screen[1]} px screen" if screen else "the screen"
             head = f"{what}: {w0}×{h0} px, no upscaling needed (big enough for {scr})"
@@ -1055,9 +1060,8 @@ class Enhancer:
                 os.utime(cached)
                 with open(cached, "rb") as f:
                     emit(f.read())
-                note = cached[:-4] + ".txt"
                 try:
-                    with open(note) as f:
+                    with open(cached[:-4] + ".txt") as f:
                         steps = f.read().strip()
                 except OSError:
                     steps = "enhanced"
@@ -1071,72 +1075,112 @@ class Enhancer:
                 f.write(data)
             steps: list[str] = []
             show = lambda more: self._picture(head + "".join(f", {x}" for x in steps) + more)
-            up = os.path.join(work, "up.png")
+            live = lambda: self._current(kind, job)
             if same:
-                if not self._ff(["-i", src], "format=rgb24", up):
-                    return
-                return self._finish(kind, job, show, steps, up, cached, work, emit)
-
-            # 1. upscale
-            self._picture(f"{head}: upscaling{' on ' + self.gpu if self.ai else ''}…")
-            t = time.monotonic()
-            if self.ai:
-                big = os.path.join(work, "x4.png")
-                out, err = self._esr(src, big)
-                if out is None and self.tile != self.TILES[-1]:
-                    # The GPU timed out (black or failed): smaller tiles from now on, once more.
-                    self.tile = self.TILES[self.TILES.index(self.tile) + 1]
-                    self._save_tile()
-                    out, err = self._esr(src, big)
-                if out == "killed" or not self._current(kind, job):
-                    return
-                ok = out is not None and self._resize(big, size, up)
-                label = "AI-upscaled"
-                if not ok:
-                    print(f"enhancer: Real-ESRGAN failed: {err.strip()[-200:]}", file=sys.stderr)
+                self._same_size(src, (w0, h0), work, steps, show, live, emit, cached)
             else:
-                ok, label = False, "upscaled"
-            if not ok:
-                ok = self._resize(src, size, up)
-                label = "upscaled (smooth, no AI)" if label == "upscaled" else "upscaled (smooth: AI failed)"
-            if not ok or not self._current(kind, job):
-                if self._current(kind, job):
-                    self._picture(f"{head}: couldn't be upscaled, shown as it is")
-                return
-            steps.append(f"{label} in {_secs(time.monotonic() - t)}")
-            emit(open(up, "rb").read())
-            if not self.ffmpeg:
-                show(" (sharpening and denoising: no ffmpeg yet)")
-                return
-
-            self._finish(kind, job, show, steps, up, cached, work, emit)
+                self._bigger(src, (w0, h0), size, work, steps, show, live, emit, cached)
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    def _finish(self, kind: str, job: tuple, show, steps: list[str], up: str, cached: str, work: str, emit) -> None:
-        """Steps 2 and 3 on the (upscaled) picture: sharpened, then denoised and
-        sharpened again; the final one is cached with what was done."""
-        # 2. sharpen
+    def _bigger(self, src, src_size, size, work, steps, show, live, emit, cached) -> None:
+        """1. upscaled (AI, else smooth), shown; 2. sharpened, shown;
+        3. denoised and sharpened: the final one."""
+        show(f": upscaling{' on ' + self.gpu if self.ai else ''}…")
+        t = time.monotonic()
+        up = os.path.join(work, "up.png")
+        label = None
+        if self.ai:
+            out = self._ai(src, src_size, size, up, work)
+            if out == "killed" or not live():
+                return
+            if out:
+                label = f"AI-{out} on {self.gpu}"
+        if label is None:
+            if not self._resize(src, size, up) or not live():
+                if live():
+                    show(": couldn't be upscaled, shown as it is")
+                return
+            label = "upscaled (smooth, no AI)" if not self.ai else "upscaled (smooth: AI failed)"
+        steps.append(f"{label} in {_secs(time.monotonic() - t)}")
+        emit(open(up, "rb").read())
+        if not self.ffmpeg:
+            show(" (sharpening and denoising: no ffmpeg yet)")
+            return
+        if self._sharpen(up, work, steps, show, live, emit):
+            self._final(up, steps, show, live, emit, cached, work)
+
+    def _same_size(self, src, size, work, steps, show, live, emit, cached) -> None:
+        """1. sharpened as it is, shown at once; 2. AI-redrawn for detail
+        (when there's a GPU); 3. denoised and sharpened: the final one."""
+        if not self.ffmpeg:
+            show(" (sharpening and denoising: no ffmpeg yet)")
+            return
+        orig = os.path.join(work, "orig.png")
+        if not self._ff(["-i", src], "format=rgb24", orig):
+            return
+        if not self._sharpen(orig, work, steps, show, live, emit):
+            return
+        base = orig
+        if self.ai:
+            show(f", AI redrawing for detail on {self.gpu}…")
+            t = time.monotonic()
+            redrawn = os.path.join(work, "redrawn.png")
+            out = self._ai(orig, size, size, redrawn, work)
+            if out == "killed" or not live():
+                return
+            if out:
+                steps.append(f"AI-redrawn for detail on {self.gpu} in {_secs(time.monotonic() - t)}")
+                base = redrawn
+        self._final(base, steps, show, live, emit, cached, work)
+
+    def _ai(self, src, src_size, size, out, work) -> str | None:
+        """Real-ESRGAN to `size`: from half size when the picture is big (sharper
+        from a soft source, and 4x less work). Returns what it did ("upscaled" /
+        "redrawn"), "killed", or None when it failed."""
+        w0, h0 = src_size
+        feed, how = src, "upscaled"
+        if min(w0, h0) >= REDRAW_FROM:
+            half = os.path.join(work, "half.png")
+            if self._ff(["-i", src], f"scale={w0 // 2}:{h0 // 2}:flags=lanczos", half):
+                feed, how = half, "redrawn" if size == src_size else "redrawn and upscaled"
+        big = os.path.join(work, "x4.png")
+        res, err = self._esr(feed, big)
+        if res is None and self.tile != self.TILES[-1]:
+            # The GPU timed out (black or failed): smaller tiles from now on, once more.
+            self.tile = self.TILES[self.TILES.index(self.tile) + 1]
+            self._save_tile()
+            res, err = self._esr(feed, big)
+        if res == "killed":
+            return "killed"
+        if res is None or not self._resize(big, size, out):
+            print(f"enhancer: Real-ESRGAN failed: {err.strip()[-200:]}", file=sys.stderr)
+            return None
+        return how
+
+    def _sharpen(self, pic, work, steps, show, live, emit) -> bool:
         show(", sharpening…")
         t = time.monotonic()
         sharp = os.path.join(work, "sharp.png")
-        if not self._ff(["-i", up], SHARPEN, sharp) or not self._current(kind, job):
-            if self._current(kind, job):
+        if not self._ff(["-i", pic], SHARPEN, sharp) or not live():
+            if live():
                 show(" (sharpening failed)")
-            return
+            return False
         steps.append(f"sharpened in {_secs(time.monotonic() - t)}")
         emit(open(sharp, "rb").read())
+        return True
 
-        # 3. denoise (on the upscaled picture), then sharpen: the final one
+    def _final(self, base, steps, show, live, emit, cached, work) -> None:
+        """Denoised (GPU when ffmpeg can, else CPU), then sharpened: shown and cached."""
         show(", denoising…")
         t = time.monotonic()
         final = os.path.join(work, "final.jpg")
-        ok = self.vk_denoise and self._ff(["-i", up], f"{DENOISE_VK},{SHARPEN}", final, vulkan=True, jpeg=True)
+        ok = self.vk_denoise and self._ff(["-i", base], f"{DENOISE_VK},{SHARPEN}", final, vulkan=True, jpeg=True)
         where = "on the GPU"
-        if not ok and self._current(kind, job):
-            ok, where = self._ff(["-i", up], f"{DENOISE},{SHARPEN}", final, jpeg=True), "on the CPU"
-        if not ok or not self._current(kind, job):
-            if self._current(kind, job):
+        if not ok and live():
+            ok, where = self._ff(["-i", base], f"{DENOISE},{SHARPEN}", final, jpeg=True), "on the CPU"
+        if not ok or not live():
+            if live():
                 show(" (denoising failed)")
             return
         steps.append(f"denoised {where} in {_secs(time.monotonic() - t)}")
@@ -1271,11 +1315,15 @@ class Window(Adw.ApplicationWindow):
         # rest of the window, whatever its shape; everything else lies on top.
         self.backdrop = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True)
         self.backdrop.add_css_class("backdrop")
-        self.cover = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, hexpand=True,
-                                 valign=Gtk.Align.START)
+        # The frame keeps the picture's shape and gives it all the room there is,
+        # so a small picture is stretched to fit too (a bare Gtk.Picture stops
+        # at its own pixel size); top in a tall window, centred in a wide one.
+        self.cover = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, hexpand=True, vexpand=True)
+        self.cover_frame = Gtk.AspectFrame(child=self.cover, ratio=1.0, obey_child=False, xalign=0.5, yalign=0.0,
+                                           hexpand=True, vexpand=True)
         bg = Gtk.Overlay(child=self.backdrop, hexpand=True, vexpand=True, overflow=Gtk.Overflow.HIDDEN)
         bg.add_css_class("cover-bg")
-        bg.add_overlay(self.cover)
+        bg.add_overlay(self.cover_frame)
         overlay = Gtk.Overlay(child=bg)
 
         header = Adw.HeaderBar(show_title=False, valign=Gtk.Align.START)
@@ -1515,6 +1563,8 @@ class Window(Adw.ApplicationWindow):
         if pic is not self.cover.get_paintable():
             self.cover.set_paintable(pic)
             self.backdrop.set_paintable(pic)
+            if pic:
+                self.cover_frame.set_ratio(pic.get_intrinsic_aspect_ratio() or 1.0)
         cur, nxt = on_air(a.schedule, time.localtime())
         self.show_card.set_visible(cur is not None)
         if cur:
@@ -1898,7 +1948,11 @@ class App(Adw.Application):
         self.icy = icy
         parts = split_title(icy)
         self.artist_raw, self.song = (parts if parts else (None, icy))
-        self.info, self.cover_tex = None, None
+        # The last cover stays up until the new one is found (no logo flashing
+        # in between); the logo only when there's no song or no cover.
+        self.info = None
+        if not parts:
+            self.cover_tex = None
         self.enhancer.drop("cover")
         self.upscale_src.pop("cover", None)
         self.orig_tex.pop("cover", None)
@@ -1923,6 +1977,8 @@ class App(Adw.Application):
                 self._enhance("cover")
             except GLib.Error:
                 self.cover_tex = None
+        else:
+            self.cover_tex = None
         self.update()
         return False
 
