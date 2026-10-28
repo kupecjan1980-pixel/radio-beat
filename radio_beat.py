@@ -999,7 +999,7 @@ FFMPEG_URL = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-sta
 DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat")
 UPSCALED_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat", "upscaled")
 UPSCALE_FROM = 1.05
-UPSCALED_KEEP = 300  # cached pictures
+UPSCALED_KEEP = 800  # cached pictures (about 1 MB each)
 # Fine and wide unsharp masks, then contrast adaptive sharpening: as sharp as
 # it goes without halos or blown-up JPEG blocks (CAS alone at full strength does that).
 SHARPEN = "unsharp=3:3:1.2:3:3:0,unsharp=9:9:0.5:9:9:0,cas=strength=0.6"
@@ -1447,6 +1447,24 @@ class Enhancer:
                 screen: tuple[int, int] | None = None) -> None:
         """Main thread. done(picture bytes) runs on the main thread after each
         step. A newer request of the same kind replaces (and stops) the older one."""
+        # Enhanced before (the AI's final picture is kept): shown at once, even before the GPU test is done, and
+        # not made again.
+        hit = self._cache_path(key, size, ai=True)
+        if kind != "icon" and os.path.exists(hit) and self._jpeg_ok(hit) and self._not_black(hit):
+            os.utime(hit)
+            with open(hit, "rb") as f:
+                done(f.read())
+            try:
+                with open(hit[:-4] + ".txt") as f:
+                    steps = f.read().strip()
+            except OSError:
+                steps = "enhanced"
+            what = {"cover": "Cover", "logo": "Logo"}.get(kind, "Show picture")
+            if self.on_picture:
+                self.on_picture(f"{what}: {src_size[0]}×{src_size[1]} px → {size[0]}×{size[1]} px, {steps} "
+                                "(from the cache)", kind)
+            self.drop(kind)
+            return
         self.jobs[kind] = (key, data, src_size, size, done, screen)
         r = self.running
         if r and r[0] == kind and r[1] != key and self.proc:
@@ -1459,9 +1477,10 @@ class Enhancer:
         if r and r[0] == kind and self.proc:
             self.proc.kill()
 
-    def _cache_path(self, key: str, size: tuple[int, int]) -> str:
+    def _cache_path(self, key: str, size: tuple[int, int], ai: bool | None = None) -> str:
         import hashlib
-        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}|{'ai' if self.ai else 'plain'}|v5".encode()).hexdigest()
+        ai = self.ai if ai is None else ai
+        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}|{'ai' if ai else 'plain'}|v5".encode()).hexdigest()
         return os.path.join(UPSCALED_DIR, f"{h}.jpg")
 
     def _worker(self) -> None:
@@ -3153,6 +3172,7 @@ class App(Adw.Application):
                 with open(p, "rb") as f:
                     self.upscale_src["logo"] = (p, f.read())
                 break
+        GLib.idle_add(lambda: (self._enhance("logo"), False)[1])  # enhanced before: from the cache at once
         threading.Thread(target=self._install_upscaler, daemon=True).start()
         if self.card_on():
             self.card.start()
