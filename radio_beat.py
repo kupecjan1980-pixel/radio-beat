@@ -2517,10 +2517,11 @@ class Window(Adw.ApplicationWindow):
             self.head_glass.append(tile)
             hold_while_hovered(tile)
             if cls == "glass-head":
-                # The gear pumps while the mouse is on it (not in its menu, which CSS counts as inside it).
+                # The gear pumps while the mouse is on it, not while its menu is open.
                 gear = child.get_first_child() or child
                 m = Gtk.EventControllerMotion()
-                m.connect("enter", lambda *_, t=tile: t.add_css_class("pumping"))
+                m.connect("enter", lambda *_, t=tile: self.menu_pop.get_visible() or t.add_css_class("pumping"))
+                self.menu_pop.connect("show", lambda *_, t=tile: t.remove_css_class("pumping"))
                 m.connect("leave", lambda *_, t=tile: t.remove_css_class("pumping"))
                 gear.add_controller(m)
             header.pack_end(tile)
