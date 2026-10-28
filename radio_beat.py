@@ -1728,9 +1728,11 @@ popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
 @keyframes pump { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
 @keyframes tick { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .glass-disc:hover { animation: pump 1s ease-in-out infinite; }
-/* The volume slider pumps too, gently (it's wide: it would run into the speaker). */
-@keyframes pump-wide { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04, 1.25); } }
-scale.vol-slider:hover { animation: pump-wide 1s ease-in-out infinite; }
+/* The volume slider pumps up and down only (sideways it would run into the speaker), its knob along. */
+@keyframes pump-tall { 0%, 100% { transform: scale(1); } 50% { transform: scale(1, 1.8); } }
+@keyframes pump-knob { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.35); } }
+scale.vol-slider:hover trough { animation: pump-tall 1s ease-in-out infinite; }
+scale.vol-slider:hover slider { animation: pump-knob 1s ease-in-out infinite; }
 /* The quality list's arrow bobs up and down (never turns). */
 @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
 row:hover .bob-arrow { animation: bob 900ms ease-in-out infinite; }
@@ -1952,6 +1954,7 @@ class GlassCard(Gtk.Box):
         self.tint = 0.34  # the dark tint over the glass (times shade)
         self.mag = self.MAG  # < 1: a concave lens (things look smaller)
         self.cache_lens = True  # the lens drawn from a texture while nothing behind it changes
+        self.pulse_tick = None  # the mouse on it: the magnification breathes, like a magnifier moved up and down
         self._lens_cache = (None, None)
         self.concave = False  # lit like a dish: shade along the top inside edge, light along the bottom
         self.color = None  # (r, g, b, alpha): colored glass
@@ -1960,6 +1963,37 @@ class GlassCard(Gtk.Box):
         self.depth = True  # a soft shadow below the card: it floats over the cover
         self.flash = 0.0  # 1 → 0 when the song changes
         self.flash_anim = None
+
+    PULSE = 0.2  # how much more it magnifies at the top of a breath
+    PULSE_HZ = 1.0
+
+    def breathe(self) -> None:
+        """Under the mouse the magnification rises and falls once a second, as if the glass were lifted
+        towards the eye and lowered again; it eases back when the mouse leaves."""
+        self._base_mag = self.mag
+        self._breath_on, self._breath_amp = False, 0.0
+        m = Gtk.EventControllerMotion()
+        m.connect("enter", lambda *_: self._breath(True))
+        m.connect("leave", lambda *_: self._breath(False))
+        self.add_controller(m)
+
+    def _breath(self, on: bool) -> None:
+        self._breath_on = on
+        if on and self.pulse_tick is None:
+            anim_hold(True)
+            self.pulse_tick = self.add_tick_callback(self._breath_step)
+
+    def _breath_step(self, _w, clock) -> bool:
+        t = clock.get_frame_time() / 1e6
+        self._breath_amp += ((1.0 if self._breath_on else 0.0) - self._breath_amp) * 0.1
+        self.mag = self._base_mag + self.PULSE * self._breath_amp * (1 - math.cos(2 * math.pi * self.PULSE_HZ * t)) / 2
+        self.queue_draw()
+        if not self._breath_on and self._breath_amp < 0.01:
+            self.mag, self.pulse_tick = self._base_mag, None
+            anim_hold(False)
+            self.queue_draw()
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
 
     def blink(self) -> None:
         """A brief bright flash (a new song)."""
@@ -2138,7 +2172,7 @@ class GlassCard(Gtk.Box):
         lens = min(h / 2, w / 2)
         most = lens * self.FISH_REACH
         rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the edge's zoom
-        steps = max(1, math.ceil(most + abs(self.mag - 1) * max(w, h) / 2))
+        steps = max(1, math.ceil((most + abs(self.mag - 1) * max(w, h) / 2) / (2.5 if self.pulse_tick else 1)))
         for k in range(0, steps + 1):
             bend = 1 - k / steps  # 1 at the edge, 0 in the middle
             d = lens * (1 - bend ** (1 / self.FISH_CURVE))  # where the curve falls to `bend`
@@ -2422,6 +2456,7 @@ class Window(Adw.ApplicationWindow):
         self.show_card = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], spacing=12, margin_bottom=10,
                                    halign=Gtk.Align.END)
         self.show_card.scrim = scrim
+        self.show_card.breathe()
         for tile in self.head_glass:
             tile.scrim = scrim
         self.backdrop.watchers.append(self.show_card)
