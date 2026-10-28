@@ -717,6 +717,8 @@ class Tray:
 # 2. sharpened: CAS (contrast adaptive sharpening) on the upscaled picture;
 # 3. denoised: NL-means (on the GPU when ffmpeg can, else the CPU), then CAS
 #    again: the final picture (denoising before sharpening, as it should be).
+# A picture big enough for the screen already skips step 1: only sharpened
+# and denoised, at its own size.
 # All local. Real-ESRGAN and its model (47 MB download) go into
 # ~/.local/share/radio-beat by themselves, ffmpeg too (42 MB) when the system
 # has none; downloads are checked against their checksums. Everything keeps
@@ -997,10 +999,11 @@ class Enhancer:
 
     # --- jobs ---------------------------------------------------------------------------
 
-    def request(self, kind: str, key: str, data: bytes, src_size: tuple[int, int], size: tuple[int, int], done) -> None:
+    def request(self, kind: str, key: str, data: bytes, src_size: tuple[int, int], size: tuple[int, int], done,
+                screen: tuple[int, int] | None = None) -> None:
         """Main thread. done(picture bytes) runs on the main thread after each
         step. A newer request of the same kind replaces (and stops) the older one."""
-        self.jobs[kind] = (key, data, src_size, size, done)
+        self.jobs[kind] = (key, data, src_size, size, done, screen)
         r = self.running
         if r and r[0] == kind and r[1] != key and self.proc:
             self.proc.kill()
@@ -1037,9 +1040,14 @@ class Enhancer:
         return self.jobs.get(kind) is job
 
     def _enhance(self, kind: str, job: tuple) -> None:
-        key, data, (w0, h0), size, done = job
+        key, data, (w0, h0), size, done, screen = job
         what = "Cover" if kind == "cover" else "Logo"
-        head = f"{what}: {w0}×{h0} px → {size[0]}×{size[1]} px"
+        same = size == (w0, h0)  # big enough already: only sharpened and denoised
+        if same:
+            scr = f"the {screen[0]}×{screen[1]} px screen" if screen else "the screen"
+            head = f"{what}: {w0}×{h0} px, no upscaling needed (big enough for {scr})"
+        else:
+            head = f"{what}: {w0}×{h0} px → {size[0]}×{size[1]} px"
         emit = lambda pic: GLib.idle_add(lambda: (done(pic), False)[1])
         cached = self._cache_path(key, size)
         if os.path.exists(cached):
@@ -1062,12 +1070,16 @@ class Enhancer:
             with open(src, "wb") as f:
                 f.write(data)
             steps: list[str] = []
-            show = lambda more: self._picture(f"{head}, {', '.join(steps)}{more}")
+            show = lambda more: self._picture(head + "".join(f", {x}" for x in steps) + more)
+            up = os.path.join(work, "up.png")
+            if same:
+                if not self._ff(["-i", src], "format=rgb24", up):
+                    return
+                return self._finish(kind, job, show, steps, up, cached, work, emit)
 
             # 1. upscale
             self._picture(f"{head}: upscaling{' on ' + self.gpu if self.ai else ''}…")
             t = time.monotonic()
-            up = os.path.join(work, "up.png")
             if self.ai:
                 big = os.path.join(work, "x4.png")
                 out, err = self._esr(src, big)
@@ -1097,43 +1109,48 @@ class Enhancer:
                 show(" (sharpening and denoising: no ffmpeg yet)")
                 return
 
-            # 2. sharpen
-            show(", sharpening…")
-            t = time.monotonic()
-            sharp = os.path.join(work, "sharp.png")
-            if not self._ff(["-i", up], SHARPEN, sharp) or not self._current(kind, job):
-                if self._current(kind, job):
-                    show(" (sharpening failed)")
-                return
-            steps.append(f"sharpened in {_secs(time.monotonic() - t)}")
-            emit(open(sharp, "rb").read())
-
-            # 3. denoise (on the upscaled picture), then sharpen: the final one
-            show(", denoising…")
-            t = time.monotonic()
-            final = os.path.join(work, "final.jpg")
-            ok = self.vk_denoise and self._ff(["-i", up], f"{DENOISE_VK},{SHARPEN}", final, vulkan=True, jpeg=True)
-            where = "on the GPU"
-            if not ok and self._current(kind, job):
-                ok, where = self._ff(["-i", up], f"{DENOISE},{SHARPEN}", final, jpeg=True), "on the CPU"
-            if not ok or not self._current(kind, job):
-                if self._current(kind, job):
-                    show(" (denoising failed)")
-                return
-            steps.append(f"denoised {where} in {_secs(time.monotonic() - t)}")
-            with open(final, "rb") as f:
-                pic = f.read()
-            emit(pic)
-            show("")
-            os.makedirs(UPSCALED_DIR, exist_ok=True)
-            with open(cached + ".part", "wb") as f:
-                f.write(pic)
-            os.replace(cached + ".part", cached)
-            with open(cached[:-4] + ".txt", "w") as f:
-                f.write(", ".join(steps))
-            self._trim()
+            self._finish(kind, job, show, steps, up, cached, work, emit)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    def _finish(self, kind: str, job: tuple, show, steps: list[str], up: str, cached: str, work: str, emit) -> None:
+        """Steps 2 and 3 on the (upscaled) picture: sharpened, then denoised and
+        sharpened again; the final one is cached with what was done."""
+        # 2. sharpen
+        show(", sharpening…")
+        t = time.monotonic()
+        sharp = os.path.join(work, "sharp.png")
+        if not self._ff(["-i", up], SHARPEN, sharp) or not self._current(kind, job):
+            if self._current(kind, job):
+                show(" (sharpening failed)")
+            return
+        steps.append(f"sharpened in {_secs(time.monotonic() - t)}")
+        emit(open(sharp, "rb").read())
+
+        # 3. denoise (on the upscaled picture), then sharpen: the final one
+        show(", denoising…")
+        t = time.monotonic()
+        final = os.path.join(work, "final.jpg")
+        ok = self.vk_denoise and self._ff(["-i", up], f"{DENOISE_VK},{SHARPEN}", final, vulkan=True, jpeg=True)
+        where = "on the GPU"
+        if not ok and self._current(kind, job):
+            ok, where = self._ff(["-i", up], f"{DENOISE},{SHARPEN}", final, jpeg=True), "on the CPU"
+        if not ok or not self._current(kind, job):
+            if self._current(kind, job):
+                show(" (denoising failed)")
+            return
+        steps.append(f"denoised {where} in {_secs(time.monotonic() - t)}")
+        with open(final, "rb") as f:
+            pic = f.read()
+        emit(pic)
+        show("")
+        os.makedirs(UPSCALED_DIR, exist_ok=True)
+        with open(cached + ".part", "wb") as f:
+            f.write(pic)
+        os.replace(cached + ".part", cached)
+        with open(cached[:-4] + ".txt", "w") as f:
+            f.write(", ".join(steps))
+        self._trim()
 
     # --- tools --------------------------------------------------------------------------
 
@@ -1960,7 +1977,8 @@ class App(Adw.Application):
         return round(g.width * sc), round(g.height * sc)
 
     def _enhance(self, kind: str) -> None:
-        """Ask for an enhanced picture if full screen would stretch it."""
+        """Ask for an enhanced picture: upscaled if full screen would stretch it,
+        and sharpened and denoised either way."""
         tex = self.orig_tex.get(kind)
         src = self.upscale_src.get(kind)
         size = self.screen_px()
@@ -1972,11 +1990,8 @@ class App(Adw.Application):
         if not self.settings.get("enhance", True):
             self._picture_changed(f"{what}: {w}×{h} px, shown as it comes (enhancing is off)", kind)
             return
-        if f < UPSCALE_FROM:
-            self._picture_changed(f"{what}: {w}×{h} px, shown as it comes (the screen, "
-                                  f"{size[0]}×{size[1]} px, doesn't need it bigger)", kind)
-            return
-        if self.enhancer.ai is None and not self.enhancer.ffmpeg:
+        upscale = f >= UPSCALE_FROM  # else only sharpened and denoised, at its own size
+        if not self.enhancer.ffmpeg and (not upscale or self.enhancer.ai is None):
             self._picture_changed(f"{what}: {w}×{h} px, shown as it comes until the enhancing tools "
                                   "are downloaded", kind)
             return
@@ -1997,7 +2012,8 @@ class App(Adw.Application):
                 self.logo_tex = t
             self.update()
 
-        self.enhancer.request(kind, src[0], src[1], (w, h), (round(w * f), round(h * f)), done)
+        target = (round(w * f), round(h * f)) if upscale else (w, h)
+        self.enhancer.request(kind, src[0], src[1], (w, h), target, done, screen=size)
 
 
 if __name__ == "__main__":
