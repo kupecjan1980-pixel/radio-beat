@@ -713,6 +713,7 @@ class Tray:
 
 CSS = b"""
 .cover-bg { background: #111; }
+.backdrop { filter: blur(36px) brightness(0.55); transform: scale(1.15); }
 .scrim { background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.75) 55%, rgba(0,0,0,0) 100%); }
 .scrim label { color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
 .song { font-weight: 800; }
@@ -754,11 +755,16 @@ class Window(Adw.ApplicationWindow):
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.scale_css,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
 
-        # The cover fills the window; everything else lies on top of it.
-        self.cover = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True)
-        bg = Gtk.Box(hexpand=True, vexpand=True)
+        # The cover, whole and as big as it fits (at the top in a tall window,
+        # centred in a wide one), over a blurred copy of itself that fills the
+        # rest of the window, whatever its shape; everything else lies on top.
+        self.backdrop = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True)
+        self.backdrop.add_css_class("backdrop")
+        self.cover = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, hexpand=True,
+                                 valign=Gtk.Align.START)
+        bg = Gtk.Overlay(child=self.backdrop, hexpand=True, vexpand=True, overflow=Gtk.Overflow.HIDDEN)
         bg.add_css_class("cover-bg")
-        bg.append(self.cover)
+        bg.add_overlay(self.cover)
         overlay = Gtk.Overlay(child=bg)
 
         header = Adw.HeaderBar(show_title=False, valign=Gtk.Align.START)
@@ -987,7 +993,10 @@ class Window(Adw.ApplicationWindow):
         self.artist.set_text(artist)
         self.album.set_text(info.get("album") or "")
         self.album.set_visible(bool(info.get("album")))
-        self.cover.set_paintable(a.cover_tex or a.logo_tex)
+        pic = a.cover_tex or a.logo_tex
+        if pic is not self.cover.get_paintable():
+            self.cover.set_paintable(pic)
+            self.backdrop.set_paintable(pic)
         cur, nxt = on_air(a.schedule, time.localtime())
         self.show_card.set_visible(cur is not None)
         if cur:
