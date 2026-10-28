@@ -1092,7 +1092,7 @@ class Enhancer:
 
     def _cache_path(self, key: str, size: tuple[int, int]) -> str:
         import hashlib
-        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}|{'ai' if self.ai else 'plain'}|v4".encode()).hexdigest()
+        h = hashlib.sha1(f"{key}|{size[0]}x{size[1]}|{'ai' if self.ai else 'plain'}|v5".encode()).hexdigest()
         return os.path.join(UPSCALED_DIR, f"{h}.jpg")
 
     def _worker(self) -> None:
@@ -1343,12 +1343,21 @@ class Enhancer:
 
     @staticmethod
     def _not_black(path: str) -> bool:
+        """Any colour in it (the GPU timing out gives an all-black picture). Colour
+        bytes only: an alpha channel's 255s made a black picture pass before."""
         from gi.repository import GdkPixbuf
         try:
-            px = GdkPixbuf.Pixbuf.new_from_file(path).get_pixels()
+            pb = GdkPixbuf.Pixbuf.new_from_file(path)
         except GLib.Error:
             return False
-        return any(px[i] for i in range(0, len(px), 4099))
+        px, n, stride = pb.get_pixels(), pb.get_n_channels(), pb.get_rowstride()
+        for y in range(0, pb.get_height(), max(1, pb.get_height() // 64)):
+            row = y * stride
+            for x in range(0, pb.get_width(), max(1, pb.get_width() // 64)):
+                i = row + x * n
+                if px[i] > 8 or px[i + 1] > 8 or px[i + 2] > 8:
+                    return True
+        return False
 
     def _trim(self) -> None:
         try:
@@ -1478,15 +1487,15 @@ class CoverView(Gtk.Widget):
 
 class GlassCard(Gtk.Box):
     """A liquid-glass panel: what's behind it (the backdrop and the cover) is
-    not blurred but refracted, like through a lens: true in the middle, bent
-    more and more towards the rim (it shows what lies further out, squeezed
+    not blurred but refracted, like through a lens: sharp and true in the
+    middle, bent hard in a narrow band at the rim (it shows what lies further out, squeezed
     in). Drawn as layers, each from a little further in and a little more
     bent, blended through soft masks so there are no steps; then a dark tint
     (Background shade), a soft top highlight and a thin bright edge. GTK has
     no displacement filter or backdrop-filter, so it's drawn here."""
 
-    LAYERS = 8
-    BEND = 0.9  # how far the rim reaches out, in rim widths
+    LAYERS = 16
+    BEND = 1.8  # how far the rim reaches out, in rim widths: a strong, sharp lens edge
 
     def __init__(self, behind: list, **kw):
         super().__init__(**kw)
@@ -1527,18 +1536,18 @@ class GlassCard(Gtk.Box):
             return
         box = Graphene.Rect().init(0, 0, w, h)
         rr = self._rounded(0, 0, w, h, self.radius)
-        rim = min(self.radius * 1.6, h / 2, w / 2)
+        rim = min(self.radius * 1.1, h / 2, w / 2)
         snap.push_rounded_clip(rr)
         n = self.LAYERS
         self._behind(snap, w, h, rim * self.BEND)  # the rim, bent the most
         masks = hasattr(snap, "push_mask")
         for i in range(1, n + 1):
             d = rim * i / n  # this layer from d px in, bent less
-            reach = rim * self.BEND * (1 - i / n) ** 2
+            reach = rim * self.BEND * (1 - i / n) ** 3  # steep: the bend stays at the very edge
             inner = self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d)
             if masks:
                 snap.push_mask(Gsk.MaskMode.ALPHA)
-                snap.push_blur(rim / n)  # a soft edge: the layers melt into each other
+                snap.push_blur(rim / n * 0.7)  # just enough to melt the layers, edges stay crisp
                 snap.push_rounded_clip(inner)
                 snap.append_color(_rgba(0, 0, 0, 1.0), box)
                 snap.pop()
@@ -1679,19 +1688,29 @@ class Window(Adw.ApplicationWindow):
         top = Gtk.Box(spacing=8)
         badge = Gtk.Label(label="ON AIR", valign=Gtk.Align.CENTER)
         badge.add_css_class("on-air")
-        self.show_title = Gtk.Label(xalign=0, ellipsize=3)  # 3 = Pango.EllipsizeMode.END
+        # Text widths capped (in characters, so they grow with the text in full
+        # screen): a wrapping label would otherwise ask for its whole text's width.
+        self.show_title = Gtk.Label(xalign=0, ellipsize=3, max_width_chars=26)  # 3 = Pango.EllipsizeMode.END
         self.show_title.add_css_class("show-title")
         top.append(badge)
         top.append(self.show_title)
-        self.show_sub = Gtk.Label(xalign=0, wrap=True, lines=2, ellipsize=3)
+        self.show_sub = Gtk.Label(xalign=0, wrap=True, lines=2, ellipsize=3, max_width_chars=34)
         self.show_sub.add_css_class("show-sub")
-        self.show_next = Gtk.Label(xalign=0, ellipsize=3)
+        self.show_next = Gtk.Label(xalign=0, ellipsize=3, max_width_chars=34)
         self.show_next.add_css_class("show-next")
         for w in (top, self.show_sub, self.show_next):
             text.append(w)
         self.show_card.append(text)
         self.show_card.set_visible(False)
-        inner.append(self.show_card)
+        # The song and the show: side by side in a wide window (the show at the
+        # right, level with the song), the show above the song in a narrow one.
+        self.info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, hexpand=True,
+                            valign=Gtk.Align.START)
+        self.info_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.info_row.append(self.show_card)
+        self.info_row.append(self.info)
+        self._wide = False
+        inner.append(self.info_row)
 
         self.song = Gtk.Label(wrap=True, xalign=0)
         self.song.add_css_class("song")
@@ -1700,7 +1719,7 @@ class Window(Adw.ApplicationWindow):
         self.album = Gtk.Label(wrap=True, xalign=0)
         self.album.add_css_class("album")
         for w in (self.song, self.artist, self.album):
-            inner.append(w)
+            self.info.append(w)
 
         controls = Gtk.Box(spacing=12, margin_top=12)
         self.play_btn = Gtk.Button(icon_name="media-playback-pause-symbolic", valign=Gtk.Align.CENTER)
@@ -1878,6 +1897,26 @@ class Window(Adw.ApplicationWindow):
         if f != self._scale:
             self._scale = f
             GLib.idle_add(self._apply_scale)  # not while laying out
+        wide = width >= 1.3 * height
+        if wide != self._wide:
+            self._wide = wide
+            GLib.idle_add(self._arrange)
+
+    def _arrange(self) -> bool:
+        """Show card beside the song (wide window) or above it (narrow)."""
+        if self._wide:
+            self.info_row.set_orientation(Gtk.Orientation.HORIZONTAL)
+            self.info_row.set_spacing(int(24 * self._scale))
+            self.info_row.reorder_child_after(self.show_card, self.info)
+            self.show_card.set_valign(Gtk.Align.START)
+            self.show_card.set_margin_bottom(0)
+        else:
+            self.info_row.set_orientation(Gtk.Orientation.VERTICAL)
+            self.info_row.set_spacing(6)
+            self.info_row.reorder_child_after(self.show_card, None)
+            self.show_card.set_valign(Gtk.Align.FILL)
+            self.show_card.set_margin_bottom(10)
+        return False
 
     def _apply_scale(self) -> bool:
         """Text and the show picture grow with the window: in full screen
