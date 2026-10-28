@@ -1624,6 +1624,7 @@ class GlassCard(Gtk.Box):
 
     BEND = 1.8  # how far the rim reaches out, in rim widths: a strong, sharp lens edge
     RIM = 0.63  # the bent band's width, in corner radii
+    MAG = 1.07  # the middle, magnified like through a magnifying glass
 
     def __init__(self, behind: list, **kw):
         super().__init__(**kw)
@@ -1643,13 +1644,13 @@ class GlassCard(Gtk.Box):
         self.flash_anim.set_easing(Adw.Easing.EASE_OUT_CUBIC)
         self.flash_anim.play()
 
-    def _behind(self, snap, w: float, h: float, reach: float) -> None:
-        """What's behind the card, squeezed so its edge shows `reach` px beyond it."""
+    def _behind(self, snap, w: float, h: float, sx: float, sy: float) -> None:
+        """What's behind the card, zoomed around its middle: > 1 magnified, < 1 squeezed (shows what's beyond)."""
         cx, cy = w / 2, h / 2
         snap.save()
-        if reach > 0.05:
+        if abs(sx - 1) > 1e-4 or abs(sy - 1) > 1e-4:
             snap.translate(Graphene.Point().init(cx, cy))
-            snap.scale(1 / (1 + 2 * reach / w), 1 / (1 + 2 * reach / h))
+            snap.scale(sx, sy)
             snap.translate(Graphene.Point().init(-cx, -cy))
         for view, darken in self.behind:
             pic = view.pic
@@ -1658,19 +1659,13 @@ class GlassCard(Gtk.Box):
                 continue
             vw, vh = view.get_width(), view.get_height()
             if view.has_css_class("backdrop"):
-                # The blurred bars beside the cover: blurred here too, like around the card, and not bent
-                # (squeezing undone: they stay where they are).
+                # The blurred bars beside the cover: blurred here too, like around the card, and bent like
+                # the cover (thick glass all over, just blurry there).
                 tex = self._backdrop(view, pic, vw, vh, darken)
                 # Where it sits before its CSS zoom (the parent's origin): the texture has the zoom in it.
                 ok, p = view.get_parent().compute_point(self, Graphene.Point().init(0, 0))
                 if tex and ok:
-                    snap.save()
-                    if reach > 0.05:
-                        snap.translate(Graphene.Point().init(cx, cy))
-                        snap.scale(1 + 2 * reach / w, 1 + 2 * reach / h)
-                        snap.translate(Graphene.Point().init(-cx, -cy))
                     snap.append_texture(tex, Graphene.Rect().init(p.x, p.y, vw, vh))
-                    snap.restore()
                 continue
             snap.save()
             snap.translate(p)
@@ -1719,18 +1714,21 @@ class GlassCard(Gtk.Box):
         rr = self._rounded(0, 0, w, h, self.radius)
         rim = min(self.radius * self.RIM, h / 2, w / 2)
         snap.push_rounded_clip(rr)
-        # Sharp, like a lens: no blending (that ghosts and looks blurred). Hard-
-        # edged layers from the rim in, each bent 1 px less than the one outside
-        # it, so the steps are too small to see.
+        # A magnifying glass, sharp: the middle magnified (MAG), the rim bent hard the other way (it shows what
+        # lies beyond the edge, squeezed in), a cubic curve between. No blending (that ghosts and looks
+        # blurred): hard-edged layers from the rim in, each shifted under 1 px from the one outside it.
         most = rim * self.BEND
-        steps = max(1, math.ceil(most))
-        self._behind(snap, w, h, most)  # the rim, bent the most
-        for k in range(1, steps + 1):
-            reach = most * (1 - k / steps)
-            d = rim * (1 - (reach / most) ** (1 / 3))  # where the cubic bend falls to `reach`
-            snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d))
-            self._behind(snap, w, h, reach)
-            snap.pop()
+        rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the rim's zoom
+        steps = max(1, math.ceil(most + (self.MAG - 1) * max(w, h) / 2))
+        for k in range(0, steps + 1):
+            bend = 1 - k / steps  # 1 at the rim, 0 in the middle
+            d = rim * (1 - bend ** (1 / 3))  # where the cubic bend falls to `bend`
+            sx, sy = self.MAG + (rx - self.MAG) * bend, self.MAG + (ry - self.MAG) * bend
+            if k:
+                snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d))
+            self._behind(snap, w, h, sx, sy)
+            if k:
+                snap.pop()
         if self.flash > 0:
             snap.append_color(_rgba(255, 255, 255, 0.28 * self.flash), box)
         snap.append_color(_rgba(18, 18, 22, 0.34 * self.shade), box)
