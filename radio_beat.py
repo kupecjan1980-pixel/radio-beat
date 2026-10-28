@@ -3257,7 +3257,7 @@ class App(Adw.Application):
         threading.Thread(target=self._probe_flac, daemon=True).start()
         if is_kde():
             threading.Thread(target=self._kde_place, args=(self.settings.get("tray_popup", True),), daemon=True).start()
-        GLib.timeout_add_seconds(20, lambda: (self.check_update(), False)[1])  # first, after it settled
+        GLib.timeout_add_seconds(2, lambda: (self.check_update(), False)[1])  # at start (installed and restarted if new)
         GLib.timeout_add_seconds(AUTO_UPDATE_S, lambda: (self.check_update(), True)[1])  # then every 5 minutes
 
     def do_command_line(self, cmdline):
