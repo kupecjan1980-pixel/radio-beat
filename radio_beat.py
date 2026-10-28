@@ -1532,10 +1532,14 @@ class Enhancer:
         Returns what it did ("upscaled" / "redrawn"), "killed", or None when it
         failed even with the smallest tiles."""
         w0, h0 = src_size
-        feed, how = src, "upscaled"
+        # Real-ESRGAN reads plain 8-bit RGB only (a CMYK JPEG or a 16-bit PNG cover: "decode image failed"):
+        # every picture goes in as one.
+        feed, how = os.path.join(work, "feed.png"), "upscaled"
+        if not self._ff(["-i", src], "format=rgb24", feed):
+            feed = src
         if min(w0, h0) >= REDRAW_FROM:
             half = os.path.join(work, "half.png")
-            if self._ff(["-i", src], f"scale={w0 // 2}:{h0 // 2}:flags=lanczos", half):
+            if self._ff(["-i", src], f"scale={w0 // 2}:{h0 // 2}:flags=lanczos,format=rgb24", half):
                 feed, how = half, "redrawn" if size == src_size else "redrawn and upscaled"
         big = os.path.join(work, "x4.png")
         res, err = self._esr(feed, big, model)
@@ -2099,11 +2103,14 @@ class GlassCard(Gtk.Box):
         Gtk.Box.do_snapshot(self, snap)
 
     def draw_plain(self, snap) -> None:
-        """What lies under the card, as if it weren't there (the cover, the bars, the panel's shading)."""
+        """What lies under the card, as if it weren't there (the cover, the bars, the panel's shading), out to
+        where its shadow reaches: no sharp edge or shadow of it left."""
         w, h = self.get_width(), self.get_height()
         if w <= 0 or h <= 0:
             return
-        snap.push_rounded_clip(self._rounded(0, 0, w, h, self.radius))
+        rim = min(self.radius * self.RIM, h / 2, w / 2)
+        m = rim * 1.3 + 4 if self.depth else 3  # the shadow's reach (and the edge's antialiasing)
+        snap.push_rounded_clip(self._rounded(-m, -m, w + 2 * m, h + 2 * m, self.radius + m))
         self._behind(snap, w, h, 1.0, 1.0)
         ok, sb = self.scrim.compute_bounds(self) if self.scrim else (False, None)
         if ok:
@@ -2291,7 +2298,7 @@ class MenuGlass(GlassCard):
         s.translate(cp)
         card.draw_plain(s)
         s.push_blur(5.0)
-        card.draw_glass(s, shadow=False)
+        card.draw_glass(s)
         for child in (self.win.show_pic, self.win.show_card_text):
             ok, p = child.compute_point(card, Graphene.Point().init(0, 0))
             if ok:
