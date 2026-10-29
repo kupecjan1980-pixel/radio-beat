@@ -3239,6 +3239,18 @@ class Water:
             self.body.set_margin_start(0)
             self.body.set_size_request(width, height)
         self.body.radius = 28 * max(1.0, win._scale)  # the card's corners
+        # what's inside stays within the rectangle joining the corners' circle centers: the radius on every side
+        r = int(self.body.radius)
+        kids = []
+        c = self.body.get_first_child()
+        while c:
+            kids.append(c)
+            c = c.get_next_sibling()
+        for i, c in enumerate(kids):
+            c.set_margin_start(r)
+            c.set_margin_end(r)
+            c.set_margin_top(r if i == 0 else 0)
+            c.set_margin_bottom(r if i == len(kids) - 1 else 0)
 
     def show(self) -> None:
         self.open = True
@@ -3565,8 +3577,7 @@ class Window(Adw.ApplicationWindow):
         self.refresh()
 
     def _settings_button(self) -> Gtk.Button:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=26, margin_bottom=26,
-                      margin_start=28, margin_end=28)  # well inside the glass's rounded edge
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)  # its room: Water.place
         group = Adw.PreferencesGroup()
         # Quality: the stream now and a bobbing arrow; its list opens from the menu's left edge, glass like
         # the menu, best sound first.
@@ -3895,8 +3906,7 @@ class Window(Adw.ApplicationWindow):
                              valign=Gtk.Align.START)
         # The views as tabs (a click), and the wheel's button goes to the next one.
         self.puddle_head = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6, row_spacing=6,
-                                       min_children_per_line=1, max_children_per_line=5, margin_start=28,
-                                       margin_top=26, margin_end=28)  # they wrap when it's narrow
+                                       min_children_per_line=1, max_children_per_line=5)  # they wrap when narrow
         self.puddle_tabs = []
         for i in range(len(self.PUDDLE_MODES)):
             tab = Gtk.Button(label="", has_frame=False)
@@ -3904,8 +3914,7 @@ class Window(Adw.ApplicationWindow):
             tab.connect("clicked", lambda _b, i=i: self._puddle_go(i))
             self.puddle_tabs.append(tab)
             self.puddle_head.append(tab)
-        self.puddle_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_start=30, margin_end=30,
-                                   margin_bottom=30)
+        self.puddle_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         self.puddle_scroll = Gtk.ScrolledWindow(child=self.puddle_list, vexpand=True,
                                                 hscrollbar_policy=Gtk.PolicyType.NEVER,
                                                 vscrollbar_policy=Gtk.PolicyType.EXTERNAL)
