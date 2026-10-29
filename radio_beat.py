@@ -4211,7 +4211,7 @@ class App(Adw.Application):
              "hosts": ("Z našich moderátorů: {n}. ", "Na Beatu uslyšíte i {n}. ", "Znáte naše hlasy? {n}. ",
                        "Moderátor{a} Beatu {n}: "),
              "station": ("Něco o nás: ", "Rádio Beat: ", "Víte, kdo vám hraje? ", "Z historie Beatu: ")}
-    BADGE = {"artist": "ZAJÍMAVOST", "host": "U MIKROFONU", "hosts": "NAŠE HLASY", "station": "RÁDIO BEAT"}
+    BADGE = {"artist": "ZAJÍMAVOST", "host": "U MIKROFONU", "hosts": "NAŠE HLASY", "station": "ON AIR"}
     READY = 4  # items made ahead
 
     def _set_history(self, past: list[str]) -> bool:
