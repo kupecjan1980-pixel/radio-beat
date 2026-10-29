@@ -2755,18 +2755,10 @@ class GlassCard(Gtk.Box):
                             snap.restore()
                 continue
             snap.save()
-            if view.fit == "contain":
-                # The cover's own edges stay where they are, straight: the lens bends what's inside them, not
-                # the outline (bent, the cover's side looked like a round end of the card).
-                x, y, dw, dh = view.rect(pic, vw, vh)
-                X, Y = p.x + x, p.y + y
-                snap.push_clip(Graphene.Rect().init(cx + (X - cx) / sx, cy + (Y - cy) / sy, dw / sx, dh / sy))
             snap.translate(p)
             view.draw(snap, pic, vw, vh)
             if darken:
                 snap.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(0, 0, vw, vh))
-            if view.fit == "contain":
-                snap.pop()
             snap.restore()
         snap.restore()
 
@@ -3122,7 +3114,7 @@ class Water:
         for g in (self.neck, body):
             # exactly the show card's glass (as HHC's buttons have it): only its size differs; its curved edge
             # as deep as the card's (spread over a big panel it would look thin)
-            g.scrim = win.scrim
+            g.scrim, g.sharp_bars = win.scrim, True  # what's under it sharp, the bars beside the cover too
             g.add_css_class("puddle")
             g.set_visible(False)
             win.backdrop.watchers.append(g)
