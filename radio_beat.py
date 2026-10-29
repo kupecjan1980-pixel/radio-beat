@@ -2204,9 +2204,11 @@ class Enhancer:
         src, fast, final = (self.sizes.get(kind) or [None, None, None])[:3]
         if not src:
             return ""
-        done = final is not None
-        return (f"Size: source {_size(src)} / fast enhanced {_size(fast) if fast else ('—' if done else '…')} / "
-                f"final enhanced {_size(final) if done else '…'}")
+        parts = [f"source {_size(src)}"]
+        if fast:  # no first pass (from the cache, or a picture big enough already): left out
+            parts.append(f"fast enhanced {_size(fast)}")
+        parts.append(f"final enhanced {_size(final) if final is not None else '…'}")
+        return "Size: " + " / ".join(parts)
 
     def cache_text(self) -> str:
         if self.cache_used < 0:
