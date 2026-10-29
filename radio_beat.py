@@ -1461,6 +1461,7 @@ class Enhancer:
         self.held = False
         self.held_at = 0.0
         self.cache_used = self.cache_allowed = -1  # bytes (counted at start, then kept up to date)
+        self.sizes: dict[str, list] = {}  # kind -> [original bytes, enhanced bytes or None while working]
         threading.Thread(target=self._trim, daemon=True).start()
         # NPU (testing, off unless switched on): AMD XDNA through ONNX Runtime's Vitis AI provider.
         self.npu_wanted = False
@@ -1853,6 +1854,7 @@ class Enhancer:
             self._used(hit)
             with open(hit, "rb") as f:
                 pic = f.read()
+            self.sizes[kind] = [len(data), len(pic)]
             done(pic)
             try:
                 with open(hit[:-4] + ".txt") as f:
@@ -1909,6 +1911,7 @@ class Enhancer:
         self.model = ESR_MODEL_ART if kind in ("logo", "icon") else ESR_MODEL
         same = size == (w0, h0)  # big enough already: no upscaling
         orig = f"original {_size(len(data))}"
+        self.sizes[kind] = [len(data), None]
         if same:
             scr = f"the {screen[0]}×{screen[1]} px screen" if screen else "the screen"
             head = f"{what}: {w0}×{h0} px ({orig}), no upscaling needed (big enough for {scr})"
@@ -1922,6 +1925,7 @@ class Enhancer:
                 self._used(cached)
                 with open(cached, "rb") as f:
                     pic = f.read()
+                self.sizes[kind] = [len(data), len(pic)]
                 emit(pic, True)
                 try:
                     with open(cached[:-4] + ".txt") as f:
@@ -2082,6 +2086,8 @@ class Enhancer:
         with open(final, "rb") as f:
             pic = f.read()
         steps.append(f"enhanced {_size(len(pic))}")
+        if self.running:
+            self.sizes[self.running[0]] = [self.sizes.get(self.running[0], [0])[0], len(pic)]
         emit(pic, True)
         show("" if cached else " (not cached: tried again next time)")
         if not cached:
@@ -2187,6 +2193,12 @@ class Enhancer:
             os.replace(self.USES + ".tmp", self.USES)
         except OSError:
             pass
+
+    def size_text(self, kind: str) -> str:
+        o, e = self.sizes.get(kind, (None, None))
+        if not o:
+            return ""
+        return f"Size: original {_size(o)} / enhanced {_size(e) if e else '…'}"
 
     def cache_text(self) -> str:
         if self.cache_used < 0:
@@ -3202,6 +3214,8 @@ class Window(Adw.ApplicationWindow):
         self.card_row.set_active(self.app.card_on())
         self.card_row.connect("notify::active", lambda r, _: self.app.set_card_volume(r.get_active()))
         group.add(self.card_row)
+        self.picture_row = Adw.ActionRow(title="Picture now", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
+        group.add(self.picture_row)
         if is_kde():
             near = Adw.SwitchRow(title="Open in the corner", subtitle="Bottom right, on the taskbar by the clock (also after full screen)")
             near.set_active(self.app.settings.get("tray_popup", True))
@@ -3212,9 +3226,6 @@ class Window(Adw.ApplicationWindow):
         self.enhance_row.set_active(self.app.settings.get("enhance", True))
         self.enhance_row.connect("notify::active", lambda r, _: self.app.set_enhance(r.get_active()))
         group.add(self.enhance_row)
-        self.picture_row = Adw.ActionRow(title="Picture now", subtitle=f"{self.app.picture_text}\n"
-                                         f"{self.app.enhancer.cache_text()}", subtitle_lines=0)
-        group.add(self.picture_row)
         self.recognise_row = Adw.SwitchRow(title="Recognise songs (testing)", subtitle_lines=0)
         self.recognise_row.set_active(self.app.settings.get("recognise", False))
         self.recognise_row.connect("notify::active", lambda r, _: self.app.set_recognise(r.get_active()))
@@ -4583,8 +4594,14 @@ class App(Adw.Application):
         if kind in ("show", "icon") or (kind == "logo" and self.orig_tex.get("cover")):
             return  # the cover is what's shown
         self.picture_text = text
+        self.picture_kind = kind
         if self.win:
-            self.win.picture_row.set_subtitle(f"{text}\n{self.enhancer.cache_text()}")
+            self.win.picture_row.set_subtitle(self.picture_subtitle())
+
+    def picture_subtitle(self) -> str:
+        """Picture now: what was done, the sizes (original / enhanced), the cache."""
+        size = self.enhancer.size_text(getattr(self, "picture_kind", "cover"))
+        return "\n".join(x for x in (self.picture_text, size, self.enhancer.cache_text()) if x)
 
     def set_npu(self, on: bool) -> None:
         """AI upscaling on the NPU first (testing): checks what's there, says so in the menu."""
