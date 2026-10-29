@@ -2291,14 +2291,19 @@ CSS = b"""
 .show-sub { opacity: 0.8; }
 .show-next { opacity: 0.7; }
 .overlay-header button { background: rgba(0,0,0,0.45); color: white; }
-.overlay-header .glass-disc > button, .overlay-header .glass-head > menubutton > button { background: none; box-shadow: none; }
-.overlay-header .glass-disc > button:hover, .overlay-header .glass-head > menubutton > button:hover { background: rgba(255,255,255,0.10); }
+.overlay-header .glass-disc > button, .overlay-header .glass-head > button { background: none; box-shadow: none; }
+.overlay-header .glass-disc > button:hover, .overlay-header .glass-head > button:hover { background: rgba(255,255,255,0.10); }
 .overlay-header .top-logo { border-radius: 8px; margin-left: 4px; }
 .overlay-header button.close-button { color: white; }
 .overlay-header button.info-button { color: white; font-weight: 900; font-size: 1.25em; font-family: serif;
                                      padding: 0; }
 .puddle label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
 .puddle .puddle-now label { font-weight: 700; }
+.puddle .boxed-list, .puddle .boxed-list > row { background: rgba(255,255,255,0.04); }
+.puddle button.puddle-tab { padding: 2px 10px; min-height: 0; border-radius: 999px; color: white;
+                            background: rgba(255,255,255,0.10); font-weight: 700; }
+.puddle button.puddle-tab:hover { background: rgba(255,255,255,0.22); }
+.puddle button.puddle-tab.on-air { background: #E3051A; }
 .puddle .puddle-now { background: rgba(227,5,26,0.25); border-radius: 10px; padding: 6px; }
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
 popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
@@ -2318,7 +2323,7 @@ scale.vol-slider:hover slider { animation: pump 1s ease-in-out infinite; }
 /* The quality list's arrow bobs up and down (never turns). */
 @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(4px); } }
 row:hover .bob-arrow { animation: bob 900ms ease-in-out infinite; }
-.overlay-header menubutton > button:hover image { animation: tick 500ms steps(12) infinite; }  /* its own icon only, not the menu's */
+.overlay-header button.gear-button:hover image { animation: tick 500ms steps(12) infinite; }  /* its own icon only, not the menu's */
 """
 
 
@@ -2347,9 +2352,28 @@ class CoverView(Gtk.Widget):
     picture (the next enhancing step) is redrawn slowly instead, no blur: the
     new detail grows in over the old picture."""
 
-    MORPH_MS = 1400  # a new picture: the old one peels off
-    PEEL_COLS = 8  # pieces across
-    PEEL_TILE = 0.45  # of the whole time each piece takes
+    MORPH_MS = 1600  # a new picture: the old one erodes away
+    ERODE_COLS = 22  # pieces across
+    ERODE_FALL = 0.4  # of the whole time a piece takes to fall out of sight
+
+    def _pieces(self, w: float, h: float) -> list:
+        """This change's pieces: (x, y, width, height, when it comes loose, spin, sideways drift)."""
+        if self._erode_key == (id(self.old), id(self.pic), round(w), round(h)):
+            return self._erode
+        cols = self.ERODE_COLS
+        rows = max(6, round(cols * h / max(w, 1)))
+        pw, ph = w / cols, h / rows
+        seeds = [(random.random() * w, random.random() * h) for _ in range(4)]
+        far = math.hypot(w, h)
+        out = []
+        for j in range(rows):
+            for i in range(cols):
+                cx, cy = (i + 0.5) * pw, (j + 0.5) * ph
+                d = min(math.hypot(cx - sx, cy - sy) for sx, sy in seeds) / far
+                start = min(1 - self.ERODE_FALL, d * 1.1 * (1 - self.ERODE_FALL) + random.uniform(0, 0.12))
+                out.append((i * pw, j * ph, pw, ph, start, random.uniform(-160, 160), random.uniform(-0.6, 0.6)))
+        self._erode_key, self._erode = (id(self.old), id(self.pic), round(w), round(h)), out
+        return out
     MORPH_BLUR = 22.0
     REDRAW_MS = 2600
 
@@ -2363,6 +2387,7 @@ class CoverView(Gtk.Widget):
         self.anim = None
         self.watchers: list = []  # redrawn along (the glass card behind which this shows)
         self._holding = False  # the enhancing waits while this morphs
+        self._erode_key, self._erode = None, []
 
     def set_paintable(self, pic, redraw: bool = False) -> None:
         if pic is self.pic:
@@ -2421,36 +2446,28 @@ class CoverView(Gtk.Widget):
         self.draw(snap, self.pic, w, h)
         if self.old is None or self.t >= 1.0:
             return
-        # The old picture peels off like a skin, piece by piece: tiles from the top-left corner on, each
-        # curling back in 3D and fading as it lifts, the new picture beneath.
-        cols = self.PEEL_COLS
-        rows = max(3, round(cols * h / max(w, 1)))
-        tw, th = w / cols, h / rows
-        span = cols + rows - 2 or 1
-        axis = Graphene.Vec3().init(1, -1, 0)
-        for j in range(rows):
-            for i in range(cols):
-                start = (i + j) / span * (1 - self.PEEL_TILE)
-                p = min(1.0, max(0.0, (self.t - start) / self.PEEL_TILE))
-                if p >= 1.0:
-                    continue
-                e = p * p  # slow to lift, then away
-                x, y = i * tw, j * th
-                snap.save()
-                snap.translate(Graphene.Point().init(x + tw / 2, y + th / 2 - e * th * 0.3))
-                if e > 0:
-                    snap.perspective(max(w, h) * 1.2)
-                    snap.rotate_3d(e * 110, axis)
-                snap.translate(Graphene.Point().init(-tw / 2, -th / 2))
-                snap.push_opacity(1 - e * 0.7)
-                snap.push_clip(Graphene.Rect().init(0, 0, tw + 0.5, th + 0.5))
-                snap.translate(Graphene.Point().init(-x, -y))
-                self.draw(snap, self.old, w, h)
-                if e > 0:  # the underside darker as it turns
-                    snap.append_color(_rgba(0, 0, 0, 0.35 * e), Graphene.Rect().init(x, y, tw + 0.5, th + 0.5))
-                snap.pop()
-                snap.pop()
-                snap.restore()
+        # The old picture erodes like old plaster off a wall: small pieces come loose (spreading from a few
+        # spots), fall down off the screen tumbling, and behind them is the new one.
+        pieces = self._pieces(w, h)
+        for (x, y, pw, ph, start, spin, drift) in pieces:
+            p = (self.t - start) / self.ERODE_FALL
+            if p >= 1.0:
+                continue
+            snap.save()
+            if p > 0:
+                fall = p * p * (h * 1.3 + ph)  # gravity: slow off, then fast, out of sight
+                snap.translate(Graphene.Point().init(x + pw / 2 + drift * p * pw, y + ph / 2 + fall))
+                snap.rotate(spin * p)
+                snap.translate(Graphene.Point().init(-pw / 2, -ph / 2))
+            else:
+                snap.translate(Graphene.Point().init(x, y))
+            snap.push_clip(Graphene.Rect().init(0, 0, pw + 0.6, ph + 0.6))
+            snap.translate(Graphene.Point().init(-x, -y))
+            self.draw(snap, self.old, w, h)
+            if p > 0:  # its broken edge in shade as it goes
+                snap.append_color(_rgba(0, 0, 0, 0.25 * min(1.0, p * 3)), Graphene.Rect().init(x, y, pw + 0.6, ph + 0.6))
+            snap.pop()
+            snap.restore()
 
 
 BACKDROP_BLUR, BACKDROP_SCALE = 36.0, 1.15  # the .backdrop CSS above
@@ -2557,6 +2574,7 @@ class GlassCard(Gtk.Box):
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
         self.tint = 0.34  # the dark tint over the glass (times shade)
         self.mag = self.MAG  # < 1: a concave lens (things look smaller)
+        self.frame = True  # its lit edges and border (not for the puddle's neck)
         self.cache_lens = True  # the lens drawn from a texture while nothing behind it changes
         self.pulse_tick = None  # the mouse on it: the magnification breathes, like a magnifier moved up and down
         self.lift = 0.0  # the card drawn this much bigger meanwhile (it pumps, outline and all)
@@ -2826,6 +2844,9 @@ class GlassCard(Gtk.Box):
         # Thick glass, rounded on every side: its curved side wall darker all round, light catching the top edge
         # (a bright line, a softer glow under it), light coming out through the bottom edge (a fainter line),
         # the bottom-right of the wall in shade.
+        if not self.frame:
+            snap.pop()
+            return
         if self.concave:
             # A dish: the top inside edge in shade, light gathering along the bottom, a bright lip all round.
             snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.5), 0, rim * 0.18, 0, rim * 0.35)
@@ -2948,12 +2969,37 @@ class Puddle(GlassCard):
         super().__init__(behind, **kw)
         self.neck = neck
         self.reveal = 0.0
+        self.frame = not neck  # the neck is water between the two: no edge of its own
+        self.color = (110, 170, 255, 0.06)  # a touch of water's blue
+
+    def _neck_path(self, w: float, h: float):
+        """As wide as the button at the top, drawn in at the waist, spreading out into the body below:
+        water squeezing from one into the other."""
+        f = w * 0.18  # the button's width = w - 2 f
+        waist = w * 0.22
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(f, 0)
+        pb.line_to(w - f, 0)
+        pb.cubic_to(w - f, h * 0.35, w / 2 + waist / 2, h * 0.3, w / 2 + waist / 2, h * 0.55)
+        pb.cubic_to(w / 2 + waist / 2, h * 0.85, w, h * 0.8, w, h)
+        pb.line_to(0, h)
+        pb.cubic_to(0, h * 0.8, w / 2 - waist / 2, h * 0.85, w / 2 - waist / 2, h * 0.55)
+        pb.cubic_to(w / 2 - waist / 2, h * 0.3, f, h * 0.35, f, 0)
+        pb.close()
+        return pb.to_path()
 
     def do_snapshot(self, snap) -> None:
         r = self.reveal
         if r <= 0:
             return
         w, h = self.get_width(), self.get_height()
+        if self.neck:
+            snap.push_clip(Graphene.Rect().init(0, 0, w, max(1.0, h * r)))
+            snap.push_fill(self._neck_path(w, h), Gsk.FillRule.WINDING)
+            GlassCard.do_snapshot(self, snap)
+            snap.pop()
+            snap.pop()
+            return
         vis = max(1.0, h * r)
         bottom = self.radius if r >= 1 else min(w / 2, vis, max(self.radius, (1 - r) * w * 0.6))  # a drop's front
         rr = Gsk.RoundedRect()
@@ -2963,6 +3009,113 @@ class Puddle(GlassCard):
         snap.push_rounded_clip(rr)
         GlassCard.do_snapshot(self, snap)
         snap.pop()
+
+
+class Water:
+    """A glass button's water: a neck from the button, then a tall body with what it holds; it flows down
+    when opened and is drawn back up into the button when closed. Beside the cover when there's room (from
+    its edge to the screen's, down to above the volume slider), else under the button; touching none."""
+
+    def __init__(self, win, tile, body, overlay):
+        self.win, self.tile, self.body = win, tile, body
+        behind = [(win.backdrop, 0.45), (win.cover, 0.0)]
+        self.neck = Puddle(behind, neck=True, halign=Gtk.Align.START, valign=Gtk.Align.START)
+        for g in (self.neck, body):
+            # even glass all over (not the text panel's shading, darker at the bottom)
+            g.scrim, g.mag, g.depth, g.tint = None, 1.12, False, 0.22
+            g.add_css_class("puddle")
+            g.set_visible(False)
+            win.backdrop.watchers.append(g)
+            win.cover.watchers.append(g)
+        # its own scrolling stays its own: not the window's volume
+        block = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        block.connect("scroll", lambda *_: True)
+        body.add_controller(block)
+        overlay.add_overlay(self.neck)
+        overlay.add_overlay(body)
+        self.open = False
+        self.v = 0.0
+        self.anim = None
+
+    def contains(self, w) -> bool:
+        while w is not None:
+            if w in (self.body, self.neck, self.tile):
+                return True
+            w = w.get_parent()
+        return False
+
+    def place(self) -> None:
+        win = self.win
+        ok, b = self.tile.compute_bounds(win)
+        if not ok:
+            return
+        W, H = win.get_width(), win.get_height()
+        gap = 10
+        bottom = b.get_y() + b.get_height()
+        # the neck: from under the button (overlapping it) into the body (overlapping it too)
+        fil = b.get_width() * 0.18 / 0.64  # so its top is the button's width
+        self.neck.set_margin_start(int(b.get_x() - fil))
+        self.neck.set_margin_top(int(bottom - 6))
+        self.neck.set_size_request(int(b.get_width() + 2 * fil), gap + 6 + 12)
+        self.neck.radius = 0  # its shape is its path (no rounded box cutting it)
+        top = bottom + gap
+        width = int(max(300, min(W - 20, W * 0.45)))
+        height = int(max(220, min(H * 0.75, H - top - 20)))
+        cover = win.cover_rect()
+        ok_v, vb = win.vol.compute_bounds(win)
+        beside = bool(cover and W - cover[2] - 2 * gap >= 150)
+        if beside and ok_v and vb.get_y() - gap - top >= 200:
+            height = int(vb.get_y() - gap - top)
+        if ok_v and vb.get_y() > top:  # never down onto the volume slider
+            height = int(min(height, vb.get_y() - gap - top))
+        self.body.set_margin_top(int(top))
+        self.body.set_margin_end(gap)
+        if beside:  # pinned between the cover's edge and the screen's (its own width would be its text's)
+            self.body.set_halign(Gtk.Align.FILL)
+            self.body.set_margin_start(int(cover[2] + gap))
+            self.body.set_size_request(-1, height)
+        else:
+            self.body.set_halign(Gtk.Align.END)
+            self.body.set_margin_start(0)
+            self.body.set_size_request(width, height)
+        self.body.radius = 22 * max(1.0, win._scale)
+
+    def show(self) -> None:
+        self.open = True
+        self.tile.remove_css_class("pumping")
+        self.place()
+        for g in (self.neck, self.body):
+            g.set_visible(True)
+        self._flow(1.0, 750, Adw.Easing.EASE_OUT_BACK)
+
+    def hide(self) -> None:
+        if self.open:
+            self.open = False
+            self._flow(0.0, 420, Adw.Easing.EASE_IN_CUBIC)
+
+    def _flow(self, to: float, ms: int, easing) -> None:
+        """The water flowing down (neck first, then the body) or drawn back up."""
+        if self.anim:
+            self.anim.pause()
+
+        def set_v(v):
+            self.v = v
+            self.neck.reveal = min(1.0, max(0.0, v / 0.25))
+            self.body.reveal = min(1.05, max(0.0, (v - 0.15) / 0.85))
+            self.neck.queue_draw()
+            self.body.queue_draw()
+
+        anim = self.anim = Adw.TimedAnimation.new(self.body, self.v, to, ms, Adw.CallbackAnimationTarget.new(set_v))
+        anim.set_easing(easing)
+        anim_hold(True)
+
+        def done(*_):
+            anim_hold(False)
+            if to == 0.0 and not self.open:
+                for g in (self.neck, self.body):
+                    g.set_visible(False)
+        anim.connect("done", done)
+        anim.play()
 
 
 def _rgba(r: int, g: int, b: int, a: float) -> Gdk.RGBA:
@@ -3072,11 +3225,11 @@ class Window(Adw.ApplicationWindow):
             self.head_glass.append(tile)
             hold_while_hovered(tile)
             if cls == "glass-head":
+                self.gear_tile = tile
                 # The gear pumps while the mouse is on it, not while its menu is open.
-                gear = child.get_first_child() or child
+                gear = child
                 m = Gtk.EventControllerMotion()
-                m.connect("enter", lambda *_, t=tile: self.menu_pop.get_visible() or t.add_css_class("pumping"))
-                self.menu_pop.connect("show", lambda *_, t=tile: t.remove_css_class("pumping"))
+                m.connect("enter", lambda *_, t=tile: self.gear_water.open or t.add_css_class("pumping"))
                 m.connect("leave", lambda *_, t=tile: t.remove_css_class("pumping"))
                 gear.add_controller(m)
             header.pack_end(tile)
@@ -3250,7 +3403,7 @@ class Window(Adw.ApplicationWindow):
         self.connect("notify::is-active", lambda w, _: w.is_active() and setattr(w, "minimised", False))
         self.refresh()
 
-    def _settings_button(self) -> Gtk.MenuButton:
+    def _settings_button(self) -> Gtk.Button:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8, margin_bottom=8,
                       margin_start=8, margin_end=8)
         group = Adw.PreferencesGroup()
@@ -3375,60 +3528,14 @@ class Window(Adw.ApplicationWindow):
         box.append(self.enhance_note)
         # Opens leftwards from the gear (at the right edge), so it stays inside the window.
         # A popup takes its content's full natural width; this caps it near the app's width.
-        # Its height stays within the window (it scrolls): a popup with no room below the gear is closed at once
-        # (the window low on the screen, KDE's corner), and the gear then looks dead.
+        # In the gear's water (Water, made with the puddle): it scrolls when taller.
         fit = Gtk.ScrolledWindow(child=box, hscrollbar_policy=Gtk.PolicyType.NEVER,
-                                 vscrollbar_policy=Gtk.PolicyType.AUTOMATIC, propagate_natural_height=True,
-                                 width_request=320)
-        self.menu_fit = fit
-        # Glass like the show card (the popup's own background taken off).
-        glass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
-        glass.radius = 16.0
-        glass.append(fit)
-        fit.set_hexpand(True)
-        self.backdrop.watchers.append(glass)
-        self.cover.watchers.append(glass)
-        pop = self.menu_pop = Gtk.Popover(child=glass, has_arrow=False)
-        pop.add_css_class("glass-menu")
-        btn = Gtk.MenuButton(icon_name="emblem-system-symbolic", tooltip_text="Settings", popover=pop)
-        pop.connect("show", lambda p: self._place_menu(btn, p))
+                                 vscrollbar_policy=Gtk.PolicyType.AUTOMATIC, vexpand=True)
+        self.menu_content = fit
+        btn = Gtk.Button(icon_name="emblem-system-symbolic", tooltip_text="Settings")
+        btn.add_css_class("gear-button")
+        btn.connect("clicked", lambda *_: self.toggle_water(self.gear_water))
         return btn
-
-    MENU_W = 320 + 2 * 6  # the box above plus the popover's own padding
-    MENU_GAP = 10  # px kept from the window's edges
-
-    def _top_right(self, btn) -> float:
-        """The right edge of the rightmost button at the top (close): the menu lines up with it."""
-        edge = None
-        stack = [self.header]
-        while stack:
-            w = stack.pop()
-            if isinstance(w, Gtk.Button) and w.get_mapped():
-                ok, b = w.compute_bounds(self)
-                if ok:
-                    edge = max(edge or 0.0, b.get_x() + b.get_width())
-            c = w.get_first_child()
-            while c:
-                stack.append(c)
-                c = c.get_next_sibling()
-        return self.get_width() - self.MENU_GAP if edge is None else edge
-
-    def _place_menu(self, btn, pop) -> None:
-        """Drop the menu below the top buttons, its right edge on theirs, never past the window."""
-        ok, pt = btn.compute_point(self, Graphene.Point())
-        if not ok:
-            return
-        mid = pt.x + btn.get_width() / 2  # a popover is centred on its button
-        right = min(self.get_width() - 2, self._top_right(btn))
-        # Over the window and as big as fits in it (it scrolls when it's taller).
-        inner = max(160, min(self.MENU_W, int(right) - self.MENU_GAP) - 2 * 6)
-        self.menu_fit.set_size_request(inner, -1)
-        width = inner + 2 * 6
-        left = max(self.MENU_GAP, right - width)
-        pop.set_offset(int(left + width / 2 - mid), 8)
-        room = self.get_height() - (pt.y + btn.get_height() + 8) - self.MENU_GAP - 2 * 6
-        self.menu_fit.set_max_content_height(max(120, int(room)))
-        GLib.idle_add(lambda: (pop.get_child().queue_draw(), False)[1])  # its glass, once it's placed
 
     def fill_quality(self) -> None:
         while (row := self.quality_list.get_row_at_index(0)) is not None:
@@ -3483,6 +3590,9 @@ class Window(Adw.ApplicationWindow):
         if wide != self._wide or (wide and width != getattr(self, "_arranged_w", 0)):
             self._wide, self._arranged_w = wide, width
             GLib.idle_add(self._arrange)
+            GLib.idle_add(self._fit_info)
+        if getattr(self, "puddle_open", False):
+            GLib.idle_add(lambda: (self._place_puddle(), False)[1])  # it follows the window
 
     FIT_STEP = 0.92
 
@@ -3580,22 +3690,49 @@ class Window(Adw.ApplicationWindow):
 
     # --- the 'i' button's puddle: programme and curiosities ------------------------------------------
     PUDDLE_MODES = ("ZAJÍMAVOSTI", "DNES", "ZÍTRA", "POZÍTŘÍ")
-    PUDDLE_SPEED = 14  # px a second the curiosities scroll by themselves
+    PUDDLE_SPEED = 7  # px a second the curiosities scroll by themselves
+
+    def cover_rect(self):
+        """(left, top, right, bottom) of the cover as shown, in the window; None when there's none."""
+        pic = self.cover.pic
+        if not pic:
+            return None
+        ok, p = self.cover.compute_point(self, Graphene.Point().init(0, 0))
+        if not ok:
+            return None
+        x, y, dw, dh = self.cover.rect(pic, self.cover.get_width(), self.cover.get_height())
+        return p.x + x, p.y + y, p.x + x + dw, p.y + y + dh
+
+    INFO_GAP = 18  # the song info keeps this far from the screen's edge and the cover's
+
+    def _fit_info(self) -> bool:
+        """In a wide window the song info stays between the screen's left edge and the cover's (touching
+        neither); when the cover leaves too little room there, as it was."""
+        cover, W = self.cover_rect(), self.get_width()
+        end = 0
+        if cover and self._wide:
+            room = cover[0] - self.INFO_GAP - 22  # the text panel's own margin at the left
+            if room >= 120:
+                end = max(0, int((W - 22) - (cover[0] - self.INFO_GAP)))
+        if self.info.get_margin_end() != end:
+            self.info.set_margin_end(end)
+        return False
 
     def _make_puddle(self, overlay, scrim) -> None:
         behind = [(self.backdrop, 0.45), (self.cover, 0.0)]
-        self.neck = Puddle(behind, neck=True, halign=Gtk.Align.START, valign=Gtk.Align.START)
         self.puddle = Puddle(behind, orientation=Gtk.Orientation.VERTICAL, spacing=8, halign=Gtk.Align.END,
                              valign=Gtk.Align.START)
-        for g in (self.neck, self.puddle):
-            g.scrim, g.mag, g.depth = scrim, 1.12, False
-            g.add_css_class("puddle")
-            g.set_visible(False)
-            self.backdrop.watchers.append(g)
-            self.cover.watchers.append(g)
-        self.puddle_head = Gtk.Label(xalign=0, margin_start=18, margin_top=14)
-        self.puddle_head.add_css_class("on-air")
-        self.puddle_head.set_halign(Gtk.Align.START)
+        # The views as tabs (a click), and the wheel's button goes to the next one.
+        self.puddle_head = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6, row_spacing=6,
+                                       min_children_per_line=1, max_children_per_line=4, margin_start=14,
+                                       margin_top=12, margin_end=14)  # they wrap when it's narrow
+        self.puddle_tabs = []
+        for i in range(len(self.PUDDLE_MODES)):
+            tab = Gtk.Button(label="", has_frame=False)
+            tab.add_css_class("puddle-tab")
+            tab.connect("clicked", lambda _b, i=i: self._puddle_go(i))
+            self.puddle_tabs.append(tab)
+            self.puddle_head.append(tab)
         self.puddle_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_start=18, margin_end=18,
                                    margin_bottom=18)
         self.puddle_scroll = Gtk.ScrolledWindow(child=self.puddle_list, vexpand=True,
@@ -3603,106 +3740,74 @@ class Window(Adw.ApplicationWindow):
                                                 vscrollbar_policy=Gtk.PolicyType.EXTERNAL)
         self.puddle.append(self.puddle_head)
         self.puddle.append(self.puddle_scroll)
-        # the wheel's button: the next view; the wheel scrolls (and isn't the volume here)
         mid = Gtk.GestureClick(button=Gdk.BUTTON_MIDDLE)
         mid.connect("pressed", lambda g, *_: (g.set_state(Gtk.EventSequenceState.CLAIMED), self._puddle_next()))
         self.puddle.add_controller(mid)
         wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         wheel.connect("scroll", lambda *_: (setattr(self, "_puddle_touched", time.monotonic()), False)[1])
         self.puddle.add_controller(wheel)
-        block = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
-        block.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
-        block.connect("scroll", lambda *_: True)  # stops here: not the window's volume
-        self.puddle.add_controller(block)
-        # a click anywhere else draws it back into the button
+        self.info_water = Water(self, self.info_tile, self.puddle, overlay)
+        self.neck = self.info_water.neck
+        # the gear's water: the settings, the same way
+        gear_body = Puddle(behind, orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.END, valign=Gtk.Align.START)
+        gear_body.append(self.menu_content)
+        self.gear_water = Water(self, self.gear_tile, gear_body, overlay)
+        self.waters = [self.info_water, self.gear_water]
+        # a click anywhere else draws it back into its button
         outside = Gtk.GestureClick(button=0)
         outside.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         outside.connect("pressed", self._puddle_outside)
         self.add_controller(outside)
-        overlay.add_overlay(self.neck)
-        overlay.add_overlay(self.puddle)
-        self.puddle_open = False
         self.puddle_mode = 0
         self.puddle_items: list = []  # the curiosities shown this session
         self._puddle_touched = 0.0
-        self._puddle_anim = None
         self._puddle_tick = None
 
-    def toggle_puddle(self) -> None:
-        self.close_puddle() if self.puddle_open else self.open_puddle()
+    @property
+    def puddle_open(self) -> bool:
+        return self.info_water.open
 
-    def _place_puddle(self) -> None:
-        ok, b = self.info_tile.compute_bounds(self)
-        if not ok:
+    def toggle_water(self, water) -> None:
+        if water.open:
+            water.hide()
             return
-        W, H = self.get_width(), self.get_height()
-        gap = 10
-        bottom = b.get_y() + b.get_height()
-        self.neck.set_margin_start(int(b.get_x() + b.get_width() * 0.25))
-        self.neck.set_margin_top(int(bottom - 4))
-        self.neck.set_size_request(int(b.get_width() * 0.5), gap + 8)
-        top = bottom + gap
-        width = int(max(300, min(W - 20, W * 0.45)))
-        self.puddle.set_margin_top(int(top))
-        self.puddle.set_margin_end(10)
-        self.puddle.set_size_request(width, int(max(220, min(H * 0.75, H - top - 20))))
-        self.puddle.radius = 22 * max(1.0, self._scale)
-        self.neck.radius = b.get_width() * 0.25
+        for other in self.waters:
+            if other is not water:
+                other.hide()
+        if water is self.info_water:
+            self.puddle_mode = 0
+            self._fill_puddle()
+            if self._puddle_tick is None:
+                self._puddle_last = None
+                self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
+        water.show()
+
+    def toggle_puddle(self) -> None:
+        self.toggle_water(self.info_water)
 
     def open_puddle(self) -> None:
-        self.puddle_open = True
-        self._place_puddle()
-        self.puddle_mode = 0
-        self._fill_puddle()
-        for g in (self.neck, self.puddle):
-            g.set_visible(True)
-        self._flow(1.0, 750, Adw.Easing.EASE_OUT_BACK)
-        if self._puddle_tick is None:
-            self._puddle_last = None
-            self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
+        if not self.info_water.open:
+            self.toggle_water(self.info_water)
 
     def close_puddle(self) -> None:
-        if self.puddle_open:
-            self.puddle_open = False
-            self._flow(0.0, 420, Adw.Easing.EASE_IN_CUBIC)
+        self.info_water.hide()
 
-    def _flow(self, to: float, ms: int, easing) -> None:
-        """The water flowing down (neck first, then the body) or drawn back up."""
-        if self._puddle_anim:
-            self._puddle_anim.pause()
-        start = getattr(self, "_flow_v", 0.0)
-
-        def set_v(v):
-            self._flow_v = v
-            self.neck.reveal = min(1.0, max(0.0, v / 0.25))
-            self.puddle.reveal = min(1.05, max(0.0, (v - 0.15) / 0.85))
-            self.neck.queue_draw()
-            self.puddle.queue_draw()
-
-        anim = self._puddle_anim = Adw.TimedAnimation.new(self, start, to, ms, Adw.CallbackAnimationTarget.new(set_v))
-        anim.set_easing(easing)
-        anim_hold(True)
-
-        def done(*_):
-            anim_hold(False)
-            if to == 0.0 and not self.puddle_open:
-                for g in (self.neck, self.puddle):
-                    g.set_visible(False)
-        anim.connect("done", done)
-        anim.play()
+    def _place_puddle(self) -> None:
+        for water in self.waters:
+            if water.open:
+                water.place()
 
     def _puddle_outside(self, _gesture, _n, x, y) -> None:
-        if not self.puddle_open:
-            return
         w = self.pick(x, y, Gtk.PickFlags.DEFAULT)
-        while w is not None:
-            if w in (self.puddle, self.neck, self.info_tile):
-                return
-            w = w.get_parent()
-        self.close_puddle()
+        for water in self.waters:
+            if water.open and not water.contains(w):
+                water.hide()
 
     def _puddle_next(self) -> None:
-        self.puddle_mode = (self.puddle_mode + 1) % len(self.PUDDLE_MODES)
+        self._puddle_go((self.puddle_mode + 1) % len(self.PUDDLE_MODES))
+
+    def _puddle_go(self, mode: int) -> None:
+        self.puddle_mode = mode
         self._fill_puddle()
 
     def _clear_puddle(self) -> None:
@@ -3734,7 +3839,9 @@ class Window(Adw.ApplicationWindow):
     def _fill_puddle(self) -> None:
         a = self.app
         mode = self.puddle_mode
-        self.puddle_head.set_text(a.cz(self.PUDDLE_MODES[mode]))
+        for i, tab in enumerate(self.puddle_tabs):
+            tab.set_label(a.cz(self.PUDDLE_MODES[i]))
+            (tab.add_css_class if i == mode else tab.remove_css_class)("on-air")
         self._clear_puddle()
         now = time.localtime()
         if mode == 0:
@@ -3749,7 +3856,7 @@ class Window(Adw.ApplicationWindow):
             while len(self.puddle_items) < 4 and (item := a.next_curiosity()):
                 self.puddle_items.append(item)
             for item in self.puddle_items:
-                self._puddle_block(*item)
+                self._puddle_block("", item[1] or "Rádio Beat", item[2])  # under ZAJÍMAVOSTI: just the name
             return
         day = (now.tm_wday + mode - 1) % 7
         mins = now.tm_hour * 60 + now.tm_min
@@ -3776,7 +3883,7 @@ class Window(Adw.ApplicationWindow):
             item = self.app.next_curiosity()
             if item:
                 self.puddle_items.append(item)
-                self._puddle_block(*item)
+                self._puddle_block("", item[1] or "Rádio Beat", item[2])
         return GLib.SOURCE_CONTINUE
 
     def _scroll_typed(self) -> bool:
@@ -3893,7 +4000,7 @@ class Window(Adw.ApplicationWindow):
         self.toggle_full()
 
     def on_wheel(self, _ctl, _dx, dy) -> bool:
-        if self.menu_pop.get_visible() or not dy:
+        if not dy:
             return False
         self.app.nudge_volume(-5 if dy > 0 else 5)
         return True
@@ -3927,6 +4034,9 @@ class Window(Adw.ApplicationWindow):
         # An enhancing step of the picture already up is redrawn slowly; a new one morphs.
         redraw = pic is not None and a.refined == (self.cover.pic, pic)
         self.cover.set_paintable(pic, redraw)
+        GLib.idle_add(self._fit_info)
+        if getattr(self, "puddle_open", False):
+            GLib.idle_add(lambda: (self._place_puddle(), False)[1])  # beside the new cover
         self.backdrop.set_paintable(pic, redraw)
         cur, nxt = on_air(a.schedule, time.localtime())
         turn = self._turn_content if self.card_turn == "song" else None
