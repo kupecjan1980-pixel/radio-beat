@@ -285,6 +285,7 @@ def norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s.lower())
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = re.sub(r"\(.*?\)|\[.*?\]", " ", s)
+    s = re.sub(r"['´`’‘]", "", s)  # Pavlov's = PAVLOVS ´DOG (not "pavlov s")
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
 
@@ -327,7 +328,8 @@ def lookup(artist: str, song: str) -> dict | None:
             if sc > best_score:
                 best_score = sc
                 best = {"artist": x["artist"]["name"], "title": x["title"],
-                        "album": x["album"]["title"], "cover": (x["album"].get("cover_xl") or "").replace("/1000x1000-", "/1200x1200-") or None}
+                        "album": x["album"]["title"], "cover": (x["album"].get("cover_xl") or "").replace("/1000x1000-", "/1200x1200-") or None,
+                        "deezer_album": x["album"].get("id")}
     except (OSError, ValueError, KeyError):
         pass
     if best_score >= 4:
@@ -339,7 +341,8 @@ def lookup(artist: str, song: str) -> dict | None:
                 best_score = sc
                 art = x.get("artworkUrl100", "")
                 best = {"artist": x["artistName"], "title": x["trackName"],
-                        "album": x.get("collectionName"), "cover": art.replace("100x100bb", "1920x1920bb") or None}
+                        "album": x.get("collectionName"), "cover": art.replace("100x100bb", "1920x1920bb") or None,
+                        "released": (x.get("releaseDate") or "")[:10]}
     except (OSError, ValueError, KeyError):
         pass
     return best if best_score >= 3 else None
@@ -350,7 +353,7 @@ def lookup(artist: str, song: str) -> dict | None:
 MB = "https://musicbrainz.org/ws/2"
 MB_UA = "RadioBeat/1.0 ( https://github.com/kupecjan1980-pixel/radio-beat )"  # MusicBrainz wants a real one
 FACTS_CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat",
-                           "facts-cs2.json")
+                           "facts-cs3.json")
 _mb_lock = threading.Lock()
 _mb_last = [0.0]
 MONTHS = ("ledna", "února", "března", "dubna", "května", "června", "července", "srpna", "září", "října",
@@ -430,6 +433,7 @@ def song_facts(artist: str, song: str) -> str:
         cache = {}
     if key in cache:
         return cache[key]
+    song = re.sub(r"\s*[(\[].*?[)\]]", "", song).strip() or song  # "Stairway to Heaven (Remaster)": the song
     a, t = norm(first_artist(artist)), norm(song)
     base = f'recording:"{song}" AND artist:"{first_artist(artist)}" AND status:official'
 
@@ -577,9 +581,10 @@ ARTICLE_END = ("Reference", "Odkazy", "Externí odkazy", "Související články
 
 
 def wiki_sentences(name: str, words: tuple, langs=("cs", "en")) -> dict:
-    """Everything the Wikipedia article named after `name` says, as sentences (for the show card's mix):
-    {"lang": "cs" | "en", "s": [...]}, Czech first; {} when there's no such article. Remembered."""
-    key = f"sent|{norm(name)}"
+    """Everything the Wikipedia article named after `name` says, as sentences (for the show card's mix), and its
+    picture: {"lang": "cs" | "en", "s": [...], "img": url}, Czech first; {} when there's no such article.
+    Remembered."""
+    key = f"sent2|{norm(name)}"
     try:
         with open(ABOUT_CACHE) as f:
             cache = json.load(f)
@@ -597,8 +602,9 @@ def wiki_sentences(name: str, words: tuple, langs=("cs", "en")) -> dict:
                 if norm(re.sub(r"\(.*?\)", "", hit["title"])) != n:
                     continue
                 q = urllib.parse.quote(hit["title"])
-                pages = _wiki(f"https://{lang}.wikipedia.org/w/api.php?action=query&prop=extracts|pageprops"
-                              f"&explaintext=1&exsectionformat=plain&redirects=1&titles={q}&format=json")
+                pages = _wiki(f"https://{lang}.wikipedia.org/w/api.php?action=query&prop=extracts|pageprops|pageimages"
+                              f"&explaintext=1&exsectionformat=plain&piprop=thumbnail&pithumbsize=320&redirects=1"
+                              f"&titles={q}&format=json")
                 page = next(iter(pages["query"]["pages"].values()))
                 if "disambiguation" in (page.get("pageprops") or {}):
                     continue
@@ -612,8 +618,8 @@ def wiki_sentences(name: str, words: tuple, langs=("cs", "en")) -> dict:
                         break
                     if len(line) > 60 and "." in line:  # a paragraph (not a heading or a list item)
                         kept += [x for x in sentences(line) if 40 <= len(x) <= 260]
-                if kept:
-                    found = {"lang": lang, "s": kept[:200]}
+                if kept:  # with the article's picture (the band, the artist), for beside the text
+                    found = {"lang": lang, "s": kept[:200], "img": (page.get("thumbnail") or {}).get("source", "")}
                     break
         except (OSError, ValueError, KeyError, StopIteration):
             continue
@@ -833,6 +839,18 @@ class History:
         with self.lock:
             rows = self.db.execute("SELECT name, shows FROM hosts ORDER BY last DESC").fetchall()
         return [(r[0], [x for x in (r[1] or "").split("|") if x]) for r in rows]
+
+
+def album_released(info: dict) -> str:
+    """The album's release date (YYYY-MM-DD) from the lookup: iTunes has it, Deezer's album page does."""
+    if info.get("released"):
+        return info["released"]
+    if info.get("deezer_album"):
+        try:
+            return (_json(f"https://api.deezer.com/album/{info['deezer_album']}").get("release_date") or "")[:10]
+        except (OSError, ValueError):
+            pass
+    return ""
 
 
 def fetch(url: str) -> bytes | None:
@@ -2576,6 +2594,8 @@ class GlassCard(Gtk.Box):
         self.mag = self.MAG  # < 1: a concave lens (things look smaller)
         self.frame = True  # its lit edges and border (not for the puddle's neck)
         self.cache_lens = True  # the lens drawn from a texture while nothing behind it changes
+        self.band = 0  # px: the lens bends only in this band along the edge (thick glass slab); 0: fish-eye
+        self.wall = self.RIM  # the curved side wall's shaded width, in corner radii
         self.pulse_tick = None  # the mouse on it: the magnification breathes, like a magnifier moved up and down
         self.lift = 0.0  # the card drawn this much bigger meanwhile (it pumps, outline and all)
         self._lens_cache = (None, None)
@@ -2759,7 +2779,7 @@ class GlassCard(Gtk.Box):
             return
         box = Graphene.Rect().init(0, 0, w, h)
         rr = self._rounded(0, 0, w, h, self.radius)
-        rim = min(self.radius * self.RIM, h / 2, w / 2)
+        rim = min(self.radius * self.wall, h / 2, w / 2)
         if self.depth and shadow:  # it floats above the cover: a wide soft shadow and a tight one where it nearly touches
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
@@ -2806,8 +2826,9 @@ class GlassCard(Gtk.Box):
         # A fish-eye lens, sharp: the middle magnified most (mag), less and less towards the edges, which are
         # bent the other way (they show what lies beyond, squeezed in). No blending (that ghosts and looks
         # blurred): hard-edged layers from the edge in, each shifted under 1 px from the one outside it.
-        lens = min(h / 2, w / 2)
-        most = lens * self.FISH_REACH
+        # the bend over the whole glass (fish-eye), or for a big one in a band along its rounded edge
+        lens = min(h / 2, w / 2) if not self.band else min(self.band, h / 2, w / 2)
+        most = lens * (self.FISH_REACH if not self.band else 0.9)
         rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the edge's zoom
         steps = max(1, math.ceil((most + abs(self.mag - 1) * max(w, h) / 2) / (2.5 if self.pulse_tick else 1)))
         for k in range(0, steps + 1):
@@ -3006,6 +3027,9 @@ class Puddle(GlassCard):
         top = Graphene.Size().init(0, 0) if self.neck else Graphene.Size().init(self.radius, self.radius)
         bot = Graphene.Size().init(bottom, bottom)
         rr.init(Graphene.Rect().init(0, 0, w, vis), top, top, bot, bot)
+        if self.depth:  # it floats over the cover: its shadow (outside the clip below)
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.5), 0, 8, 0, 24)
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.3), 0, 2, 0, 5)
         snap.push_rounded_clip(rr)
         GlassCard.do_snapshot(self, snap)
         snap.pop()
@@ -3022,12 +3046,15 @@ class Water:
         behind = [(win.backdrop, 0.45), (win.cover, 0.0)]
         self.neck = Puddle(behind, neck=True, halign=Gtk.Align.START, valign=Gtk.Align.START)
         for g in (self.neck, body):
-            # even glass all over (not the text panel's shading, darker at the bottom)
-            g.scrim, g.mag, g.depth, g.tint = None, 1.12, False, 0.22
+            # even glass all over (not the text panel's shading, darker at the bottom), a thick slab of it:
+            # magnified in the middle, bent hard along its rounded edge, a shaded side wall, a shadow below
+            g.scrim, g.mag, g.depth, g.tint = None, 1.2, True, 0.22
+            g.band, g.wall = 48, 2.2
             g.add_css_class("puddle")
             g.set_visible(False)
             win.backdrop.watchers.append(g)
             win.cover.watchers.append(g)
+        self.neck.depth = False  # water between the two: no shadow box of its own
         # its own scrolling stays its own: not the window's volume
         block = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         block.connect("scroll", lambda *_: True)
@@ -3816,8 +3843,23 @@ class Window(Adw.ApplicationWindow):
             self.puddle_list.remove(c)
         self.puddle_scroll.get_vadjustment().set_value(0)
 
-    def _puddle_block(self, badge: str, title: str, text: str, now: bool = False) -> None:
+    def _puddle_block(self, badge: str, title: str, text: str, now: bool = False, img: str | None = None) -> None:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        if img is not None:  # a show: its picture beside its lines
+            row = Gtk.Box(spacing=12)
+            pic = Gtk.Image(pixel_size=int(TEXT_PT["pic"] * 0.7 * max(1.0, self._scale)), valign=Gtk.Align.START)
+            pic.add_css_class("show-pic")
+            pic.set_overflow(Gtk.Overflow.HIDDEN)
+            pic.img_url = img
+            tex = self.app.show_pics.get(img) if img else None
+            pic.set_from_paintable(tex or self.app.logo_tex)
+            self.app.want_show_pic(img)
+            row.append(pic)
+            box.set_hexpand(True)
+            row.append(box)
+            outer = row
+        else:
+            outer = box
         top = Gtk.Box(spacing=8)
         if badge:
             b = Gtk.Label(label=badge, valign=Gtk.Align.START)
@@ -3834,8 +3876,21 @@ class Window(Adw.ApplicationWindow):
             body.add_css_class("show-sub")
             box.append(body)
         if now:
-            box.add_css_class("puddle-now")
-        self.puddle_list.append(box)
+            outer.add_css_class("puddle-now")
+        self.puddle_list.append(outer)
+
+    def puddle_pics(self) -> None:
+        """The lineup's pictures that came in since."""
+        stack = [self.puddle_list]
+        while stack:
+            w = stack.pop()
+            url = getattr(w, "img_url", None)
+            if url and self.app.show_pics.get(url):
+                w.set_from_paintable(self.app.show_pics[url])
+            c = w.get_first_child()
+            while c:
+                stack.append(c)
+                c = c.get_next_sibling()
 
     def _fill_puddle(self) -> None:
         a = self.app
@@ -3849,15 +3904,16 @@ class Window(Adw.ApplicationWindow):
             cur, nxt = on_air(a.schedule, now)
             if cur:
                 host = a.host if a.host and norm(a.host) != norm(cur["title"]) else None
-                self._puddle_block("ON AIR", cur["title"], " · ".join(x for x in (host, cur["desc"]) if x))
+                self._puddle_block("ON AIR", cur["title"], " · ".join(x for x in (host, cur["desc"]) if x),
+                                   img=cur.get("img") or "")
             if a.about:
                 info = a.info or {}
                 self._puddle_block(a.badge("NOW PLAYING"), info.get("title") or a.song or "",
                                    a.cz(a.about) + (f"\n{a.cz(a.facts)}" if a.facts else ""))
             while len(self.puddle_items) < 4 and (item := a.next_curiosity()):
                 self.puddle_items.append(item)
-            for item in self.puddle_items:
-                self._puddle_block("", item[1] or "Rádio Beat", item[2])  # under ZAJÍMAVOSTI: just the name
+            for item in self.puddle_items:  # under ZAJÍMAVOSTI: just the name, the picture beside
+                self._puddle_block("", item[1] or "Rádio Beat", item[2], img=item[3] if len(item) > 3 else "")
             return
         day = (now.tm_wday + mode - 1) % 7
         mins = now.tm_hour * 60 + now.tm_min
@@ -3868,7 +3924,7 @@ class Window(Adw.ApplicationWindow):
         for show in shows:
             when = f'{show["start"] // 60}:{show["start"] % 60:02d}'
             is_now = mode == 1 and cur is not None and show is cur
-            self._puddle_block(when, show["title"], a.cz(show.get("desc") or ""), now=is_now)
+            self._puddle_block(when, show["title"], a.cz(show.get("desc") or ""), now=is_now, img=show.get("img") or "")
 
     def _puddle_scroll_step(self, _w, clock) -> bool:
         if not self.puddle_open and not self.puddle.get_visible():
@@ -3884,7 +3940,7 @@ class Window(Adw.ApplicationWindow):
             item = self.app.next_curiosity()
             if item:
                 self.puddle_items.append(item)
-                self._puddle_block("", item[1] or "Rádio Beat", item[2])
+                self._puddle_block("", item[1] or "Rádio Beat", item[2], img=item[3] if len(item) > 3 else "")
         return GLib.SOURCE_CONTINUE
 
     def _scroll_typed(self) -> bool:
@@ -4086,9 +4142,9 @@ class Window(Adw.ApplicationWindow):
         if abs(self.vol.get_value() - a.volume_now()) >= 1:
             self.vol.set_value(a.volume_now())
         self.card_row.set_subtitle(a.card_text())
-        self.recognise_row.set_subtitle(
+        self.recognise_row.set_subtitle(GLib.markup_escape_text(
             "When the stream names no song (jingles, breaks), a 12 s clip is recognised once a minute through "
-            f"Shazam's unofficial API (shazamio). {a.recognise_text}")
+            f"Shazam's unofficial API (shazamio). {a.recognise_text}"))
 
 
 class App(Adw.Application):
@@ -4595,6 +4651,12 @@ class App(Adw.Application):
                 threading.Thread(target=work, daemon=True).start()
         self._enhance_show()
 
+    def want_show_pic(self, url: str) -> None:
+        """A show's picture for the 'i' puddle's lineup: fetched once; the puddle fills it in."""
+        if url and url not in self.show_pics:
+            self.show_pics[url] = None  # fetching
+            threading.Thread(target=lambda: GLib.idle_add(self._show_pic_got, url, fetch(url)), daemon=True).start()
+
     def _show_pic_got(self, url, data):
         try:
             self.show_pics[url] = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data)) if data else None
@@ -4604,6 +4666,8 @@ class App(Adw.Application):
             self.show_src[url] = data
         self._enhance_show()
         self.update()
+        if self.win and self.win.puddle_open:
+            self.win.puddle_pics()
         return False
 
     def _enhance_show(self) -> None:
@@ -4773,10 +4837,18 @@ class App(Adw.Application):
         info = lookup(artist, song)
         data = fetch(info["cover"]) if info and info.get("cover") else None
         GLib.idle_add(self._looked_up, lid, info, data)
+        # first release and where: asked with the names the lookup found (the stream's may be misspelt:
+        # "PAVLOVS ´DOG"), else at least when its album came out
+        facts = song_facts(info["artist"], info["title"]) if info else ""
+        if not facts:
+            facts = song_facts(artist, song)
+        if not facts and info:
+            day = album_released(info)
+            if day:
+                facts = f"Album vydáno {_date(day)} ({{ago:{day[:4]}}})"
+        GLib.idle_add(self._got_facts, lid, facts)
 
     def _facts(self, lid, artist, song):
-        text = song_facts(artist, song)
-        GLib.idle_add(self._got_facts, lid, text)
         about = song_about(artist, song)
         band = "" if about else name_about(first_artist(artist), MUSIC_WORDS)
         GLib.idle_add(self._got_about, lid, about, band)
@@ -4924,15 +4996,15 @@ class App(Adw.Application):
         lead = random.choice(leads)
         self._last_lead = lead
         a = "ka" if name.split() and name.split()[0].endswith("a") else ""
-        return kind, name, lead.format(n=name, a=a) + " ".join(pick)
+        return kind, name, lead.format(n=name, a=a) + " ".join(pick), pool.get("img", "")
 
     def next_curiosity(self):
-        """The next item of the mix for the 'i' puddle: (badge, title, text), or None for now."""
+        """The next item of the mix for the 'i' puddle: (badge, title, text, picture url), or None for now."""
         self._feed.set()
         if not self.ready:
             return None
-        kind, name, text = self.ready.popleft()
-        return self.cz(self.BADGE[kind]), "" if kind == "station" else name, self.cz(text)
+        kind, name, text, img = self.ready.popleft()
+        return self.cz(self.BADGE[kind]), "" if kind == "station" else name, self.cz(text), img
 
     def turn_content_ready(self) -> bool:
         return bool(self.about or self.ready)
@@ -4947,7 +5019,7 @@ class App(Adw.Application):
         self._feed.set()
         if not self.ready:
             return None
-        kind, name, text = self.ready.popleft()
+        kind, name, text, _img = self.ready.popleft()
         # the station's badge says it already: no headline beside it
         return self.cz(self.BADGE[kind]), "" if kind == "station" else name, self.cz(text), self.logo_tex
 
