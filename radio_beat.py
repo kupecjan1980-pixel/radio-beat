@@ -3677,8 +3677,8 @@ class Window(Adw.ApplicationWindow):
     FIT_STEP = 0.95
 
     def _check_fit(self) -> bool:
-        """The text, the show card and the buttons shrink until they all fit below the top bar (a long title, a
-        short window, full screen too: never up over the logo), and grow back when there's room."""
+        """The song info's text as big as fits its place: below the top bar (never up over the logo), above
+        the buttons, beside the cover; full screen too. 85 % of its usual size at the least, 1.6x at most."""
         self._fit_queued = False
         w, h = self.get_width(), self.get_height()
         if w <= 0 or h <= 0:
@@ -3689,13 +3689,12 @@ class Window(Adw.ApplicationWindow):
         need = self.scrim.measure(Gtk.Orientation.VERTICAL, w)[1]  # natural: what it really takes
         cover = self.cover_rect()
         room = (cover[0] - self.INFO_GAP - 22) if cover and self._wide else None
-        wide_need = self.info.measure(Gtk.Orientation.HORIZONTAL, -1)[0] if room and room >= 120 else 0
-        if wide_need > room if room and room >= 120 else False:  # the song info wider than beside the cover
-            need = h + 1
+        too_wide = bool(room and room >= 120 and self.info.measure(Gtk.Orientation.HORIZONTAL, -1)[0] > room)
+        if (need > h or too_wide) and fit > 0.85:  # too tall for the window or too wide beside the cover
             self._fit_bad = min(self._fit_bad, fit)
-            fit = max(0.5, fit * self.FIT_STEP)
-        elif fit < 1.6 and need < h * 0.93 and fit / self.FIT_STEP < self._fit_bad - 1e-6:  # grows to fill it
-            fit = min(1.6, fit / self.FIT_STEP)
+            fit = max(0.85, fit * self.FIT_STEP)  # never much below its usual size
+        elif not too_wide and fit < 1.6 and need < h * 0.93 and fit / self.FIT_STEP < self._fit_bad - 1e-6:
+            fit = min(1.6, fit / self.FIT_STEP)  # grows to fill its place
         if fit != self._fit:
             self._fit = fit
             self._scale_pending = True
