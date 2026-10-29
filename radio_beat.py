@@ -2652,6 +2652,7 @@ class GlassCard(Gtk.Box):
         self.tint = 0.34  # the dark tint over the glass (times shade)
         self.mag = self.MAG  # < 1: a concave lens (things look smaller)
         self.frame = True  # its lit edges and border (not for the puddle's neck)
+        self.warp_content = False  # what's inside bent by the glass too (the big panels)
         self.cache_lens = True  # the lens drawn from a texture while nothing behind it changes
         self.band = 0  # px: the lens bends only in this band along the edge (thick glass slab); 0: fish-eye
         self.reach = self.FISH_REACH  # how far beyond its edge it shows
@@ -2812,6 +2813,51 @@ class GlassCard(Gtk.Box):
         rr.init_from_rect(Graphene.Rect().init(x, y, max(w, 1), max(h, 1)), max(r, 0))
         return rr
 
+    def _warped_children(self, snap, w: float, h: float) -> None:
+        """What's inside the glass bent by it too: true in the middle, squeezed and curving away towards the
+        rounded edge (text scrolling to the bottom bends over it, the tabs follow the rim)."""
+        native = self.get_native()
+        s = Gtk.Snapshot()
+        surf = native.get_surface() if native else None
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+        s.scale(k, k)
+        Gtk.Box.do_snapshot(self, s)
+        node = s.to_node()
+        if node is None or not native:
+            return
+        tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, w * k, h * k))
+        box = Graphene.Rect().init(0, 0, w, h)
+        lens = min(h / 2, w / 2)
+        most = lens * self.reach * 0.35
+        rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)
+        steps = max(1, math.ceil(most / 0.5))
+        cx, cy = w / 2, h / 2
+        def ring(d: float):
+            return self._rounded(d, d, w - 2 * d, h - 2 * d, max(0.0, self.radius - d))
+
+        # each ring of the content drawn only in its own band (see-through content drawn over itself would
+        # stack its shadows up)
+        prev = 0.0
+        for i in range(0, steps + 1):
+            bend = 1 - i / steps  # 1 at the edge, 0 inside
+            d = lens * 0.5 * (1 - bend ** (1 / self.curve))  # the bend: near the edge only
+            nxt = lens * 0.5 * (1 - max(0.0, 1 - (i + 1) / steps) ** (1 / self.curve)) if i < steps else None
+            sx, sy = 1 + (rx - 1) * bend, 1 + (ry - 1) * bend
+            pb = Gsk.PathBuilder.new()
+            pb.add_rounded_rect(ring(d))
+            if nxt is not None:
+                if nxt - d < 0.05:
+                    continue
+                pb.add_rounded_rect(ring(nxt))
+            snap.push_fill(pb.to_path(), Gsk.FillRule.EVEN_ODD)
+            snap.save()
+            snap.translate(Graphene.Point().init(cx, cy))
+            snap.scale(sx, sy)
+            snap.translate(Graphene.Point().init(-cx, -cy))
+            snap.append_texture(tex, box)
+            snap.restore()
+            snap.pop()
+
     def do_snapshot(self, snap) -> None:
         if self.lift:
             w, h = self.get_width(), self.get_height()
@@ -2820,7 +2866,10 @@ class GlassCard(Gtk.Box):
             snap.scale(1 + self.lift, 1 + self.lift)
             snap.translate(Graphene.Point().init(-w / 2, -h / 2))
         self.draw_glass(snap)
-        Gtk.Box.do_snapshot(self, snap)
+        if self.warp_content and self.get_width() > 0 and self.get_height() > 0:
+            self._warped_children(snap, self.get_width(), self.get_height())
+        else:
+            Gtk.Box.do_snapshot(self, snap)
         if self.lift:
             snap.restore()
 
@@ -3132,6 +3181,7 @@ class Water:
             g.scrim, g.sharp_bars = win.scrim, True  # what's under it sharp, the bars beside the cover too
             if g is body:  # big glass: its edge a thick rounded wall (the bend there), lit and shaded like one
                 g.curve, g.wall, g.reach, g.shine = 3.0, 2.8, 0.9, True  # a strong bend at the rim: thick
+                g.warp_content = True
             g.add_css_class("puddle")
             g.set_visible(False)
             win.backdrop.watchers.append(g)
