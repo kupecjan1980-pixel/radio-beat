@@ -460,8 +460,14 @@ def song_facts(artist: str, song: str) -> str:
         if not older:
             break
         recs += older
-    dates = sorted(r["first-release-date"] for r in recs if r.get("first-release-date"))
-    first = dates[0] if dates else ""
+    # The earliest date with something behind it: a lone recording on a single release dated before all the
+    # rest is a slip in the data (Paint It Black "1964"), not the first release.
+    support: dict = {}
+    for r in recs:
+        if r.get("first-release-date"):
+            support[r["first-release-date"]] = support.get(r["first-release-date"], 0) + len(r.get("releases", []))
+    dates = sorted(support)
+    first = next((d for d in dates if support[d] >= 2), dates[0] if dates else "")
     # Where that first release came out (the release carrying the earliest date).
     country = ""
     for r in recs:
@@ -473,7 +479,8 @@ def song_facts(artist: str, song: str) -> str:
             break
     # Where: the oldest plain recordings first (not a demo or a live one).
     places = []
-    for r in sorted(recs, key=lambda r: (bool(r.get("disambiguation")), r.get("first-release-date") or "9999"))[:3]:
+    for r in sorted(recs, key=lambda r: (bool(r.get("disambiguation")), -len(r.get("releases", [])),
+                                         r.get("first-release-date") or "9999"))[:6]:
         got = _mb(f"/recording/{r['id']}?inc=place-rels+area-rels&fmt=json")
         places = _places((got or {}).get("relations"))
         if places:
