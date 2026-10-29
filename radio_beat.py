@@ -2808,6 +2808,11 @@ class GlassCard(Gtk.Box):
         self._blurred = (key, tex)
         return tex
 
+    def _ring_r(self, d: float, w: float, h: float) -> float:
+        """A lens ring's corners, `d` in from the edge: round all the way in (the edge's radius less `d` turns
+        sharp once deeper than it, and the rings' corners then crease the picture diagonally)."""
+        return max(0.0, min(max(self.radius - d, self.radius * 0.6 + d * 0.9), (w - 2 * d) / 2, (h - 2 * d) / 2))
+
     def _rounded(self, x: float, y: float, w: float, h: float, r: float) -> Gsk.RoundedRect:
         rr = Gsk.RoundedRect()
         rr.init_from_rect(Graphene.Rect().init(x, y, max(w, 1), max(h, 1)), max(r, 0))
@@ -2833,7 +2838,7 @@ class GlassCard(Gtk.Box):
         steps = max(1, math.ceil(most / 0.5))
         cx, cy = w / 2, h / 2
         def ring(d: float):
-            return self._rounded(d, d, w - 2 * d, h - 2 * d, max(0.0, self.radius - d))
+            return self._rounded(d, d, w - 2 * d, h - 2 * d, self._ring_r(d, w, h))
 
         # each ring of the content drawn only in its own band (see-through content drawn over itself would
         # stack its shadows up)
@@ -2959,7 +2964,7 @@ class GlassCard(Gtk.Box):
             d = lens * (1 - bend ** (1 / self.curve))  # where the curve falls to `bend`
             sx, sy = self.mag + (rx - self.mag) * bend, self.mag + (ry - self.mag) * bend
             if k:
-                snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d))
+                snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self._ring_r(d, w, h)))
             self._behind(snap, w, h, sx, sy)
             if k:
                 snap.pop()
