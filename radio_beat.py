@@ -3956,11 +3956,6 @@ class Window(Adw.ApplicationWindow):
         self._clear_puddle()
         now = time.localtime()
         if mode == 0:
-            cur, nxt = on_air(a.schedule, now)
-            if cur:
-                host = a.host if a.host and norm(a.host) != norm(cur["title"]) else None
-                self._puddle_block("ON AIR", cur["title"], " · ".join(x for x in (host, cur["desc"]) if x),
-                                   img=cur.get("img") or "")
             if a.about:
                 info = a.info or {}
                 self._puddle_block(a.badge("NOW PLAYING"), info.get("title") or a.song or "",
@@ -3981,7 +3976,12 @@ class Window(Adw.ApplicationWindow):
         mins = now.tm_hour * 60 + now.tm_min
         cur, _ = on_air(a.schedule, now)
         shows = a.schedule.get(day) or []
-        if not shows:
+        if mode == 2 and cur:  # today: what's on air first (it may have begun yesterday evening)
+            host = a.host if a.host and norm(a.host) != norm(cur["title"]) else None
+            self._puddle_block("ON AIR", cur["title"], a.cz(" · ".join(x for x in (host, cur["desc"]) if x)),
+                               now=True, img=cur.get("img") or "")
+            shows = [x for x in shows if x is not cur]
+        if not shows and not (mode == 2 and cur):
             self._puddle_block("", "", a.cz("Program pro tento den zatím není."))
         for show in shows:
             when = f'{show["start"] // 60}:{show["start"] % 60:02d}'
