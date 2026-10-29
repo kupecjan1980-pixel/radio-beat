@@ -3168,6 +3168,10 @@ class Window(Adw.ApplicationWindow):
         group.add(self.enhance_row)
         self.picture_row = Adw.ActionRow(title="Picture now", subtitle=self.app.picture_text, subtitle_lines=0)
         group.add(self.picture_row)
+        self.recognise_row = Adw.SwitchRow(title="Recognise songs (testing)", subtitle_lines=0)
+        self.recognise_row.set_active(self.app.settings.get("recognise", False))
+        self.recognise_row.connect("notify::active", lambda r, _: self.app.set_recognise(r.get_active()))
+        group.add(self.recognise_row)
         self.npu_row = Adw.SwitchRow(title="Use the NPU (testing)", subtitle=self.app.enhancer.npu_text,
                                      subtitle_lines=0)
         self.npu_row.set_active(self.app.settings.get("npu", False))
@@ -3629,6 +3633,9 @@ class Window(Adw.ApplicationWindow):
         if abs(self.vol.get_value() - a.volume_now()) >= 1:
             self.vol.set_value(a.volume_now())
         self.card_row.set_subtitle(a.card_text())
+        self.recognise_row.set_subtitle(
+            "When the stream names no song (jingles, breaks), a 12 s clip is recognised once a minute through "
+            f"Shazam's unofficial API (shazamio). {a.recognise_text}")
 
 
 class App(Adw.Application):
@@ -3686,6 +3693,10 @@ class App(Adw.Application):
         self.card_set_at = 0.0  # when the slider last set it
         self._vol_cur = self._vol_target = 0.0  # mpv's volume now, and where it's gliding to
         self.muted = False  # the speaker button
+        self.recognise_text = "Off"
+        self._recognise_id = 0
+        self._recognising = False
+        self._recognised_last = None
         self._vol_glide = self._vol_save = 0  # timers
         self.upscale_src: dict[str, tuple[str, bytes]] = {}  # kind -> (key, picture bytes), for after the install
         self.orig_tex: dict[str, object] = {}  # kind -> the picture as it came
@@ -3724,6 +3735,8 @@ class App(Adw.Application):
                     self.upscale_src["logo"] = (p, f.read())
                 break
         GLib.idle_add(lambda: (self._enhance("logo"), False)[1])  # enhanced before: from the cache at once
+        if self.settings.get("recognise", False):
+            self.set_recognise(True)
         threading.Thread(target=lambda: GLib.idle_add(setattr, self, "station_about",
                                                       name_about("Rádio Beat", HOST_WORDS + MUSIC_WORDS, ("cs", "en"))),
                          daemon=True).start()
@@ -4165,6 +4178,100 @@ class App(Adw.Application):
             self.update()
 
         self.enhancer.request("show", url, data, (w, h), target, done, screen=size)
+
+    # --- recognising songs the stream doesn't name (testing, off by default) -----------------------
+    # While the stream's title is just the station (jingles, breaks, some stretches), a 12 s clip is taken once
+    # a minute and recognised through Shazam's unofficial API (shazamio, in the app's own Python environment);
+    # a song found is shown and remembered like a named one.
+    SHAZAM_DIR = os.path.join(DATA_DIR, "shazam")
+    RECOGNISE_S = 60
+
+    def station_only(self) -> bool:
+        parts = split_title(self.icy or "")
+        return not parts or norm(first_artist(parts[0])) in ("radio beat", "beat")
+
+    def set_recognise(self, on: bool) -> None:
+        self.settings["recognise"] = on
+        save_settings(self.settings)
+        if on:
+            self.recognise_text = "Getting ready…"
+            threading.Thread(target=self._shazam_setup, daemon=True).start()
+        else:
+            self.recognise_text = "Off"
+        self.update()
+
+    def _shazam_setup(self) -> None:
+        """The private Python environment with shazamio (once)."""
+        py = os.path.join(self.SHAZAM_DIR, "bin", "python3")
+        ok = os.path.exists(py) and subprocess.run([py, "-c", "import shazamio"], capture_output=True).returncode == 0
+        if not ok:
+            GLib.idle_add(self._recognise_status, "Installing shazamio (once)…")
+            r = subprocess.run(["python3", "-m", "venv", self.SHAZAM_DIR], capture_output=True, text=True)
+            if r.returncode == 0:
+                r = subprocess.run([py, "-m", "pip", "install", "--quiet", "shazamio"], capture_output=True, text=True,
+                                   timeout=900)
+            ok = r.returncode == 0
+            if not ok:
+                GLib.idle_add(self._recognise_status, "Couldn't install shazamio: "
+                              + ((r.stderr or "").strip().splitlines() or ["?"])[-1][:120])
+                return
+        GLib.idle_add(self._recognise_status, "Ready: songs the stream doesn't name are recognised (Shazam)")
+        GLib.idle_add(self._recognise_tick)
+
+    def _recognise_status(self, text: str) -> bool:
+        self.recognise_text = text
+        self.update()
+        return False
+
+    def _recognise_tick(self) -> bool:
+        if not self.settings.get("recognise", False):
+            self._recognise_id = 0
+            return False
+        if self.station_only() and not self.paused and not self._recognising:
+            self._recognising = True
+            threading.Thread(target=self._recognise, args=(self.stream()[2],), daemon=True).start()
+        if not self._recognise_id:
+            self._recognise_id = GLib.timeout_add_seconds(self.RECOGNISE_S, self._recognise_tick)
+            return False
+        return True
+
+    def _recognise(self, url: str) -> None:
+        clip = os.path.join(tempfile.gettempdir(), f"radio-beat-clip-{os.getpid()}.wav")
+        found = None
+        try:
+            r = subprocess.run([self.enhancer.ffmpeg or "ffmpeg", "-v", "error", "-y", "-t", "12", "-i", url,
+                                "-vn", "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le", clip],
+                               capture_output=True, timeout=40)
+            if r.returncode == 0:
+                r = subprocess.run([os.path.join(self.SHAZAM_DIR, "bin", "python3"), os.path.join(HERE, "recognise.py"),
+                                    clip], capture_output=True, text=True, timeout=60)
+                got = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else {}
+                if got.get("artist") and got.get("title"):
+                    found = (got["artist"], got["title"])
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        finally:
+            try:
+                os.remove(clip)
+            except OSError:
+                pass
+        GLib.idle_add(self._recognised, found)
+
+    def _recognised(self, found) -> bool:
+        self._recognising = False
+        when = time.strftime("%H:%M")
+        if not found:
+            self.recognise_text = f"Ready · {when}: nothing recognised" if self.station_only() else self.recognise_text
+            self.update()
+            return False
+        self.recognise_text = f"Ready · {when}: recognised {found[0]} – {found[1]}"
+        if self.station_only() and found != self._recognised_last:
+            self._recognised_last = found
+            icy = self.icy
+            self.new_title(f"{found[0]} - {found[1]}")  # shown and remembered like a named song
+            self.icy = icy  # the stream's own title stays (a named song next replaces it as usual)
+        self.update()
+        return False
 
     def new_title(self, icy: str):
         self.icy = icy
