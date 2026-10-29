@@ -3410,6 +3410,7 @@ class Window(Adw.ApplicationWindow):
         self.facts = Gtk.Label(wrap=True, xalign=0)  # first release, where it was recorded
         self.facts.add_css_class("facts")
         for w in (self.song, self.artist, self.album, self.facts):
+            w.set_wrap_mode(Pango.WrapMode.WORD_CHAR)  # a long word breaks too: never out over the cover
             self.info.append(w)
 
         controls = Gtk.Box(spacing=12, margin_top=12)
@@ -3686,7 +3687,11 @@ class Window(Adw.ApplicationWindow):
         if (w, h, self.song.get_text()) != self._fit_for:  # a new size or song: everything may fit again
             self._fit_for, self._fit_bad = (w, h, self.song.get_text()), 9.0
         need = self.scrim.measure(Gtk.Orientation.VERTICAL, w)[1]  # natural: what it really takes
-        if need > h and fit > 0.5:
+        cover = self.cover_rect()
+        room = (cover[0] - self.INFO_GAP - 22) if cover and self._wide else None
+        wide_need = self.info.measure(Gtk.Orientation.HORIZONTAL, -1)[0] if room and room >= 120 else 0
+        if wide_need > room if room and room >= 120 else False:  # the song info wider than beside the cover
+            need = h + 1
             self._fit_bad = min(self._fit_bad, fit)
             fit = max(0.5, fit * self.FIT_STEP)
         elif fit < 1.0 and need < h * 0.85 and fit / self.FIT_STEP < self._fit_bad - 1e-6:
