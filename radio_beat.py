@@ -3038,7 +3038,6 @@ class Puddle(GlassCard):
         self.neck = neck
         self.reveal = 0.0
         self.frame = not neck  # the neck is water between the two: no edge of its own
-        self.color = (110, 170, 255, 0.025)  # a trace of water's blue
 
     def _neck_path(self, w: float, h: float):
         """As wide as the button at the top, drawn in at the waist, spreading out into the body below:
@@ -3074,9 +3073,10 @@ class Puddle(GlassCard):
         top = Graphene.Size().init(0, 0) if self.neck else Graphene.Size().init(self.radius, self.radius)
         bot = Graphene.Size().init(bottom, bottom)
         rr.init(Graphene.Rect().init(0, 0, w, vis), top, top, bot, bot)
-        if self.depth:  # it floats over the cover, thick: its shadow (outside the clip below)
-            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, 14, 0, 34)
-            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 3, 0, 7)
+        if self.depth:  # the show card's shadow (outside the clip below)
+            rim = min(self.radius * self.RIM, h / 2, w / 2)
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
         snap.push_rounded_clip(rr)
         GlassCard.do_snapshot(self, snap)
         snap.pop()
@@ -3093,13 +3093,8 @@ class Water:
         behind = [(win.backdrop, 0.45), (win.cover, 0.0)]
         self.neck = Puddle(behind, neck=True, halign=Gtk.Align.START, valign=Gtk.Align.START)
         for g in (self.neck, body):
-            # the show card's glass (the fish-eye, its edges, a shadow below), even all over (not the text
-            # panel's shading, darker at the bottom)
-            g.scrim, g.mag, g.depth, g.tint = None, 1.35, True, 0.08  # clear, not matte
-            # a thick fish-eye lens: the bend gathered at its rounded rim (a curved wall of glass you can see),
-            # the middle magnified; the wall shaded wide, its top edge bright
-            g.band, g.wall, g.reach, g.curve = 0, 2.8, 0.6, 3.2
-            g.shine = g is body
+            # exactly the show card's glass (as HHC's buttons have it): only its size differs
+            g.scrim = win.scrim
             g.add_css_class("puddle")
             g.set_visible(False)
             win.backdrop.watchers.append(g)
@@ -4117,7 +4112,8 @@ class Window(Adw.ApplicationWindow):
         if a.settings.get("font", "beat") == "beat" and a.fonts_ok:
             css += BEAT_CSS
         self.look_css.load_from_data(css.encode())
-        for card in (self.show_card, *self.discs, *self.head_glass):
+        waters = [g for w in getattr(self, "waters", []) for g in (w.body, w.neck)]
+        for card in (self.show_card, *self.discs, *self.head_glass, *waters):
             card.shade = k
             card.queue_draw()
 
