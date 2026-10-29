@@ -282,6 +282,15 @@ def run_update() -> str | None:
 
 # --- song lookup ----------------------------------------------------------------
 
+VERSION_NOTE = re.compile(r"\s*[(\[][^)\]]*\b(remaster(ed)?|mono|stereo|single|version|edit|mix|deluxe|"
+                          r"expanded|anniversary|bonus)\b[^)\]]*[)\]]|\s+-\s+(\d{4}\s+)?remaster(ed)?.*$", re.I)
+
+
+def plain_title(text: str) -> str:
+    """'Paperback Writer (Remastered 2015)' → 'Paperback Writer': the song, not the reissue's note."""
+    return VERSION_NOTE.sub("", text).strip() or text
+
+
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s.lower())
     s = "".join(c for c in s if not unicodedata.combining(c))
@@ -2733,10 +2742,17 @@ class GlassCard(Gtk.Box):
                 # Where it sits before its CSS zoom (the parent's origin): the texture has the zoom in it.
                 ok, p = self._where(view.get_parent())
                 if tex and ok:
-                    # beyond the window's edges too (glass near them bends what lies past them): the same blur
-                    # stretched out under it, so the edge never shows emptiness as a flat gray frame
-                    snap.append_texture(tex, Graphene.Rect().init(p.x - vw * 0.3, p.y - vh * 0.3, vw * 1.6, vh * 1.6))
-                    snap.append_texture(tex, Graphene.Rect().init(p.x, p.y, vw, vh))
+                    # past the window's edges too (glass near them bends what lies beyond): the blur mirrored at
+                    # each edge, seamless (a stretched copy left a seam the lens repeated in rings)
+                    for mx in (-1, 0, 1):
+                        for my in (-1, 0, 1):
+                            # a mirror copy: flipped about the window's edge it touches
+                            snap.save()
+                            snap.translate(Graphene.Point().init(p.x + (2 * vw if mx == 1 else 0),
+                                                                 p.y + (2 * vh if my == 1 else 0)))
+                            snap.scale(-1 if mx else 1, -1 if my else 1)
+                            snap.append_texture(tex, Graphene.Rect().init(0, 0, vw, vh))
+                            snap.restore()
                 continue
             snap.save()
             if view.fit == "contain":
@@ -3106,7 +3122,7 @@ class Water:
         for g in (self.neck, body):
             # exactly the show card's glass (as HHC's buttons have it): only its size differs; its curved edge
             # as deep as the card's (spread over a big panel it would look thin)
-            g.scrim, g.lens_max = win.scrim, 150 * max(1.0, win._scale)
+            g.scrim = win.scrim
             g.add_css_class("puddle")
             g.set_visible(False)
             win.backdrop.watchers.append(g)
@@ -3417,7 +3433,7 @@ class Window(Adw.ApplicationWindow):
         self.facts = Gtk.Label(wrap=True, xalign=0)  # first release, where it was recorded
         self.facts.add_css_class("facts")
         for w in (self.song, self.artist, self.album, self.facts):
-            w.set_wrap_mode(Pango.WrapMode.WORD_CHAR)  # a long word breaks too: never out over the cover
+            w.set_wrap_mode(Pango.WrapMode.WORD)  # between words only: a word too wide shrinks the text instead
             self.info.append(w)
 
         controls = Gtk.Box(spacing=12, margin_top=12)
@@ -3693,14 +3709,22 @@ class Window(Adw.ApplicationWindow):
         fit = self._fit
         if (w, h, self.song.get_text()) != self._fit_for:  # a new size or song: everything may fit again
             self._fit_for, self._fit_bad = (w, h, self.song.get_text()), 9.0
-        need = self.scrim.measure(Gtk.Orientation.VERTICAL, w)[1]  # natural: what it really takes
+        # Where things really are (GTK's estimate of a wrapped text's height came out short): the title's top
+        # below the top bar, the song info's right edge left of the cover.
+        ok_s, sb = self.song.compute_bounds(self)
+        ok_h, hb = self.header.compute_bounds(self)
+        ok_i, ib = self.info.compute_bounds(self)
+        if not (ok_s and ok_h and ok_i):
+            return False
+        top = hb.get_y() + hb.get_height() + 8
         cover = self.cover_rect()
-        room = (cover[0] - self.INFO_GAP - 22) if cover and self._wide else None
-        too_wide = bool(room and room >= 120 and self.info.measure(Gtk.Orientation.HORIZONTAL, -1)[0] > room)
-        if (need > h or too_wide) and fit > 0.85:  # too tall for the window or too wide beside the cover
+        right = (cover[0] - self.INFO_GAP) if cover and self._wide and self.info.get_margin_end() else None
+        over = sb.get_y() < top or (right is not None and ib.get_x() + ib.get_width() > right + 1)
+        slack = sb.get_y() - top
+        if over and fit > 0.55:  # up over the logo, or out over the cover
             self._fit_bad = min(self._fit_bad, fit)
-            fit = max(0.85, fit * self.FIT_STEP)  # never much below its usual size
-        elif not too_wide and fit < 1.6 and need < h * 0.93 and fit / self.FIT_STEP < self._fit_bad - 1e-6:
+            fit = max(0.55, fit * self.FIT_STEP)
+        elif not over and fit < 1.6 and slack > ib.get_height() * 0.12 and fit / self.FIT_STEP < self._fit_bad - 1e-6:
             fit = min(1.6, fit / self.FIT_STEP)  # grows to fill its place
         if fit != self._fit:
             self._fit = fit
@@ -3970,7 +3994,7 @@ class Window(Adw.ApplicationWindow):
         if mode == 0:
             if a.about:
                 info = a.info or {}
-                self._puddle_block(a.badge("NOW PLAYING"), info.get("title") or a.song or "",
+                self._puddle_block(a.badge("NOW PLAYING"), plain_title(info.get("title") or a.song or ""),
                                    a.cz(a.about) + (f"\n{a.cz(a.facts)}" if a.facts else ""))
             while len(self.puddle_items) < 4 and (item := a.next_curiosity()):
                 self.puddle_items.append(item)
@@ -4158,13 +4182,13 @@ class Window(Adw.ApplicationWindow):
     def refresh(self) -> None:
         a = self.app
         info = a.info or {}
-        title = info.get("title") or a.song or "Rádio Beat"
+        title = plain_title(info.get("title") or a.song or "Rádio Beat")
         if title != self.song.get_text() and self.song.get_text():
             self.blink()
         self.song.set_text(title)
         artist = info.get("artist") or a.artist_raw or "První bigbeat u nás"
         self.artist.set_text(artist)
-        self.album.set_text(info.get("album") or "")
+        self.album.set_text(plain_title(info.get("album") or ""))
         self.album.set_visible(bool(info.get("album")))
         self.facts.set_text(a.cz(a.facts))
         self.facts.set_visible(bool(a.facts))
@@ -4306,6 +4330,12 @@ class App(Adw.Application):
         self.update_text = "Not checked yet"
         self.update_ready = False
         self.update_busy = False
+        for name, which in (("info", "info_water"), ("settings", "gear_water")):
+            act = Gio.SimpleAction.new(name, None)
+            act.connect("activate", lambda *_, which=which: self.win and self.win.toggle_water(getattr(self.win, which)))
+            self.add_action(act)
+        self.set_accels_for_action("app.info", ["i"])
+        self.set_accels_for_action("app.settings", ["g"])
         q = Gio.SimpleAction.new("quit", None)
         q.connect("activate", lambda *_: self.quit_all())
         self.add_action(q)
