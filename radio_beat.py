@@ -2429,7 +2429,7 @@ class CoverView(Gtk.Widget):
     picture (the next enhancing step) is redrawn slowly instead, no blur: the
     new detail grows in over the old picture."""
 
-    MORPH_MS = 1600  # a new picture: the old one erodes away
+    MORPH_MS = 4000  # a new picture: the old one erodes away
     ERODE_COLS = 22  # pieces across
     ERODE_FALL = 0.4  # of the whole time a piece takes to fall out of sight
 
@@ -2452,7 +2452,7 @@ class CoverView(Gtk.Widget):
         self._erode_key, self._erode = (id(self.old), id(self.pic), round(w), round(h)), out
         return out
     MORPH_BLUR = 22.0
-    REDRAW_MS = 2600
+    REDRAW_MS = 4000
 
     def __init__(self, fit: str, **kw):
         super().__init__(hexpand=True, vexpand=True, overflow=Gtk.Overflow.HIDDEN, **kw)
@@ -3131,7 +3131,7 @@ class Water:
             # as deep as the card's (spread over a big panel it would look thin)
             g.scrim, g.sharp_bars = win.scrim, True  # what's under it sharp, the bars beside the cover too
             if g is body:  # big glass: its edge a thick rounded wall (the bend there), lit and shaded like one
-                g.curve, g.wall, g.reach, g.shine = 2.6, 2.4, 0.55, True
+                g.curve, g.wall, g.reach, g.shine = 3.0, 2.8, 0.9, True  # a strong bend at the rim: thick
             g.add_css_class("puddle")
             g.set_visible(False)
             win.backdrop.watchers.append(g)
@@ -4803,11 +4803,35 @@ class App(Adw.Application):
             self.show_pics[url] = None
         if self.show_pics[url]:
             self.show_src[url] = data
+            self._enhance_small(url, data)
         self._enhance_show()
         self.update()
         if self.win and self.win.puddle_open:
             self.win.puddle_pics()
         return False
+
+    def _enhance_small(self, url: str, data: bytes) -> None:
+        """A picture in the 'i' panel (a show's, an artist's, a news item's) enhanced like the cover: AI-upscaled
+        to twice its shown size when it's smaller (a sharp picture on any screen), sharpened, denoised;
+        one after another, after the cover and the logo; then it replaces the plain one."""
+        if not self.settings.get("enhance", True):
+            return
+        tex = self.show_pics.get(url)
+        if not tex:
+            return
+        w, h = tex.get_width(), tex.get_height()
+        want = int(TEXT_PT["pic"] * 0.7 * 2 * max(1.0, self.win._scale if self.win else 1.0))
+        f = max(1.0, want / max(1, min(w, h)))
+        size = (round(w * f), round(h * f)) if f >= UPSCALE_FROM else (w, h)
+
+        def done(pic: bytes):
+            try:
+                self.show_pics[url] = Gdk.Texture.new_from_bytes(GLib.Bytes.new(pic))
+            except GLib.Error:
+                return
+            if self.win and self.win.puddle_open:
+                self.win.puddle_pics()
+        self.enhancer.request(f"pic:{url}", url, data, (w, h), size, done, screen=self.screen_px())
 
     def _enhance_show(self) -> None:
         """The show on air's picture, sharpened and denoised (AI-upscaled if
@@ -5233,7 +5257,7 @@ class App(Adw.Application):
             self.win.enhance_note.set_text(self.notes_text())
 
     def _picture_changed(self, text: str, kind: str = "cover") -> None:
-        if kind in ("show", "icon") or (kind == "logo" and self.orig_tex.get("cover")):
+        if kind in ("show", "icon") or kind.startswith("pic:") or (kind == "logo" and self.orig_tex.get("cover")):
             return  # the cover is what's shown
         self.picture_text = text
         self.picture_kind = kind
