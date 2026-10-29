@@ -1854,7 +1854,7 @@ class Enhancer:
             self._used(hit)
             with open(hit, "rb") as f:
                 pic = f.read()
-            self.sizes[kind] = [len(data), len(pic)]
+            self.sizes[kind] = [len(data), None, len(pic)]
             done(pic)
             try:
                 with open(hit[:-4] + ".txt") as f:
@@ -1911,21 +1911,29 @@ class Enhancer:
         self.model = ESR_MODEL_ART if kind in ("logo", "icon") else ESR_MODEL
         same = size == (w0, h0)  # big enough already: no upscaling
         orig = f"original {_size(len(data))}"
-        self.sizes[kind] = [len(data), None]
+        self.sizes[kind] = [len(data), None, None]  # source, fast enhanced (the first step shown), final
         if same:
             scr = f"the {screen[0]}×{screen[1]} px screen" if screen else "the screen"
             head = f"{what}: {w0}×{h0} px ({orig}), no upscaling needed (big enough for {scr})"
         else:
             head = f"{what}: {w0}×{h0} px ({orig}) → {size[0]}×{size[1]} px"
         # The icon master only wants the final picture; everything else shows each step.
-        emit = lambda pic, final=False: (kind != "icon" or final) and GLib.idle_add(lambda: (done(pic), False)[1])
+        sizes = self.sizes
+        def emit(pic, final=False):
+            got = sizes.setdefault(kind, [len(data), None, None])
+            if final:
+                got[2] = len(pic)
+            elif got[1] is None:
+                got[1] = len(pic)
+            if kind != "icon" or final:
+                GLib.idle_add(lambda: (done(pic), False)[1])
         cached = self._cache_path(key, size)
         if os.path.exists(cached):
             if self._jpeg_ok(cached) and self._not_black(cached):  # black ones came from the GPU giving up
                 self._used(cached)
                 with open(cached, "rb") as f:
                     pic = f.read()
-                self.sizes[kind] = [len(data), len(pic)]
+                self.sizes[kind] = [len(data), None, len(pic)]
                 emit(pic, True)
                 try:
                     with open(cached[:-4] + ".txt") as f:
@@ -2086,8 +2094,6 @@ class Enhancer:
         with open(final, "rb") as f:
             pic = f.read()
         steps.append(f"enhanced {_size(len(pic))}")
-        if self.running:
-            self.sizes[self.running[0]] = [self.sizes.get(self.running[0], [0])[0], len(pic)]
         emit(pic, True)
         show("" if cached else " (not cached: tried again next time)")
         if not cached:
@@ -2195,10 +2201,12 @@ class Enhancer:
             pass
 
     def size_text(self, kind: str) -> str:
-        o, e = self.sizes.get(kind, (None, None))
-        if not o:
+        src, fast, final = (self.sizes.get(kind) or [None, None, None])[:3]
+        if not src:
             return ""
-        return f"Size: original {_size(o)} / enhanced {_size(e) if e else '…'}"
+        done = final is not None
+        return (f"Size: source {_size(src)} / fast enhanced {_size(fast) if fast else ('—' if done else '…')} / "
+                f"final enhanced {_size(final) if done else '…'}")
 
     def cache_text(self) -> str:
         if self.cache_used < 0:
