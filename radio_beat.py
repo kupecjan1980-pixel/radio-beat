@@ -485,6 +485,14 @@ def song_facts(artist: str, song: str) -> str:
         places = _places((got or {}).get("relations"))
         if places:
             break
+    if not places:  # the studio is often on the release (the album) rather than on the recording
+        firsts = sorted((rel for r in recs for rel in r.get("releases", []) if rel.get("date")),
+                        key=lambda rel: rel["date"])[:3]
+        for rel in firsts:
+            got = _mb(f"/release/{rel['id']}?inc=place-rels+area-rels&fmt=json")
+            places = _places((got or {}).get("relations"))
+            if places:
+                break
     bits = ([f"Poprvé vydáno {_date(first)}" + (f" {country}" if country else "") + f" ({{ago:{first[:4]}}})"]
             if first else []) + \
            ([f"Nahráno v {' a '.join(places[:2])}"] if places else [])
