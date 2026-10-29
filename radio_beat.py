@@ -3322,7 +3322,7 @@ class Window(Adw.ApplicationWindow):
         scrim = self.scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
                         margin_top=0)
         scrim.add_css_class("scrim")
-        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=90,
+        inner = self.inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=90,
                         margin_bottom=22, margin_start=22, margin_end=22)
         scrim.append(inner)
         # What's on: the show now (picture, name, host) and the next one.
@@ -3647,8 +3647,8 @@ class Window(Adw.ApplicationWindow):
     FIT_STEP = 0.92
 
     def _check_fit(self) -> bool:
-        """In a window, the text, the show card and the buttons shrink until they all fit its height (a long
-        title, a short window), and grow back when there's room."""
+        """The text, the show card and the buttons shrink until they all fit below the top bar (a long title, a
+        short window, full screen too: never up over the logo), and grow back when there's room."""
         self._fit_queued = False
         w, h = self.get_width(), self.get_height()
         if w <= 0 or h <= 0:
@@ -3656,15 +3656,12 @@ class Window(Adw.ApplicationWindow):
         fit = self._fit
         if (w, h, self.song.get_text()) != self._fit_for:  # a new size or song: everything may fit again
             self._fit_for, self._fit_bad = (w, h, self.song.get_text()), 9.0
-        if self.is_fullscreen():
-            fit = 1.0
-        else:
-            need = self.scrim.measure(Gtk.Orientation.VERTICAL, w)[1]  # natural: what it really takes
-            if need > h and fit > 0.5:
-                self._fit_bad = min(self._fit_bad, fit)
-                fit = max(0.5, fit * self.FIT_STEP)
-            elif fit < 1.0 and need < h * 0.85 and fit / self.FIT_STEP < self._fit_bad - 1e-6:
-                fit = min(1.0, fit / self.FIT_STEP)
+        need = self.scrim.measure(Gtk.Orientation.VERTICAL, w)[1]  # natural: what it really takes
+        if need > h and fit > 0.5:
+            self._fit_bad = min(self._fit_bad, fit)
+            fit = max(0.5, fit * self.FIT_STEP)
+        elif fit < 1.0 and need < h * 0.85 and fit / self.FIT_STEP < self._fit_bad - 1e-6:
+            fit = min(1.0, fit / self.FIT_STEP)
         if fit != self._fit:
             self._fit = fit
             self.queue_resize()
@@ -4046,6 +4043,8 @@ class Window(Adw.ApplicationWindow):
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
         self.logo.set_pixel_size(int(34 * f))
+        # the text starts below the top bar (the logo, the buttons), however big they are
+        self.inner.set_margin_top(int(34 * max(1.0, f) + 48))
         for tile in self.head_glass:
             tile.radius = 12 * f
             tile.set_size_request(int(34 * f), int(34 * f))
