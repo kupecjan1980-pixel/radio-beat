@@ -3224,6 +3224,10 @@ class Window(Adw.ApplicationWindow):
         group.add(self.card_row)
         self.picture_row = Adw.ActionRow(title="Picture now", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
         group.add(self.picture_row)
+        self.recognise_row = Adw.SwitchRow(title="Recognise songs (testing)", subtitle_lines=0)
+        self.recognise_row.set_active(self.app.settings.get("recognise", False))
+        self.recognise_row.connect("notify::active", lambda r, _: self.app.set_recognise(r.get_active()))
+        group.add(self.recognise_row)
         if is_kde():
             near = Adw.SwitchRow(title="Open in the corner", subtitle="Bottom right, on the taskbar by the clock (also after full screen)")
             near.set_active(self.app.settings.get("tray_popup", True))
@@ -3234,10 +3238,6 @@ class Window(Adw.ApplicationWindow):
         self.enhance_row.set_active(self.app.settings.get("enhance", True))
         self.enhance_row.connect("notify::active", lambda r, _: self.app.set_enhance(r.get_active()))
         group.add(self.enhance_row)
-        self.recognise_row = Adw.SwitchRow(title="Recognise songs (testing)", subtitle_lines=0)
-        self.recognise_row.set_active(self.app.settings.get("recognise", False))
-        self.recognise_row.connect("notify::active", lambda r, _: self.app.set_recognise(r.get_active()))
-        group.add(self.recognise_row)
         self.npu_row = Adw.SwitchRow(title="Use the NPU (testing)", subtitle=self.app.enhancer.npu_text,
                                      subtitle_lines=0)
         self.npu_row.set_active(self.app.settings.get("npu", False))
