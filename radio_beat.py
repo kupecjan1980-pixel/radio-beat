@@ -3160,6 +3160,8 @@ class Puddle(GlassCard):
         self.neck = neck
         self.reveal = 0.0
         self.frame = not neck  # the neck is water between the two: no edge of its own
+        self.mirror = None  # a widget above it (the top buttons), mirrored on its top
+        self._mirror_paint = None
 
     def _neck_path(self, w: float, h: float):
         """As wide as the button at the top, drawn in at the waist, spreading out into the body below:
@@ -3201,6 +3203,34 @@ class Puddle(GlassCard):
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
         snap.push_rounded_clip(rr)
         GlassCard.do_snapshot(self, snap)
+        if self.mirror is not None:
+            self._reflect(snap, w, vis)
+        snap.pop()
+
+    def _reflect(self, snap, w: float, vis: float) -> None:
+        """The buttons above mirrored faintly on the glass's top, as on polished glass, fading downwards."""
+        src = self.mirror
+        ok, p = src.compute_point(self, Graphene.Point().init(0, 0))
+        sw, sh = src.get_width(), src.get_height()
+        if not ok or sw <= 0 or sh <= 0:
+            return
+        if self._mirror_paint is None:
+            self._mirror_paint = Gtk.WidgetPaintable.new(src)
+            # the buttons change (pumping, ticking): their reflection along
+            self._mirror_paint.connect("invalidate-contents", lambda *_: self.get_mapped() and self.queue_draw())
+        band = min(vis, 70.0)
+        snap.push_mask(Gsk.MaskMode.ALPHA)
+        snap.append_linear_gradient(Graphene.Rect().init(0, 0, w, band), Graphene.Point().init(0, 0),
+                                    Graphene.Point().init(0, band),
+                                    [_stop(0.0, 0, 0, 0, 0.22), _stop(1.0, 0, 0, 0, 0.0)])
+        snap.pop()
+        snap.push_blur(1.5)
+        snap.save()
+        snap.translate(Graphene.Point().init(p.x, -p.y))  # mirrored about the glass's top edge
+        snap.scale(1, -1)
+        self._mirror_paint.snapshot(snap, sw, sh)
+        snap.restore()
+        snap.pop()
         snap.pop()
 
 
@@ -3226,6 +3256,7 @@ class Water:
             win.backdrop.watchers.append(g)
             win.cover.watchers.append(g)
         self.neck.depth = False  # water between the two: no shadow box of its own
+        body.mirror = win.header  # the top buttons reflected on its glass
         # its own scrolling stays its own: not the window's volume
         block = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         block.connect("scroll", lambda *_: True)
@@ -4230,9 +4261,10 @@ class Window(Adw.ApplicationWindow):
             tile.radius = 12 * f
             tile.set_size_request(int(34 * f), int(34 * f))
             btn = tile.get_first_child()
-            if btn is not None:  # square, all of them (the 'i' too)
-                btn.set_size_request(int(34 * f), int(34 * f))
+            if btn is not None:
+                btn.set_size_request(-1, -1)
             tile.queue_draw()
+        GLib.idle_add(self._square_tiles)
         for disc, size in zip(self.discs, (68, 56, 46)):  # pause, stop (a little smaller), speaker (smaller still)
             disc.radius = size * f / 2
             disc.set_size_request(int(size * f), int(size * f))
@@ -4249,6 +4281,19 @@ class Window(Adw.ApplicationWindow):
         self._arrange()
         self._scale_pending = False
         self.queue_resize()  # lays out with the new sizes, then the fit is checked
+        return False
+
+    def _square_tiles(self) -> bool:
+        """The top tiles ('i', gear, close) one size, square: the biggest one's."""
+        side = 0
+        for tile in self.head_glass:
+            for o in (Gtk.Orientation.HORIZONTAL, Gtk.Orientation.VERTICAL):
+                side = max(side, tile.get_first_child().measure(o, -1)[1] if tile.get_first_child() else 0)
+        for tile in self.head_glass:
+            tile.set_size_request(side, side)
+            btn = tile.get_first_child()
+            if btn is not None:
+                btn.set_size_request(side, side)
         return False
 
     def apply_look(self) -> None:
