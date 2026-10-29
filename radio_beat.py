@@ -2492,29 +2492,8 @@ class CoverView(Gtk.Widget):
     picture (the next enhancing step) is redrawn slowly instead, no blur: the
     new detail grows in over the old picture."""
 
-    MORPH_MS = 4000  # a new picture: the old one erodes away
-    ERODE_COLS = 22  # pieces across
-    ERODE_FALL = 0.4  # of the whole time a piece takes to fall out of sight
-
-    def _pieces(self, w: float, h: float) -> list:
-        """This change's pieces: (x, y, width, height, when it comes loose, spin, sideways drift)."""
-        if self._erode_key == (id(self.old), id(self.pic), round(w), round(h)):
-            return self._erode
-        cols = self.ERODE_COLS
-        rows = max(6, round(cols * h / max(w, 1)))
-        pw, ph = w / cols, h / rows
-        seeds = [(random.random() * w, random.random() * h) for _ in range(4)]
-        far = math.hypot(w, h)
-        out = []
-        for j in range(rows):
-            for i in range(cols):
-                cx, cy = (i + 0.5) * pw, (j + 0.5) * ph
-                d = min(math.hypot(cx - sx, cy - sy) for sx, sy in seeds) / far
-                start = min(1 - self.ERODE_FALL, d * 1.1 * (1 - self.ERODE_FALL) + random.uniform(0, 0.12))
-                out.append((i * pw, j * ph, pw, ph, start, random.uniform(-160, 160), random.uniform(-0.6, 0.6)))
-        self._erode_key, self._erode = (id(self.old), id(self.pic), round(w), round(h)), out
-        return out
-    MORPH_BLUR = 22.0
+    MORPH_MS = 4000  # a new picture: the old one morphs into it
+    MORPH_BLUR = 8.0  # a little soft halfway through the morph
     REDRAW_MS = 4000
 
     def __init__(self, fit: str, **kw):
@@ -2527,7 +2506,6 @@ class CoverView(Gtk.Widget):
         self.anim = None
         self.watchers: list = []  # redrawn along (the glass card behind which this shows)
         self._holding = False  # the enhancing waits while this morphs
-        self._erode_key, self._erode = None, []
 
     def set_paintable(self, pic, redraw: bool = False) -> None:
         if pic is self.pic:
@@ -2583,31 +2561,20 @@ class CoverView(Gtk.Widget):
         w, h = self.get_width(), self.get_height()
         if not self.pic or w <= 0 or h <= 0:
             return
-        self.draw(snap, self.pic, w, h)
         if self.old is None or self.t >= 1.0:
+            self.draw(snap, self.pic, w, h)
             return
-        # The old picture erodes like old plaster off a wall: small pieces come loose (spreading from a few
-        # spots), fall down off the screen tumbling, and behind them is the new one.
-        pieces = self._pieces(w, h)
-        for (x, y, pw, ph, start, spin, drift) in pieces:
-            p = (self.t - start) / self.ERODE_FALL
-            if p >= 1.0:
-                continue
-            snap.save()
-            if p > 0:
-                fall = p * p * (h * 1.3 + ph)  # gravity: slow off, then fast, out of sight
-                snap.translate(Graphene.Point().init(x + pw / 2 + drift * p * pw, y + ph / 2 + fall))
-                snap.rotate(spin * p)
-                snap.translate(Graphene.Point().init(-pw / 2, -ph / 2))
-            else:
-                snap.translate(Graphene.Point().init(x, y))
-            snap.push_clip(Graphene.Rect().init(0, 0, pw + 0.6, ph + 0.6))
-            snap.translate(Graphene.Point().init(-x, -y))
-            self.draw(snap, self.old, w, h)
-            if p > 0:  # its broken edge in shade as it goes
-                snap.append_color(_rgba(0, 0, 0, 0.25 * min(1.0, p * 3)), Graphene.Rect().init(x, y, pw + 0.6, ph + 0.6))
+        # The old picture morphs into the new one: a cross-fade, softened a little halfway.
+        blur = self.blur * math.sin(math.pi * self.t)
+        if blur > 0.5:
+            snap.push_blur(blur)
+        snap.push_cross_fade(self.t)
+        self.draw(snap, self.old, w, h)
+        snap.pop()
+        self.draw(snap, self.pic, w, h)
+        snap.pop()
+        if blur > 0.5:
             snap.pop()
-            snap.restore()
 
 
 BACKDROP_BLUR, BACKDROP_SCALE = 36.0, 1.15  # the .backdrop CSS above
