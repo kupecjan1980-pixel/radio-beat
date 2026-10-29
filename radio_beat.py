@@ -2616,6 +2616,7 @@ class GlassCard(Gtk.Box):
         self.cache_lens = True  # the lens drawn from a texture while nothing behind it changes
         self.band = 0  # px: the lens bends only in this band along the edge (thick glass slab); 0: fish-eye
         self.reach = self.FISH_REACH  # how far beyond its edge it shows
+        self.curve = self.FISH_CURVE  # higher: the bend gathers at the rim (a thick glass edge), the middle flatter
         self.shine = False  # a big lens: a curved reflection over it and its rim darker (it reads as a lens)
         self.wall = self.RIM  # the curved side wall's shaded width, in corner radii
         self.pulse_tick = None  # the mouse on it: the magnification breathes, like a magnifier moved up and down
@@ -2857,7 +2858,7 @@ class GlassCard(Gtk.Box):
         steps = max(1, math.ceil((most + abs(self.mag - 1) * max(w, h) / 2) / step))
         for k in range(0, steps + 1):
             bend = 1 - k / steps  # 1 at the edge, 0 in the middle
-            d = lens * (1 - bend ** (1 / self.FISH_CURVE))  # where the curve falls to `bend`
+            d = lens * (1 - bend ** (1 / self.curve))  # where the curve falls to `bend`
             sx, sy = self.mag + (rx - self.mag) * bend, self.mag + (ry - self.mag) * bend
             if k:
                 snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self.radius - d))
@@ -2894,6 +2895,8 @@ class GlassCard(Gtk.Box):
                                         [_stop(0.0, 255, 255, 255, 0.16), _stop(0.5, 255, 255, 255, 0.05),
                                          _stop(1.0, 255, 255, 255, 0.0)])
             snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.28), 0, 0, 6, min(w, h) * 0.12)
+            snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.55), 0, 2.5, 0, 2.5)  # the thick top edge, lit
+            snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.22), 0, -2, 0, 3)  # light out at the bottom edge
         if not self.frame:
             snap.pop()
             return
@@ -3056,9 +3059,9 @@ class Puddle(GlassCard):
         top = Graphene.Size().init(0, 0) if self.neck else Graphene.Size().init(self.radius, self.radius)
         bot = Graphene.Size().init(bottom, bottom)
         rr.init(Graphene.Rect().init(0, 0, w, vis), top, top, bot, bot)
-        if self.depth:  # it floats over the cover: its shadow (outside the clip below)
-            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.5), 0, 8, 0, 24)
-            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.3), 0, 2, 0, 5)
+        if self.depth:  # it floats over the cover, thick: its shadow (outside the clip below)
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, 14, 0, 34)
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 3, 0, 7)
         snap.push_rounded_clip(rr)
         GlassCard.do_snapshot(self, snap)
         snap.pop()
@@ -3078,7 +3081,9 @@ class Water:
             # the show card's glass (the fish-eye, its edges, a shadow below), even all over (not the text
             # panel's shading, darker at the bottom)
             g.scrim, g.mag, g.depth, g.tint = None, 1.35, True, 0.08  # clear, not matte
-            g.band, g.wall, g.reach = 0, GlassCard.RIM, 0.6  # a fish-eye lens, strong enough to read as one
+            # a thick fish-eye lens: the bend gathered at its rounded rim (a curved wall of glass you can see),
+            # the middle magnified; the wall shaded wide, its top edge bright
+            g.band, g.wall, g.reach, g.curve = 0, 2.8, 0.6, 3.2
             g.shine = g is body
             g.add_css_class("puddle")
             g.set_visible(False)
