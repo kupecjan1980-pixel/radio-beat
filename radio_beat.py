@@ -3227,7 +3227,7 @@ class Window(Adw.ApplicationWindow):
         self.update_note.add_css_class("caption")
         box.append(self.update_note)
         # Notes at the bottom: what each picture step runs and on what.
-        self.enhance_note = Gtk.Label(label=self.app.enhancer.notes(), xalign=0, wrap=True,
+        self.enhance_note = Gtk.Label(label=self.app.notes_text(), xalign=0, wrap=True,
                                       max_width_chars=1, hexpand=False, margin_start=12, margin_end=12)
         self.enhance_note.add_css_class("dim-label")
         self.enhance_note.add_css_class("caption")
@@ -4198,7 +4198,7 @@ class App(Adw.Application):
             threading.Thread(target=self._shazam_setup, daemon=True).start()
         else:
             self.recognise_text = "Off"
-        self.update()
+        self._recognise_changed()
 
     def _shazam_setup(self) -> None:
         """The private Python environment with shazamio (once)."""
@@ -4220,8 +4220,20 @@ class App(Adw.Application):
 
     def _recognise_status(self, text: str) -> bool:
         self.recognise_text = text
-        self.update()
+        self._recognise_changed()
         return False
+
+    def _recognise_changed(self) -> None:
+        if self.win:
+            self.win.enhance_note.set_text(self.notes_text())
+        self.update()
+
+    def notes_text(self) -> str:
+        """The gear menu's notes: the picture steps, and what the song recognition did last."""
+        text = self.enhancer.notes()
+        if self.settings.get("recognise", False):
+            text += f"\n• Song recognition (testing): {self.recognise_text}"
+        return text
 
     def _recognise_tick(self) -> bool:
         if not self.settings.get("recognise", False):
@@ -4238,13 +4250,18 @@ class App(Adw.Application):
     def _recognise(self, url: str) -> None:
         clip = os.path.join(tempfile.gettempdir(), f"radio-beat-clip-{os.getpid()}.wav")
         found = None
+        t0 = time.monotonic()
+        took = rec = 0.0
         try:
             r = subprocess.run([self.enhancer.ffmpeg or "ffmpeg", "-v", "error", "-y", "-t", "12", "-i", url,
                                 "-vn", "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le", clip],
                                capture_output=True, timeout=40)
+            rec = time.monotonic() - t0
             if r.returncode == 0:
+                t1 = time.monotonic()
                 r = subprocess.run([os.path.join(self.SHAZAM_DIR, "bin", "python3"), os.path.join(HERE, "recognise.py"),
                                     clip], capture_output=True, text=True, timeout=60)
+                took = time.monotonic() - t1
                 got = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else {}
                 if got.get("artist") and got.get("title"):
                     found = (got["artist"], got["title"])
@@ -4255,16 +4272,18 @@ class App(Adw.Application):
                 os.remove(clip)
             except OSError:
                 pass
-        GLib.idle_add(self._recognised, found)
+        GLib.idle_add(self._recognised, found, rec, took)
 
-    def _recognised(self, found) -> bool:
+    def _recognised(self, found, rec: float = 0.0, took: float = 0.0) -> bool:
         self._recognising = False
         when = time.strftime("%H:%M")
+        how = f"(12 s clip recorded in {_secs(rec)}, Shazam, unofficial API)"
         if not found:
-            self.recognise_text = f"Ready · {when}: nothing recognised" if self.station_only() else self.recognise_text
-            self.update()
+            self.recognise_text = f"{when}: nothing found in {_secs(took)} {how}"
+            self._recognise_changed()
             return False
-        self.recognise_text = f"Ready · {when}: recognised {found[0]} – {found[1]}"
+        self.recognise_text = f"{when}: found {found[0]} – {found[1]} in {_secs(took)} {how}"
+        self._recognise_changed()
         if self.station_only() and found != self._recognised_last:
             self._recognised_last = found
             icy = self.icy
@@ -4510,7 +4529,7 @@ class App(Adw.Application):
     def _enhance_status_changed(self, _text: str) -> None:
         if self.win:
             self.win.enhance_row.set_subtitle(self.enhance_status())
-            self.win.enhance_note.set_text(self.enhancer.notes())
+            self.win.enhance_note.set_text(self.notes_text())
 
     def _picture_changed(self, text: str, kind: str = "cover") -> None:
         if kind in ("show", "icon") or (kind == "logo" and self.orig_tex.get("cover")):
@@ -4535,7 +4554,7 @@ class App(Adw.Application):
     def _npu_checked(self) -> bool:
         if self.win:
             self.win.npu_row.set_subtitle(self.enhancer.npu_text)
-            self.win.enhance_note.set_text(self.enhancer.notes())
+            self.win.enhance_note.set_text(self.notes_text())
         return False
 
     def set_enhance(self, on: bool) -> None:
