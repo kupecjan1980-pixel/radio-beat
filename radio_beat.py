@@ -3046,10 +3046,10 @@ class Water:
         behind = [(win.backdrop, 0.45), (win.cover, 0.0)]
         self.neck = Puddle(behind, neck=True, halign=Gtk.Align.START, valign=Gtk.Align.START)
         for g in (self.neck, body):
-            # even glass all over (not the text panel's shading, darker at the bottom), a thick slab of it:
-            # magnified in the middle, bent hard along its rounded edge, a shaded side wall, a shadow below
-            g.scrim, g.mag, g.depth, g.tint = None, 1.2, True, 0.22
-            g.band, g.wall = 48, 2.2
+            # the show card's glass (the fish-eye, its edges, a shadow below), even all over (not the text
+            # panel's shading, darker at the bottom)
+            g.scrim, g.mag, g.depth, g.tint = None, GlassCard.MAG, True, 0.22
+            g.band, g.wall = 0, GlassCard.RIM
             g.add_css_class("puddle")
             g.set_visible(False)
             win.backdrop.watchers.append(g)
