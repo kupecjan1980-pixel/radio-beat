@@ -3013,8 +3013,9 @@ class Puddle(GlassCard):
 
 class Water:
     """A glass button's water: a neck from the button, then a tall body with what it holds; it flows down
-    when opened and is drawn back up into the button when closed. Beside the cover when there's room (from
-    its edge to the screen's, down to above the volume slider), else under the button; touching none."""
+    when opened and is drawn back up into the button when closed. Over the cover when there's room (from its
+    left edge to the screen's right one, down to above the volume slider), else under the button; touching
+    none."""
 
     def __init__(self, win, tile, body, overlay):
         self.win, self.tile, self.body = win, tile, body
@@ -3063,16 +3064,16 @@ class Water:
         height = int(max(220, min(H * 0.75, H - top - 20)))
         cover = win.cover_rect()
         ok_v, vb = win.vol.compute_bounds(win)
-        beside = bool(cover and W - cover[2] - 2 * gap >= 150)
+        beside = bool(cover and W - cover[0] - 2 * gap >= 150)
         if beside and ok_v and vb.get_y() - gap - top >= 200:
             height = int(vb.get_y() - gap - top)
         if ok_v and vb.get_y() > top:  # never down onto the volume slider
             height = int(min(height, vb.get_y() - gap - top))
         self.body.set_margin_top(int(top))
         self.body.set_margin_end(gap)
-        if beside:  # pinned between the cover's edge and the screen's (its own width would be its text's)
+        if beside:  # from the cover's left edge to the screen's right one (its own width would be its text's)
             self.body.set_halign(Gtk.Align.FILL)
-            self.body.set_margin_start(int(cover[2] + gap))
+            self.body.set_margin_start(int(cover[0] + gap))
             self.body.set_size_request(-1, height)
         else:
             self.body.set_halign(Gtk.Align.END)
