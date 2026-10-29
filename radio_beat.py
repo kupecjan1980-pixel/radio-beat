@@ -782,6 +782,13 @@ class History:
                                    "LIMIT ?", (n,)).fetchall()
         return [r[0] for r in rows]
 
+    def songs(self, n: int = 30) -> list[tuple[str, str]]:
+        """(artist, title) of the songs played lately, newest first (each once)."""
+        with self.lock:
+            rows = self.db.execute("SELECT artist, title, MAX(at) m FROM plays GROUP BY lower(artist), lower(title) "
+                                   "ORDER BY m DESC LIMIT ?", (n,)).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
     def hosts(self) -> list[tuple[str, list[str]]]:
         """Every host seen, the latest first, with their shows."""
         with self.lock:
@@ -3643,6 +3650,7 @@ class App(Adw.Application):
         self.pools: dict[str, dict] = {}  # name -> its Wikipedia article as sentences
         self.orders: dict[str, list] = {}  # name -> its sentences not shown yet (shuffled)
         self.ready = collections.deque()  # mix items made ahead (kind, name, text)
+        self.shown = self._shown_load()  # what the mix showed within the last month
         self._feed = threading.Event()
         threading.Thread(target=self._feeder, daemon=True).start()
         self.db = History(os.path.join(DATA_DIR, "history.db"))
@@ -4200,18 +4208,22 @@ class App(Adw.Application):
         cs = self.BADGES.get(name)
         return name if cs is None else cs[1 if self.settings.get("ostrava", True) else 0]
 
-    # The show card's text turns (about 3 a minute, 180 an hour, hardly ever the same): the song playing once,
-    # then a mix made ahead in the background from whole Wikipedia articles: the artists played lately (from
-    # the history), now and then who's on air (10 %), the station's other hosts (10 %) and the station (5 %);
-    # each source's sentences in a shuffled order, each with another lead-in.
+    # The show card's text turns (about 3 a minute, 180 an hour): the song playing once, then a mix made ahead
+    # in the background from whole Wikipedia articles: 10 % the station, 90 % the artists and songs played
+    # lately (from the history) and now and then the hosts; each source's sentences in a shuffled order, each
+    # with another lead-in, and none shown again within a month (SHOWN).
+    SHOWN = os.path.join(os.path.dirname(FACTS_CACHE), "shown.json")  # sentence -> when it was last shown
+    MONTH = 30 * 86400
     LEADS = {"artist": ("Víte, že… ", "Zajímavost: ", "Mimochodem: ", "Z hudební kroniky: ", "Na okraj: ",
                         "Hrálo se u nás – {n}. ", "Pár slov k interpretovi {n}: ", "K tématu {n}: ",
                         "Ještě něco o {n}: ", "Z historie: "),
              "host": ("U mikrofonu: {n}. ", "Dnes vás provází {n}. ", "Moderuje {n}. ", "Kdo vás teď baví? {n}. "),
              "hosts": ("Z našich moderátorů: {n}. ", "Na Beatu uslyšíte i {n}. ", "Znáte naše hlasy? {n}. ",
                        "Moderátor{a} Beatu {n}: "),
-             "station": ("Něco o nás: ", "Rádio Beat: ", "Víte, kdo vám hraje? ", "Z historie Beatu: ")}
-    BADGE = {"artist": "ZAJÍMAVOST", "host": "U MIKROFONU", "hosts": "NAŠE HLASY", "station": "ON AIR"}
+             "song": ("O písni {n}: ", "Píseň {n}: ", "K písni {n}: ", "Ze zákulisí písně {n}: ", "Víte, že… "),
+             "station": ("Něco o nás: ", "Víte, kdo vám hraje? ", "Z historie Beatu: ", "Víte, že… ")}
+    BADGE = {"artist": "ZAJÍMAVOST", "song": "O PÍSNI", "host": "U MIKROFONU", "hosts": "NAŠE HLASY",
+             "station": "RÁDIO BEAT"}
     READY = 4  # items made ahead
 
     def _set_history(self, past: list[str]) -> bool:
@@ -4247,33 +4259,70 @@ class App(Adw.Application):
             self.pools[name] = wiki_sentences(name, words, langs)
         return self.pools[name]
 
+    def _shown_load(self) -> dict:
+        try:
+            with open(self.SHOWN) as f:
+                shown = json.load(f)
+        except (OSError, ValueError):
+            shown = {}
+        now = time.time()
+        return {k: t for k, t in shown.items() if now - t < self.MONTH}
+
+    def _shown_save(self) -> None:
+        try:
+            with open(self.SHOWN + ".tmp", "w") as f:
+                json.dump(self.shown, f)
+            os.replace(self.SHOWN + ".tmp", self.SHOWN)
+        except OSError:
+            pass
+
     def _make_item(self):
         r = random.random()
         host = self.host
-        if r < 0.05:
+        key = None  # the source's own name (a song's: artist – title)
+        if r < 0.10:
             kind, name, pool = "station", "Rádio Beat", self._pool("Rádio Beat", HOST_WORDS + MUSIC_WORDS)
         elif r < 0.15 and host:
             kind, name, pool = "host", host, self._pool(host, HOST_WORDS)
-        elif r < 0.25:
+        elif r < 0.20:
             others = [n for n, _ in self.db.hosts() if n != host]
             if not others:
                 return None
             name = random.choice(others)
             kind, pool = "hosts", self._pool(name, HOST_WORDS)
+        elif r < 0.45:
+            songs = self.db.songs(30)
+            if not songs:
+                return None
+            artist, name = random.choice(songs)
+            kind, key = "song", f"{artist} – {name}"
+            if key not in self.pools:  # the song's article: only when it names the artist
+                self.pools[key] = wiki_sentences(name, (artist.lower(),))
+            pool = self.pools[key]
         else:
             artists = self.history[-15:]
             if not artists:
                 return None
             name = random.choice(artists)
             kind, pool = "artist", self._pool(name, MUSIC_WORDS)
+        key = key or name
         sents = (pool or {}).get("s") or []
         if not sents:
             return None
-        order = self.orders.get(name)
-        if not order:  # each source's sentences in a shuffled order, all before any comes again
-            order = self.orders[name] = random.sample(range(len(sents)), len(sents))
-        i = order.pop()
-        pick = sents[i:i + 2] if i + 1 < len(sents) and len(sents[i]) + len(sents[i + 1]) < 220 else [sents[i]]
+        order = self.orders.get(key)
+        if not order:  # each source's sentences in a shuffled order
+            order = self.orders[key] = random.sample(range(len(sents)), len(sents))
+        while order:  # none shown within the last month
+            i = order.pop()
+            if sents[i] not in self.shown:
+                break
+        else:
+            return None
+        pick = sents[i:i + 2] if i + 1 < len(sents) and len(sents[i]) + len(sents[i + 1]) < 220 \
+            and sents[i + 1] not in self.shown else [sents[i]]
+        for x in pick:
+            self.shown[x] = time.time()
+        self._shown_save()
         if pool.get("lang") == "en":
             pick = [czech_sentence(x) for x in pick]
             if not all(pick):
@@ -4298,7 +4347,8 @@ class App(Adw.Application):
         if not self.ready:
             return None
         kind, name, text = self.ready.popleft()
-        return self.cz(self.BADGE[kind]), name, self.cz(text), self.logo_tex
+        # the station's badge says it already: no headline beside it
+        return self.cz(self.BADGE[kind]), "" if kind == "station" else name, self.cz(text), self.logo_tex
 
     def _got_facts(self, lid, text):
         if lid == self._lookup_id:
