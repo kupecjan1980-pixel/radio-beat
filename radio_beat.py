@@ -2436,7 +2436,7 @@ CSS = b"""
 .overlay-header .top-logo { border-radius: 8px; margin-left: 4px; }
 .overlay-header button.close-button { color: white; }
 .overlay-header button.info-button { color: white; font-weight: 900; font-size: 1.25em; font-family: serif;
-                                     padding: 0; min-width: 0; }
+                                     padding-left: 0; padding-right: 0; }  /* square, like the gear's */
 .puddle label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
 .puddle .puddle-now label { font-weight: 700; }
 .puddle .boxed-list, .puddle .boxed-list > row { background: rgba(255,255,255,0.04); }
@@ -2988,11 +2988,14 @@ class GlassCard(Gtk.Box):
         most = lens * (self.reach if not self.band else 0.9)
         rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the edge's zoom
         # each ring shifted under a pixel from the next (half a pixel on big glass: its seams would show)
-        step = 2.5 if self.pulse_tick else (0.5 if w * h > 120000 else 1)
+        step = 2.5 if self.pulse_tick else 0.5  # rings half a pixel apart: no ring pattern showing
         steps = max(1, math.ceil((most + abs(self.mag - 1) * max(w, h) / 2) / step))
+        # The bend runs over the outer three quarters only: the middle is one layer, magnified evenly (rings
+        # reaching the middle become thin strips, their seams lines across the glass)
+        depth = lens * 0.75
         for k in range(0, steps + 1):
-            bend = 1 - k / steps  # 1 at the edge, 0 in the middle
-            d = lens * (1 - bend ** (1 / self.curve))  # where the curve falls to `bend`
+            bend = 1 - k / steps  # 1 at the edge, 0 inside
+            d = depth * (1 - bend ** (1 / self.curve))  # where the curve falls to `bend`
             sx, sy = self.mag + (rx - self.mag) * bend, self.mag + (ry - self.mag) * bend
             if k:
                 snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self._ring_r(d, w, h)))
@@ -3429,7 +3432,7 @@ class Window(Adw.ApplicationWindow):
         for child, color, cls in ((close, (227, 5, 26, 0.6), "glass-disc"), (self._settings_button(), None, "glass-head")):
             tile = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER, hexpand=False)
             tile.add_css_class(cls)
-            tile.mag, tile.concave, tile.depth, tile.color, tile.sharp_bars = 1.3, True, False, color, True
+            tile.mag, tile.concave, tile.depth, tile.color = 1.3, True, False, color
             tile.set_homogeneous(True)
             tile.append(child)
             self.backdrop.watchers.append(tile)
@@ -3450,8 +3453,8 @@ class Window(Adw.ApplicationWindow):
         info_btn.add_css_class("info-button")
         info_btn.connect("clicked", lambda *_: self.toggle_puddle())
         tile = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER, hexpand=False)
-        tile.add_css_class("glass-disc")
-        tile.mag, tile.concave, tile.depth, tile.sharp_bars = 1.3, True, False, True
+        tile.add_css_class("glass-head")  # like the gear's tile (no pumping)
+        tile.mag, tile.concave, tile.depth = 1.3, True, False
         tile.set_homogeneous(True)
         tile.append(info_btn)
         self.backdrop.watchers.append(tile)
@@ -3577,7 +3580,7 @@ class Window(Adw.ApplicationWindow):
                              halign=Gtk.Align.CENTER, margin_start=margin)
             disc.add_css_class("glass-disc")
             disc.scrim, disc.mag, disc.concave, disc.depth, disc.color = scrim, 1.3, True, False, color
-            disc.sharp_bars = True  # through a magnifier even the bars beside the cover show sharp
+            # (the bars beside the cover blurred under it, as around it: sharp they made a hard edge in it)
             disc.set_hexpand(False)  # only the slider takes the row's spare width
             disc.set_homogeneous(True)  # the button or icon fills the dish, centred
             disc.append(child)
