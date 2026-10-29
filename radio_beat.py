@@ -683,6 +683,18 @@ def song_about(artist: str, song: str) -> str:
 
 MUSIC_WORDS = ("band", "singer", "musician", "group", "rock", "songwriter", "guitarist", "drummer", "rapper",
                "skupina", "zpěvák", "zpěvačka", "hudeb", "kapela", "písničkář", "kytarist")
+# Artists Rádio Beat plays (classic rock and Czech bigbeat): the mix draws on them until the history has enough
+# of its own (a new install, or the stream sending no song names, as it does at night).
+SEED_ARTISTS = ("Olympic", "Pražský výběr", "Katapult", "Žlutý pes", "Lucie", "Kabát", "Visací zámek",
+                "Blue Effect", "Flamengo", "Synkopy 61", "Michal Prokop", "Vladimír Mišík", "Petr Kalandra",
+                "Led Zeppelin", "Deep Purple", "Pink Floyd", "The Rolling Stones", "The Beatles", "Queen", "AC/DC",
+                "Uriah Heep", "Jethro Tull", "Black Sabbath", "Status Quo", "Smokie", "Nazareth", "Eagles",
+                "Creedence Clearwater Revival", "Dire Straits", "Whitesnake", "Rainbow", "Scorpions", "The Doors",
+                "Jimi Hendrix", "Santana", "ZZ Top", "Alice Cooper", "Cream", "The Who", "Yes", "Genesis",
+                "Free", "Thin Lizzy", "Sweet", "Slade", "T. Rex", "Kiss", "Aerosmith", "Lynyrd Skynyrd",
+                "Golden Earring", "Bob Dylan", "Eric Clapton", "Rory Gallagher", "Manfred Mann's Earth Band")
+SEED_UNTIL = 15  # artists of its own in the history
+
 HOST_WORDS = ("moderátor", "moderátorka", "rozhlas", "radio", "rádio", "presenter", "broadcaster", "dj ", "kritik",
               "critic", "publicist", "novinář", "hudebník", "zpěvák", "zpěvačka", "musician", "singer", "journalist")
 
@@ -4084,8 +4096,10 @@ class App(Adw.Application):
     def _programme_got(self, sched, host):
         if sched:
             self.schedule = sched
+        cur, _ = on_air(self.schedule, time.localtime())
+        if host and cur and norm(host) == norm(cur["title"]):
+            host = None  # the site names the show there when nobody's on air: not a host
         if host:
-            cur, _ = on_air(self.schedule, time.localtime())
             self.db.host(host, cur["title"] if cur else None)
         if host and host != self.host:
             self.host, self.host_about = host, ""
@@ -4292,17 +4306,16 @@ class App(Adw.Application):
             kind, pool = "hosts", self._pool(name, HOST_WORDS)
         elif r < 0.45:
             songs = self.db.songs(30)
-            if not songs:
-                return None
+        if 0.20 <= r < 0.45 and songs:
             artist, name = random.choice(songs)
             kind, key = "song", f"{artist} – {name}"
             if key not in self.pools:  # the song's article: only when it names the artist
                 self.pools[key] = wiki_sentences(name, (artist.lower(),))
             pool = self.pools[key]
-        else:
+        elif r >= 0.20:
             artists = self.history[-15:]
-            if not artists:
-                return None
+            if len(self.history) < SEED_UNTIL:
+                artists = artists + list(SEED_ARTISTS)
             name = random.choice(artists)
             kind, pool = "artist", self._pool(name, MUSIC_WORDS)
         key = key or name
