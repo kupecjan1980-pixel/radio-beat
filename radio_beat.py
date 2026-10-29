@@ -987,6 +987,12 @@ def on_air(schedule: dict[int, list[dict]], now: time.struct_time) -> tuple[dict
 
 # --- mpv ------------------------------------------------------------------------
 
+def _killed_with_parent() -> None:
+    # SIGKILL, not SIGTERM: an enhancing step may be stopped (SIGSTOP, while something animates), and a stopped
+    # process never acts on SIGTERM: it was left behind holding GPU memory
+    ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)
+
+
 def _die_with_parent() -> None:
     # PR_SET_PDEATHSIG: mpv stops even if the app is killed instead of quit.
     ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)
@@ -1645,7 +1651,7 @@ class Enhancer:
     def _spawn(self, cmd: list) -> subprocess.Popen:
         # ends with the app (it may be stopped by the duty cycle: it would wait for good)
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-                                preexec_fn=_die_with_parent)
+                                preexec_fn=_killed_with_parent)
         with self.plock:
             self.procs.add(proc)
             if self.held:
@@ -2835,7 +2841,7 @@ class GlassCard(Gtk.Box):
         lens = min(h / 2, w / 2)
         most = lens * self.reach * 0.35
         rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)
-        steps = max(1, math.ceil(most / 0.5))
+        steps = max(1, math.ceil(most / 1.5))  # coarser than the background's: text hides the steps
         cx, cy = w / 2, h / 2
         def ring(d: float):
             return self._rounded(d, d, w - 2 * d, h - 2 * d, self._ring_r(d, w, h))
@@ -2871,7 +2877,8 @@ class GlassCard(Gtk.Box):
             snap.scale(1 + self.lift, 1 + self.lift)
             snap.translate(Graphene.Point().init(-w / 2, -h / 2))
         self.draw_glass(snap)
-        if self.warp_content and self.get_width() > 0 and self.get_height() > 0:
+        if self.warp_content and getattr(self, "reveal", 1.0) >= 1.0 and self.get_width() > 0 and self.get_height() > 0:
+            # (bent once it's open: while it flows, the content as it is, light)
             self._warped_children(snap, self.get_width(), self.get_height())
         else:
             Gtk.Box.do_snapshot(self, snap)
