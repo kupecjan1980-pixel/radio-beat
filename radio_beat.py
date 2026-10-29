@@ -2712,6 +2712,13 @@ class GlassCard(Gtk.Box):
                     snap.save()
                     snap.translate(p)
                     snap.translate(Graphene.Point().init(vw / 2, vh / 2))
+                    snap.scale(BACKDROP_SCALE * 1.3, BACKDROP_SCALE * 1.3)  # past the window's edges too
+                    snap.translate(Graphene.Point().init(-vw / 2, -vh / 2))
+                    view.draw(snap, pic, vw, vh)
+                    snap.restore()
+                    snap.save()
+                    snap.translate(p)
+                    snap.translate(Graphene.Point().init(vw / 2, vh / 2))
                     snap.scale(BACKDROP_SCALE, BACKDROP_SCALE)
                     snap.translate(Graphene.Point().init(-vw / 2, -vh / 2))
                     view.draw(snap, pic, vw, vh)
@@ -2726,6 +2733,9 @@ class GlassCard(Gtk.Box):
                 # Where it sits before its CSS zoom (the parent's origin): the texture has the zoom in it.
                 ok, p = self._where(view.get_parent())
                 if tex and ok:
+                    # beyond the window's edges too (glass near them bends what lies past them): the same blur
+                    # stretched out under it, so the edge never shows emptiness as a flat gray frame
+                    snap.append_texture(tex, Graphene.Rect().init(p.x - vw * 0.3, p.y - vh * 0.3, vw * 1.6, vh * 1.6))
                     snap.append_texture(tex, Graphene.Rect().init(p.x, p.y, vw, vh))
                 continue
             snap.save()
