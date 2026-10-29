@@ -3566,7 +3566,8 @@ class Window(Adw.ApplicationWindow):
                               subtitle="How much the panels behind the text darken the cover", subtitle_lines=0)
         self.shade_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
         self.shade_scale.set_value(self.app.settings.get("shade", 100))
-        self.shade_scale.set_size_request(110, -1)
+        self.shade_scale.set_size_request(220, -1)  # the menu is wide now: room for a slider you can see
+        self.shade_scale.set_hexpand(True)
         self.shade_scale.set_valign(Gtk.Align.CENTER)
         self.shade_scale.set_draw_value(True)
         self.shade_scale.set_value_pos(Gtk.PositionType.LEFT)
