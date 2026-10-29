@@ -14,6 +14,7 @@ Stop quits. Started at login (--autostart) it plays with only the tray icon.
 import collections
 import ctypes
 import glob
+import html
 import json
 import math
 import os
@@ -874,6 +875,25 @@ DAYS = ["pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota", "ned�
 def _text(html: str) -> str:
     import html as h
     return " ".join(h.unescape(re.sub(r"<[^>]+>", " ", html)).split())
+
+
+def parse_news(page: str) -> list[dict]:
+    """radiobeat.cz's news (/cs/clanky/1): [{title, date, text, img, url}], newest first."""
+    out = []
+    for chunk in page.split('class="article-list__item"')[1:]:
+        title = re.search(r'class="article-list__title"[^>]*>(.*?)</h2>', chunk, re.S)
+        date = re.search(r'class="article-list__meta">\s*([^<]+?)\s*<', chunk)
+        img = re.search(r'data-src="([^"]+)"', chunk)
+        desc = re.search(r'class="article-list__desc">(.*?)</div>', chunk, re.S)
+        url = re.search(r'href="(/cs/1/[^"]+)"', chunk)
+        clean = lambda h: html.unescape(re.sub(r"<[^>]+>", " ", h)).strip()
+        if title:
+            out.append({"title": re.sub(r"\s+", " ", clean(title.group(1))),
+                        "date": date.group(1).strip() if date else "",
+                        "text": re.sub(r"\s+", " ", clean(desc.group(1))) if desc else "",
+                        "img": SITE + img.group(1).replace("/media/250/", "/media/500/") if img else "",
+                        "url": SITE + url.group(1) if url else ""})
+    return out
 
 
 def parse_schedule(page: str) -> dict[int, list[dict]]:
@@ -3717,7 +3737,7 @@ class Window(Adw.ApplicationWindow):
         return False
 
     # --- the 'i' button's puddle: programme and curiosities ------------------------------------------
-    PUDDLE_MODES = ("ZAJÍMAVOSTI", "DNES", "ZÍTRA", "POZÍTŘÍ")
+    PUDDLE_MODES = ("ZAJÍMAVOSTI", "AKTUALITY", "DNES", "ZÍTRA", "POZÍTŘÍ")
     PUDDLE_SPEED = 7  # px a second the curiosities scroll by themselves
 
     def cover_rect(self):
@@ -3752,7 +3772,7 @@ class Window(Adw.ApplicationWindow):
                              valign=Gtk.Align.START)
         # The views as tabs (a click), and the wheel's button goes to the next one.
         self.puddle_head = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6, row_spacing=6,
-                                       min_children_per_line=1, max_children_per_line=4, margin_start=14,
+                                       min_children_per_line=1, max_children_per_line=5, margin_start=14,
                                        margin_top=12, margin_end=14)  # they wrap when it's narrow
         self.puddle_tabs = []
         for i in range(len(self.PUDDLE_MODES)):
@@ -3843,7 +3863,8 @@ class Window(Adw.ApplicationWindow):
             self.puddle_list.remove(c)
         self.puddle_scroll.get_vadjustment().set_value(0)
 
-    def _puddle_block(self, badge: str, title: str, text: str, now: bool = False, img: str | None = None) -> None:
+    def _puddle_block(self, badge: str, title: str, text: str, now: bool = False, img: str | None = None,
+                      url: str = "") -> None:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         if img is not None:  # a show: its picture beside its lines
             row = Gtk.Box(spacing=12)
@@ -3877,6 +3898,12 @@ class Window(Adw.ApplicationWindow):
             box.append(body)
         if now:
             outer.add_css_class("puddle-now")
+        if url:  # a news item: the whole article in the browser
+            click = Gtk.GestureClick()
+            click.connect("released", lambda *_: Gtk.UriLauncher.new(url).launch(self, None, None, None))
+            outer.add_controller(click)
+            outer.set_cursor_from_name("pointer")
+            outer.set_tooltip_text("Celý článek na radiobeat.cz")
         self.puddle_list.append(outer)
 
     def puddle_pics(self) -> None:
@@ -3915,7 +3942,14 @@ class Window(Adw.ApplicationWindow):
             for item in self.puddle_items:  # under ZAJÍMAVOSTI: just the name, the picture beside
                 self._puddle_block("", item[1] or "Rádio Beat", item[2], img=item[3] if len(item) > 3 else "")
             return
-        day = (now.tm_wday + mode - 1) % 7
+        if mode == 1:  # the station's news: a click opens the article
+            if not a.news:
+                self._puddle_block("", "", a.cz("Aktuality se načítají…"))
+            for item in a.news:
+                self._puddle_block(item["date"], item["title"], a.cz(item["text"]), img=item["img"],
+                                   url=item["url"])
+            return
+        day = (now.tm_wday + mode - 2) % 7
         mins = now.tm_hour * 60 + now.tm_min
         cur, _ = on_air(a.schedule, now)
         shows = a.schedule.get(day) or []
@@ -3923,7 +3957,7 @@ class Window(Adw.ApplicationWindow):
             self._puddle_block("", "", a.cz("Program pro tento den zatím není."))
         for show in shows:
             when = f'{show["start"] // 60}:{show["start"] % 60:02d}'
-            is_now = mode == 1 and cur is not None and show is cur
+            is_now = mode == 2 and cur is not None and show is cur
             self._puddle_block(when, show["title"], a.cz(show.get("desc") or ""), now=is_now, img=show.get("img") or "")
 
     def _puddle_scroll_step(self, _w, clock) -> bool:
@@ -4172,6 +4206,7 @@ class App(Adw.Application):
         self.show_done: set[str] = set()  # show pictures sent for enhancing
         self.codec = self.bitrate = None
         self.facts = ""  # first release, where it was recorded
+        self.news: list[dict] = []  # radiobeat.cz's news (AKTUALITY in the 'i' panel)
         self.about = ""  # a few sentences about the song (Wikipedia)
         self.song_shown = False  # its turn came already (then the mix)
         self.history: list[str] = []  # artists played lately (oldest first, the newest last)
@@ -4612,10 +4647,24 @@ class App(Adw.Application):
                 sched = parse_schedule(page.decode("utf-8", "replace")) if page else None
             page = fetch(SITE + "/")
             host = parse_host(page.decode("utf-8", "replace")) if page else None
-            GLib.idle_add(self._programme_got, sched, host)
+            news = None
+            if not host_only:  # the homepage's newest and the news page's, newest first (each once)
+                news = parse_news(page.decode("utf-8", "replace")) if page else []
+                more = fetch(SITE + "/cs/clanky/1")
+                news += parse_news(more.decode("utf-8", "replace")) if more else []
+                seen, merged = set(), []
+                for item in news:
+                    if item["url"] not in seen:
+                        seen.add(item["url"])
+                        merged.append(item)
+                num = lambda i: int((re.search(r"/cs/1/(\d+)/", i["url"]) or [0, 0])[1])
+                news = sorted(merged, key=num, reverse=True)[:30]
+            GLib.idle_add(self._programme_got, sched, host, news)
         threading.Thread(target=work, daemon=True).start()
 
-    def _programme_got(self, sched, host):
+    def _programme_got(self, sched, host, news=None):
+        if news:
+            self.news = news
         if sched:
             self.schedule = sched
         cur, _ = on_air(self.schedule, time.localtime())
