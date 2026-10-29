@@ -350,7 +350,7 @@ def lookup(artist: str, song: str) -> dict | None:
 MB = "https://musicbrainz.org/ws/2"
 MB_UA = "RadioBeat/1.0 ( https://github.com/kupecjan1980-pixel/radio-beat )"  # MusicBrainz wants a real one
 FACTS_CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat",
-                           "facts-cs.json")
+                           "facts-cs2.json")
 _mb_lock = threading.Lock()
 _mb_last = [0.0]
 MONTHS = ("ledna", "února", "března", "dubna", "května", "června", "července", "srpna", "září", "října",
@@ -388,6 +388,23 @@ def _date(d: str) -> str:
     except (ValueError, IndexError):
         pass
     return parts[0]
+
+
+# Where a release came out: "vydáno ve Velké Británii" (MusicBrainz's country codes).
+COUNTRY_IN = {"GB": "ve Velké Británii", "US": "v USA", "XC": "v Československu", "CS": "v Československu",
+              "CZ": "v Česku", "SK": "na Slovensku", "DE": "v Německu", "XG": "v Německu", "FR": "ve Francii",
+              "IT": "v Itálii", "NL": "v Nizozemsku", "SE": "ve Švédsku", "AU": "v Austrálii", "CA": "v Kanadě",
+              "JP": "v Japonsku", "IE": "v Irsku", "PL": "v Polsku", "HU": "v Maďarsku", "AT": "v Rakousku",
+              "XE": "v Evropě", "XW": "po celém světě", "DK": "v Dánsku", "NO": "v Norsku", "FI": "ve Finsku",
+              "ES": "ve Španělsku", "BE": "v Belgii", "CH": "ve Švýcarsku", "SU": "v Sovětském svazu"}
+
+
+def years_ago(text: str) -> str:
+    """'{ago:1971}' → 'před 55 lety' (worked out when shown, so it stays right)."""
+    def ago(m):
+        n = time.localtime().tm_year - int(m.group(1))
+        return "letos" if n <= 0 else "před rokem" if n == 1 else f"před {n} lety"
+    return re.sub(r"\{ago:(\d{4})\}", ago, text)
 
 
 def _places(rels: list) -> list[str]:
@@ -440,6 +457,15 @@ def song_facts(artist: str, song: str) -> str:
         recs += older
     dates = sorted(r["first-release-date"] for r in recs if r.get("first-release-date"))
     first = dates[0] if dates else ""
+    # Where that first release came out (the release carrying the earliest date).
+    country = ""
+    for r in recs:
+        for rel in r.get("releases", []):
+            if first and rel.get("date") == first and rel.get("country") in COUNTRY_IN:
+                country = COUNTRY_IN[rel["country"]]
+                break
+        if country:
+            break
     # Where: the oldest plain recordings first (not a demo or a live one).
     places = []
     for r in sorted(recs, key=lambda r: (bool(r.get("disambiguation")), r.get("first-release-date") or "9999"))[:3]:
@@ -447,7 +473,8 @@ def song_facts(artist: str, song: str) -> str:
         places = _places((got or {}).get("relations"))
         if places:
             break
-    bits = ([f"Poprvé vydáno {_date(first)}"] if first else []) + \
+    bits = ([f"Poprvé vydáno {_date(first)}" + (f" {country}" if country else "") + f" ({{ago:{first[:4]}}})"]
+            if first else []) + \
            ([f"Nahráno v {' a '.join(places[:2])}"] if places else [])
     text = " · ".join(bits)
     cache[key] = text
@@ -1354,6 +1381,10 @@ FFMPEG_URL = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-sta
 DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat")
 UPSCALED_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat", "upscaled")
 UPSCALE_FROM = 1.05
+def _size(n: int) -> str:
+    return f"{n / 1e6:.1f} MB" if n >= 1e5 else f"{n / 1e3:.0f} kB"
+
+
 # The cache (this computer's own disk) may take 80 % of the space it could have (the free space plus what it
 # already takes), never leaving under 2 GB free; the oldest pictures go first.
 UPSCALED_SHARE = 0.8
@@ -1429,6 +1460,8 @@ class Enhancer:
         self.procs: set = set()
         self.held = False
         self.held_at = 0.0
+        self.cache_used = self.cache_allowed = -1  # bytes (counted at start, then kept up to date)
+        threading.Thread(target=self._trim, daemon=True).start()
         # NPU (testing, off unless switched on): AMD XDNA through ONNX Runtime's Vitis AI provider.
         self.npu_wanted = False
         self.npu_ready = False  # driver, runtime and a model all found
@@ -1819,7 +1852,8 @@ class Enhancer:
         if kind != "icon" and os.path.exists(hit) and self._jpeg_ok(hit) and self._not_black(hit):
             self._used(hit)
             with open(hit, "rb") as f:
-                done(f.read())
+                pic = f.read()
+            done(pic)
             try:
                 with open(hit[:-4] + ".txt") as f:
                     steps = f.read().strip()
@@ -1827,8 +1861,8 @@ class Enhancer:
                 steps = "enhanced"
             what = {"cover": "Cover", "logo": "Logo"}.get(kind, "Show picture")
             if self.on_picture:
-                self.on_picture(f"{what}: {src_size[0]}×{src_size[1]} px → {size[0]}×{size[1]} px, {steps} "
-                                "(from the cache)", kind)
+                self.on_picture(f"{what}: {src_size[0]}×{src_size[1]} px (original {_size(len(data))}) → "
+                                f"{size[0]}×{size[1]} px, {steps}; enhanced {_size(len(pic))} (from the cache)", kind)
             self.drop(kind)
             return
         self.jobs[kind] = (key, data, src_size, size, done, screen)
@@ -1874,11 +1908,12 @@ class Enhancer:
         what = {"cover": "Cover", "logo": "Logo"}.get(kind, "Show picture")
         self.model = ESR_MODEL_ART if kind in ("logo", "icon") else ESR_MODEL
         same = size == (w0, h0)  # big enough already: no upscaling
+        orig = f"original {_size(len(data))}"
         if same:
             scr = f"the {screen[0]}×{screen[1]} px screen" if screen else "the screen"
-            head = f"{what}: {w0}×{h0} px, no upscaling needed (big enough for {scr})"
+            head = f"{what}: {w0}×{h0} px ({orig}), no upscaling needed (big enough for {scr})"
         else:
-            head = f"{what}: {w0}×{h0} px → {size[0]}×{size[1]} px"
+            head = f"{what}: {w0}×{h0} px ({orig}) → {size[0]}×{size[1]} px"
         # The icon master only wants the final picture; everything else shows each step.
         emit = lambda pic, final=False: (kind != "icon" or final) and GLib.idle_add(lambda: (done(pic), False)[1])
         cached = self._cache_path(key, size)
@@ -1886,13 +1921,14 @@ class Enhancer:
             if self._jpeg_ok(cached) and self._not_black(cached):  # black ones came from the GPU giving up
                 self._used(cached)
                 with open(cached, "rb") as f:
-                    emit(f.read(), True)
+                    pic = f.read()
+                emit(pic, True)
                 try:
                     with open(cached[:-4] + ".txt") as f:
                         steps = f.read().strip()
                 except OSError:
                     steps = "enhanced"
-                self._picture(f"{head}, {steps} (from the cache)")
+                self._picture(f"{head}, {steps}; enhanced {_size(len(pic))} (from the cache)")
                 return
             os.remove(cached)
         work = tempfile.mkdtemp(prefix="radio-beat-esr-")
@@ -2045,6 +2081,7 @@ class Enhancer:
         steps.append(f"denoised {where} in {_secs(time.monotonic() - t)}")
         with open(final, "rb") as f:
             pic = f.read()
+        steps.append(f"enhanced {_size(len(pic))}")
         emit(pic, True)
         show("" if cached else " (not cached: tried again next time)")
         if not cached:
@@ -2053,6 +2090,7 @@ class Enhancer:
         with open(cached + ".part", "wb") as f:
             f.write(pic)
         os.replace(cached + ".part", cached)
+        self.cache_used += len(pic)
         with open(cached[:-4] + ".txt", "w") as f:
             f.write(", ".join(steps))
         self._trim()
@@ -2150,6 +2188,12 @@ class Enhancer:
         except OSError:
             pass
 
+    def cache_text(self) -> str:
+        if self.cache_used < 0:
+            return "Cache: counting…"
+        return (f"Cache: {self.cache_used / 2**30:.2f} GB used of {self.cache_allowed / 2**30:.0f} GB set aside "
+                f"(80 % of the free space, on this computer)")
+
     def _trim(self) -> None:
         """When the cache is full: the least used pictures go first (shown the fewest times), and of those the
         one not shown for the longest."""
@@ -2167,10 +2211,12 @@ class Enhancer:
         used = sum(sizes.values())
         allowed = min(UPSCALED_SHARE * (free + used), free + used - UPSCALED_MIN_FREE)
         gone = False
+        self.cache_used, self.cache_allowed = used, int(max(0, allowed))
         for f in files:  # least used first
             if used <= allowed:
                 break
             used -= sizes.get(f, 0)
+            self.cache_used = used
             uses.pop(os.path.basename(f), None)
             gone = True
             for p in (f, f[:-4] + ".txt"):
@@ -3166,7 +3212,8 @@ class Window(Adw.ApplicationWindow):
         self.enhance_row.set_active(self.app.settings.get("enhance", True))
         self.enhance_row.connect("notify::active", lambda r, _: self.app.set_enhance(r.get_active()))
         group.add(self.enhance_row)
-        self.picture_row = Adw.ActionRow(title="Picture now", subtitle=self.app.picture_text, subtitle_lines=0)
+        self.picture_row = Adw.ActionRow(title="Picture now", subtitle=f"{self.app.picture_text}\n"
+                                         f"{self.app.enhancer.cache_text()}", subtitle_lines=0)
         group.add(self.picture_row)
         self.recognise_row = Adw.SwitchRow(title="Recognise songs (testing)", subtitle_lines=0)
         self.recognise_row.set_active(self.app.settings.get("recognise", False))
@@ -4336,6 +4383,7 @@ class App(Adw.Application):
 
     def cz(self, text: str) -> str:
         """Czech as shown: in ostravština unless that's switched off ('Víte, že…' becomes 'Viš co?')."""
+        text = years_ago(text)
         if not self.settings.get("ostrava", True):
             return text
         if text.startswith("Víte, že… "):
@@ -4536,7 +4584,7 @@ class App(Adw.Application):
             return  # the cover is what's shown
         self.picture_text = text
         if self.win:
-            self.win.picture_row.set_subtitle(text)
+            self.win.picture_row.set_subtitle(f"{text}\n{self.enhancer.cache_text()}")
 
     def set_npu(self, on: bool) -> None:
         """AI upscaling on the NPU first (testing): checks what's there, says so in the menu."""
