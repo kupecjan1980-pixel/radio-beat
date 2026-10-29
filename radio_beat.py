@@ -11,6 +11,7 @@ icon in the bar's tray (StatusNotifierItem) that shows the window again;
 Stop quits. Started at login (--autostart) it plays with only the tray icon.
 """
 
+import collections
 import ctypes
 import glob
 import json
@@ -470,7 +471,7 @@ ABOUT_CACHE = os.path.join(os.path.dirname(FACTS_CACHE), "about-cs.json")
 def to_czech(text: str) -> str:
     """English → Czech through MyMemory (a free translation service: the text is sent there); '' if it can't."""
     out, chunk = [], ""
-    for sentence in re.split(r"(?<=[.!?])\s+", text):
+    for sentence in sentences(text):
         if len(chunk) + len(sentence) > 450 and chunk:
             out.append(chunk)
             chunk = ""
@@ -512,13 +513,125 @@ def _wiki(url: str):
         return json.load(r)
 
 
+# Czech and English abbreviations a sentence doesn't end at (tzv. jazz, St. Louis); a number before the dot is
+# a date or an order (1. května 1997, 60. let) and doesn't end one either.
+ABBR = {"tzv", "např", "resp", "atd", "apod", "tj", "mj", "str", "č", "čs", "sv", "st", "ing", "mgr", "dr", "prof",
+        "nar", "zem", "ml", "jr", "sr", "mr", "mrs", "ms", "vs", "feat", "no", "vol", "op", "ca", "inc", "ltd",
+        "co", "mt", "jan", "feb", "aug", "sept", "oct", "nov", "dec", "angl", "něm", "fr", "lat", "pozn", "srov"}
+
+
+def sentences(text: str) -> list[str]:
+    out, start = [], 0
+    for m in re.finditer(r"[.!?…][\"“”»)]?\s+(?=[„\"“«(]?[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ0-9])", text):
+        if text[m.start()] == ".":
+            last = re.search(r"(\S+)$", text[start:m.start()])
+            w = last.group(1).lower().strip("(„\"“") if last else ""
+            if w.isdigit() or w in ABBR or (len(w) == 1 and w.isalpha()) or re.fullmatch(r"[ivxlc]+", w):
+                continue
+        out.append(text[start:m.start() + 1].strip())
+        start = m.end()
+    if text[start:].strip():
+        out.append(text[start:].strip())
+    return out
+
+
 def _trim_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= ABOUT_LEN:
-        return text
-    cut = text[:ABOUT_LEN]
-    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
-    return cut[:end + 1] if end > 80 else cut[:cut.rfind(" ")] + "…"
+    out = ""
+    for sentence in sentences(text):
+        if len(out) + len(sentence) + 1 > ABOUT_LEN:
+            break
+        out = f"{out} {sentence}".strip()
+    return out or text[:ABOUT_LEN].rsplit(" ", 1)[0] + "…"
+
+
+ARTICLE_END = ("Reference", "Odkazy", "Externí odkazy", "Související články", "Literatura", "Poznámky",
+               "See also", "References", "External links", "Further reading", "Notes", "Bibliography")
+
+
+def wiki_sentences(name: str, words: tuple, langs=("cs", "en")) -> dict:
+    """Everything the Wikipedia article named after `name` says, as sentences (for the show card's mix):
+    {"lang": "cs" | "en", "s": [...]}, Czech first; {} when there's no such article. Remembered."""
+    key = f"sent|{norm(name)}"
+    try:
+        with open(ABOUT_CACHE) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    if key in cache:
+        return cache[key]
+    n, found, reached = norm(name), {}, False
+    for lang in langs:
+        try:
+            hits = _wiki(f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search"
+                         f"&srsearch={urllib.parse.quote(name)}&format=json&srlimit=10")["query"]["search"]
+            reached = True
+            for hit in hits:
+                if norm(re.sub(r"\(.*?\)", "", hit["title"])) != n:
+                    continue
+                q = urllib.parse.quote(hit["title"])
+                pages = _wiki(f"https://{lang}.wikipedia.org/w/api.php?action=query&prop=extracts|pageprops"
+                              f"&explaintext=1&exsectionformat=plain&redirects=1&titles={q}&format=json")
+                page = next(iter(pages["query"]["pages"].values()))
+                if "disambiguation" in (page.get("pageprops") or {}):
+                    continue
+                text = page.get("extract", "")
+                if not any(w in text[:1500].lower() for w in words):
+                    continue
+                kept = []
+                for line in text.split("\n"):
+                    line = line.strip()
+                    if line in ARTICLE_END:
+                        break
+                    if len(line) > 60 and "." in line:  # a paragraph (not a heading or a list item)
+                        kept += [x for x in sentences(line) if 40 <= len(x) <= 260]
+                if kept:
+                    found = {"lang": lang, "s": kept[:200]}
+                    break
+        except (OSError, ValueError, KeyError, StopIteration):
+            continue
+        if found:
+            break
+    if not reached:
+        return {}
+    cache[key] = found
+    try:
+        os.makedirs(os.path.dirname(ABOUT_CACHE), exist_ok=True)
+        with open(ABOUT_CACHE + ".tmp", "w") as f:
+            json.dump(cache, f)
+        os.replace(ABOUT_CACHE + ".tmp", ABOUT_CACHE)
+    except OSError:
+        pass
+    return found
+
+
+TRANSLATED = os.path.join(os.path.dirname(FACTS_CACHE), "translated-cs.json")
+_translate_off = [0.0]  # MyMemory's free daily limit reached: until when
+
+
+def czech_sentence(text: str) -> str:
+    """One English sentence in Czech (remembered); '' when MyMemory's free daily limit is used up."""
+    try:
+        with open(TRANSLATED) as f:
+            done = json.load(f)
+    except (OSError, ValueError):
+        done = {}
+    if text in done:
+        return done[text]
+    if time.time() < _translate_off[0]:
+        return ""
+    cs = to_czech(text)
+    if not cs:
+        _translate_off[0] = time.time() + 3600  # try again in an hour
+        return ""
+    done[text] = cs
+    try:
+        with open(TRANSLATED + ".tmp", "w") as f:
+            json.dump(done, f)
+        os.replace(TRANSLATED + ".tmp", TRANSLATED)
+    except OSError:
+        pass
+    return cs
 
 
 def song_about(artist: str, song: str) -> str:
@@ -3527,10 +3640,13 @@ class App(Adw.Application):
         self.about = ""  # a few sentences about the song (Wikipedia)
         self.song_shown = False  # its turn came already (then the mix)
         self.history: list[str] = []  # artists played lately (oldest first, the newest last)
+        self.pools: dict[str, dict] = {}  # name -> its Wikipedia article as sentences
+        self.orders: dict[str, list] = {}  # name -> its sentences not shown yet (shuffled)
+        self.ready = collections.deque()  # mix items made ahead (kind, name, text)
+        self._feed = threading.Event()
+        threading.Thread(target=self._feeder, daemon=True).start()
         self.db = History(os.path.join(DATA_DIR, "history.db"))
         self.host_info: dict[str, str] = {}  # every host seen -> what Wikipedia says (Czech)
-        self.artist_info: dict[str, str] = {}  # artist -> what Wikipedia says (Czech)
-        self.trivia_seen: dict[str, set] = {}  # what was shown of each, so the next time is different
         self._last_lead = ""
         self.station_about = ""
         self.band_about = self.host_about = ""  # 'Did you know?' about the artist, about who's on air
@@ -4084,114 +4200,105 @@ class App(Adw.Application):
         cs = self.BADGES.get(name)
         return name if cs is None else cs[1 if self.settings.get("ostrava", True) else 0]
 
-    # A mix for the show card's second turn, so it's never the same for long: the song playing (once), then
-    # about the artists played lately, now and then who's on air (about 15 %) and the station itself (5 %);
-    # each time other sentences and another way of leading in.
+    # The show card's text turns (about 3 a minute, 180 an hour, hardly ever the same): the song playing once,
+    # then a mix made ahead in the background from whole Wikipedia articles: the artists played lately (from
+    # the history), now and then who's on air (10 %), the station's other hosts (10 %) and the station (5 %);
+    # each source's sentences in a shuffled order, each with another lead-in.
     LEADS = {"artist": ("Víte, že… ", "Zajímavost: ", "Mimochodem: ", "Z hudební kroniky: ", "Na okraj: ",
-                        "Hrálo se u nás – {n}. ", "Pár slov k interpretovi {n}: "),
+                        "Hrálo se u nás – {n}. ", "Pár slov k interpretovi {n}: ", "K tématu {n}: ",
+                        "Ještě něco o {n}: ", "Z historie: "),
              "host": ("U mikrofonu: {n}. ", "Dnes vás provází {n}. ", "Moderuje {n}. ", "Kdo vás teď baví? {n}. "),
              "hosts": ("Z našich moderátorů: {n}. ", "Na Beatu uslyšíte i {n}. ", "Znáte naše hlasy? {n}. ",
                        "Moderátor{a} Beatu {n}: "),
-             "station": ("Něco o nás: ", "Rádio Beat: ", "Víte, kdo vám hraje? ")}
+             "station": ("Něco o nás: ", "Rádio Beat: ", "Víte, kdo vám hraje? ", "Z historie Beatu: ")}
     BADGE = {"artist": "ZAJÍMAVOST", "host": "U MIKROFONU", "hosts": "NAŠE HLASY", "station": "RÁDIO BEAT"}
-
-    def _load_past(self) -> None:
-        """At start: the artists and hosts from the history, and what Wikipedia says about each (remembered,
-        so mostly quick), one after the other."""
-        past = list(reversed(self.db.artists(25)))
-        GLib.idle_add(self._set_history, past)
-        for name in past:
-            if name not in self.artist_info:
-                text = name_about(name, MUSIC_WORDS)
-                GLib.idle_add(self.artist_info.__setitem__, name, text)
-        for name, _shows in self.db.hosts():
-            if name not in self.host_info:
-                text = name_about(name, HOST_WORDS, ("cs", "en"))
-                GLib.idle_add(self.host_info.__setitem__, name, text)
+    READY = 4  # items made ahead
 
     def _set_history(self, past: list[str]) -> bool:
         self.history[:] = [a for a in past if a not in self.history] + self.history  # this session's last
+        self._feed.set()
         return False
 
+    def _load_past(self) -> None:
+        """At start: the artists played before (the history), for the mix."""
+        GLib.idle_add(self._set_history, list(reversed(self.db.artists(40))))
+
     def _remember_artist(self, artist: str) -> None:
-        """A song's artist joins the recent ones; what Wikipedia says about it is fetched (once) for the mix."""
         name = first_artist(artist)
         if not name or norm(name) in ("radio beat", "beat"):
             return
-        self.history = [n for n in self.history if norm(n) != norm(name)][-24:] + [name]
-        if name not in self.artist_info:
-            self.artist_info[name] = ""
-            threading.Thread(target=lambda: GLib.idle_add(self.artist_info.__setitem__, name,
-                                                          name_about(name, MUSIC_WORDS)), daemon=True).start()
+        self.history = [n for n in self.history if norm(n) != norm(name)][-39:] + [name]
+        self._feed.set()
 
-    def _pick(self, kind: str, key: str, text: str, name: str = ""):
-        sentences = [x for x in re.split(r"(?<=[.!?])\s+", text) if len(x) > 20]
-        if not sentences:
+    def _feeder(self) -> None:
+        """Keeps READY items made: their articles fetched (remembered), English sentences translated."""
+        while True:
+            self._feed.wait(60)
+            self._feed.clear()
+            tries = 0
+            while len(self.ready) < self.READY and tries < 40:
+                tries += 1
+                item = self._make_item()
+                if item:
+                    self.ready.append(item)
+
+    def _pool(self, name: str, words: tuple, langs=("cs", "en")) -> dict:
+        if name not in self.pools:
+            self.pools[name] = wiki_sentences(name, words, langs)
+        return self.pools[name]
+
+    def _make_item(self):
+        r = random.random()
+        host = self.host
+        if r < 0.05:
+            kind, name, pool = "station", "Rádio Beat", self._pool("Rádio Beat", HOST_WORDS + MUSIC_WORDS)
+        elif r < 0.15 and host:
+            kind, name, pool = "host", host, self._pool(host, HOST_WORDS)
+        elif r < 0.25:
+            others = [n for n, _ in self.db.hosts() if n != host]
+            if not others:
+                return None
+            name = random.choice(others)
+            kind, pool = "hosts", self._pool(name, HOST_WORDS)
+        else:
+            artists = self.history[-15:]
+            if not artists:
+                return None
+            name = random.choice(artists)
+            kind, pool = "artist", self._pool(name, MUSIC_WORDS)
+        sents = (pool or {}).get("s") or []
+        if not sents:
             return None
-        n = random.choice((1, 2))
-        starts = list(range(max(1, len(sentences) - n + 1)))
-        seen = self.trivia_seen.setdefault(key, set())
-        fresh = [i for i in starts if i not in seen] or starts
-        if len(fresh) == len(starts) and seen:
-            seen.clear()
-        i = random.choice(fresh)
-        seen.add(i)
-        if n == 2 and len(" ".join(sentences[i:i + 2])) > 220:  # a 15 s turn: one sentence then
-            n = 1
-        a = "ka" if name.split()[0:1] and name.split()[0].endswith("a") else ""  # Moderátorka Jana, Moderátor Petr
-        lead = random.choice(self.LEADS[kind]).format(n=name, a=a)
-        if lead == self._last_lead and len(self.LEADS[kind]) > 1:
-            lead = random.choice([x for x in self.LEADS[kind] if x != lead]).format(n=name, a=a)
+        order = self.orders.get(name)
+        if not order:  # each source's sentences in a shuffled order, all before any comes again
+            order = self.orders[name] = random.sample(range(len(sents)), len(sents))
+        i = order.pop()
+        pick = sents[i:i + 2] if i + 1 < len(sents) and len(sents[i]) + len(sents[i + 1]) < 220 else [sents[i]]
+        if pool.get("lang") == "en":
+            pick = [czech_sentence(x) for x in pick]
+            if not all(pick):
+                return None
+        leads = [x for x in self.LEADS[kind] if x != self._last_lead] or self.LEADS[kind]
+        lead = random.choice(leads)
         self._last_lead = lead
-        return self.cz(self.BADGE[kind]), name or "Rádio Beat", self.cz(lead + " ".join(sentences[i:i + n])), \
-            self.logo_tex
+        a = "ka" if name.split() and name.split()[0].endswith("a") else ""
+        return kind, name, lead.format(n=name, a=a) + " ".join(pick)
 
     def turn_content_ready(self) -> bool:
-        """Anything for the text turns (else the card stays on the programme and looks again later)."""
-        return bool(self.about or self.station_about or self.host_about or any(self.artist_info.values()))
-
-    def trivia(self):
-        r = random.random()
-        if self.station_about and r < 0.05:
-            return self._pick("station", "station", self.station_about)
-        if self.host_about and self.host and r < 0.15:
-            return self._pick("host", "host:" + self.host, self.host_about, self.host)
-        others = [n for n, t in self.host_info.items() if t and n != self.host]
-        if others and r < 0.30:  # the station's other hosts (from the history)
-            name = random.choice(others)
-            return self._pick("hosts", "host:" + name, self.host_info[name], name)
-        now = norm(first_artist(self.artist_raw or ""))
-        past = [n for n in self.history if self.artist_info.get(n) and norm(n) != now]
-        if past:
-            name = random.choice(past[-12:])
-            return self._pick("artist", "artist:" + name, self.artist_info[name], name)
-        if self.host_about and self.host:
-            return self._pick("host", "host:" + self.host, self.host_about, self.host)
-        if self.station_about:
-            return self._pick("station", "station", self.station_about)
-        return None
+        return bool(self.about or self.ready)
 
     def turn_content(self):
-        """What the show card's second turn shows next: (badge, title, text, picture) or None. The song playing
-        (once a song), else the mix (trivia)."""
+        """What the show card's next text turn shows: (badge, title, text, picture) or None (the programme)."""
         if self.about and not self.song_shown:
             self.song_shown = True
             info = self.info or {}
             return "NOW PLAYING", info.get("title") or self.song or "", self.cz(self.about), \
                 self.cover_tex or self.logo_tex
-        return self.trivia() or self._old_turn_content()
-
-    def _old_turn_content(self):
-        info = self.info or {}
-        if self.about:
-            return "NOW PLAYING", info.get("title") or self.song or "", self.cz(self.about), \
-                self.cover_tex or self.logo_tex
-        if self.band_about:
-            return "DID YOU KNOW", info.get("artist") or first_artist(self.artist_raw or ""), \
-                self.cz("Víte, že… ") + self.cz(self.band_about), self.cover_tex or self.logo_tex
-        if self.host_about and self.host:
-            return "DID YOU KNOW", self.host, self.cz("Víte, že… ") + self.cz(self.host_about), self.logo_tex
-        return None
+        self._feed.set()
+        if not self.ready:
+            return None
+        kind, name, text = self.ready.popleft()
+        return self.cz(self.BADGE[kind]), name, self.cz(text), self.logo_tex
 
     def _got_facts(self, lid, text):
         if lid == self._lookup_id:
