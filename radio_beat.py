@@ -2631,6 +2631,7 @@ class GlassCard(Gtk.Box):
         self.cache_lens = True  # the lens drawn from a texture while nothing behind it changes
         self.band = 0  # px: the lens bends only in this band along the edge (thick glass slab); 0: fish-eye
         self.reach = self.FISH_REACH  # how far beyond its edge it shows
+        self.lens_max = 1e9  # px: the bend's depth from the edge at most (big glass: as thick as the card's)
         self.curve = self.FISH_CURVE  # higher: the bend gathers at the rim (a thick glass edge), the middle flatter
         self.shine = False  # a big lens: a curved reflection over it and its rim darker (it reads as a lens)
         self.wall = self.RIM  # the curved side wall's shaded width, in corner radii
@@ -2865,7 +2866,7 @@ class GlassCard(Gtk.Box):
         # bent the other way (they show what lies beyond, squeezed in). No blending (that ghosts and looks
         # blurred): hard-edged layers from the edge in, each shifted under 1 px from the one outside it.
         # the bend over the whole glass (fish-eye), or for a big one in a band along its rounded edge
-        lens = min(h / 2, w / 2) if not self.band else min(self.band, h / 2, w / 2)
+        lens = min(h / 2, w / 2, self.lens_max) if not self.band else min(self.band, h / 2, w / 2)
         most = lens * (self.reach if not self.band else 0.9)
         rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the edge's zoom
         # each ring shifted under a pixel from the next (half a pixel on big glass: its seams would show)
@@ -3093,8 +3094,9 @@ class Water:
         behind = [(win.backdrop, 0.45), (win.cover, 0.0)]
         self.neck = Puddle(behind, neck=True, halign=Gtk.Align.START, valign=Gtk.Align.START)
         for g in (self.neck, body):
-            # exactly the show card's glass (as HHC's buttons have it): only its size differs
-            g.scrim = win.scrim
+            # exactly the show card's glass (as HHC's buttons have it): only its size differs; its curved edge
+            # as deep as the card's (spread over a big panel it would look thin)
+            g.scrim, g.lens_max = win.scrim, 150 * max(1.0, win._scale)
             g.add_css_class("puddle")
             g.set_visible(False)
             win.backdrop.watchers.append(g)
@@ -3151,7 +3153,7 @@ class Water:
             self.body.set_halign(Gtk.Align.END)
             self.body.set_margin_start(0)
             self.body.set_size_request(width, height)
-        self.body.radius = 22 * max(1.0, win._scale)
+        self.body.radius = 28 * max(1.0, win._scale)  # the card's corners
 
     def show(self) -> None:
         self.open = True
