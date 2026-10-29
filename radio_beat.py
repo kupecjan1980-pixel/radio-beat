@@ -2850,7 +2850,9 @@ class GlassCard(Gtk.Box):
         lens = min(h / 2, w / 2) if not self.band else min(self.band, h / 2, w / 2)
         most = lens * (self.FISH_REACH if not self.band else 0.9)
         rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the edge's zoom
-        steps = max(1, math.ceil((most + abs(self.mag - 1) * max(w, h) / 2) / (2.5 if self.pulse_tick else 1)))
+        # each ring shifted under a pixel from the next (half a pixel on big glass: its seams would show)
+        step = 2.5 if self.pulse_tick else (0.5 if w * h > 120000 else 1)
+        steps = max(1, math.ceil((most + abs(self.mag - 1) * max(w, h) / 2) / step))
         for k in range(0, steps + 1):
             bend = 1 - k / steps  # 1 at the edge, 0 in the middle
             d = lens * (1 - bend ** (1 / self.FISH_CURVE))  # where the curve falls to `bend`
@@ -3011,7 +3013,7 @@ class Puddle(GlassCard):
         self.neck = neck
         self.reveal = 0.0
         self.frame = not neck  # the neck is water between the two: no edge of its own
-        self.color = (110, 170, 255, 0.06)  # a touch of water's blue
+        self.color = (110, 170, 255, 0.025)  # a trace of water's blue
 
     def _neck_path(self, w: float, h: float):
         """As wide as the button at the top, drawn in at the waist, spreading out into the body below:
@@ -3068,7 +3070,7 @@ class Water:
         for g in (self.neck, body):
             # the show card's glass (the fish-eye, its edges, a shadow below), even all over (not the text
             # panel's shading, darker at the bottom)
-            g.scrim, g.mag, g.depth, g.tint = None, GlassCard.MAG, True, 0.22
+            g.scrim, g.mag, g.depth, g.tint = None, GlassCard.MAG, True, 0.08  # clear, not matte
             g.band, g.wall = 0, GlassCard.RIM
             g.add_css_class("puddle")
             g.set_visible(False)
