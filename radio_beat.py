@@ -2349,7 +2349,7 @@ CSS = b"""
 .overlay-header .top-logo { border-radius: 8px; margin-left: 4px; }
 .overlay-header button.close-button { color: white; }
 .overlay-header button.info-button { color: white; font-weight: 900; font-size: 1.25em; font-family: serif;
-                                     padding: 0; }
+                                     padding: 0; min-width: 0; }
 .puddle label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
 .puddle .puddle-now label { font-weight: 700; }
 .puddle .boxed-list, .puddle .boxed-list > row { background: rgba(255,255,255,0.04); }
@@ -3258,7 +3258,7 @@ class Window(Adw.ApplicationWindow):
         self.app = app
         self.set_icon_name(APP_ID)
         self._scale = 1.0
-        self._fit = 1.0  # < 1: everything smaller, so it all fits in the window (not in full screen)
+        self._fit = 1.0  # the song info's text: as big as fits its place (smaller or up to 1.6x)
         self._fit_queued = False
         self._scale_pending = False
         self._fit_bad = 9.0  # the smallest fit seen not fitting (a line more wraps): not grown back to
@@ -3658,7 +3658,7 @@ class Window(Adw.ApplicationWindow):
 
     def do_size_allocate(self, width, height, baseline):
         Adw.ApplicationWindow.do_size_allocate(self, width, height, baseline)
-        f = round(max(1.0, min(width / BASE_SIZE[0], height / BASE_SIZE[1])) * self._fit, 2)
+        f = round(max(1.0, min(width / BASE_SIZE[0], height / BASE_SIZE[1])), 2)  # the fit sizes the song info only
         if f != self._scale:
             self._scale, self._scale_pending = f, True
             GLib.idle_add(self._apply_scale)  # not while laying out
@@ -3674,7 +3674,7 @@ class Window(Adw.ApplicationWindow):
         if getattr(self, "puddle_open", False):
             GLib.idle_add(lambda: (self._place_puddle(), False)[1])  # it follows the window
 
-    FIT_STEP = 0.92
+    FIT_STEP = 0.95
 
     def _check_fit(self) -> bool:
         """The text, the show card and the buttons shrink until they all fit below the top bar (a long title, a
@@ -3694,11 +3694,12 @@ class Window(Adw.ApplicationWindow):
             need = h + 1
             self._fit_bad = min(self._fit_bad, fit)
             fit = max(0.5, fit * self.FIT_STEP)
-        elif fit < 1.0 and need < h * 0.85 and fit / self.FIT_STEP < self._fit_bad - 1e-6:
-            fit = min(1.0, fit / self.FIT_STEP)
+        elif fit < 1.6 and need < h * 0.93 and fit / self.FIT_STEP < self._fit_bad - 1e-6:  # grows to fill it
+            fit = min(1.6, fit / self.FIT_STEP)
         if fit != self._fit:
             self._fit = fit
-            self.queue_resize()
+            self._scale_pending = True
+            GLib.idle_add(self._apply_scale)  # the text's new size, laid out, then checked again
         return False
 
     # The show card: every minute the programme (ON AIR) for 8 s, the rest of the minute a new text every 15 s
@@ -4065,7 +4066,10 @@ class Window(Adw.ApplicationWindow):
         """Text and the show picture grow with the window: in full screen
         they fill the screen instead of staying window-sized."""
         f = self._scale
-        css = "".join(f".{cls} {{ font-size: {pt * f:.1f}pt; }}\n" for cls, pt in TEXT_PT.items() if cls != "pic")
+        # the song's lines as big as fit their place (beside the cover, below the logo, above the buttons)
+        info = ("song", "artist", "album", "facts")
+        css = "".join(f".{cls} {{ font-size: {pt * f * (self._fit if cls in info else 1):.1f}pt; }}\n"
+                      for cls, pt in TEXT_PT.items() if cls != "pic")
         # the buttons grow too, so they don't look lost next to the text
         css += (f".round {{ min-width: {56 * f:.0f}px; min-height: {56 * f:.0f}px; }}\n"
                 f".play-button {{ min-width: {68 * f:.0f}px; min-height: {68 * f:.0f}px; }}\n"
@@ -4082,6 +4086,9 @@ class Window(Adw.ApplicationWindow):
         for tile in self.head_glass:
             tile.radius = 12 * f
             tile.set_size_request(int(34 * f), int(34 * f))
+            btn = tile.get_first_child()
+            if btn is not None:  # square, all of them (the 'i' too)
+                btn.set_size_request(int(34 * f), int(34 * f))
             tile.queue_draw()
         for disc, size in zip(self.discs, (68, 56, 46)):  # pause, stop (a little smaller), speaker (smaller still)
             disc.radius = size * f / 2
