@@ -3193,7 +3193,7 @@ class Water:
             g.scrim, g.sharp_bars = win.scrim, True  # what's under it sharp, the bars beside the cover too
             if g is body:  # big glass: its edge a thick rounded wall (the bend there), lit and shaded like one
                 g.curve, g.wall, g.reach, g.shine = 3.0, 2.8, 0.9, True  # a strong bend at the rim: thick
-                g.warp_content = True
+                g.warp_content = False  # what's inside stays flat (the glass behind it bends)
             g.add_css_class("puddle")
             g.set_visible(False)
             win.backdrop.watchers.append(g)
