@@ -605,11 +605,17 @@ ARTICLE_END = ("Reference", "Odkazy", "Externí odkazy", "Související články
                "See also", "References", "External links", "Further reading", "Notes", "Bibliography")
 
 
+def _prose(x: str) -> bool:
+    """A sentence, not a list's line (a discography: years, brackets, catalogue numbers)."""
+    digits = sum(c.isdigit() for c in x)
+    return digits / len(x) < 0.12 and x.count("(") <= 2 and len(x.split()) >= 7
+
+
 def wiki_sentences(name: str, words: tuple, langs=("cs", "en")) -> dict:
     """Everything the Wikipedia article named after `name` says, as sentences (for the show card's mix), and its
     picture: {"lang": "cs" | "en", "s": [...], "img": url}, Czech first; {} when there's no such article.
     Remembered."""
-    key = f"sent2|{norm(name)}"
+    key = f"sent3|{norm(name)}"
     try:
         with open(ABOUT_CACHE) as f:
             cache = json.load(f)
@@ -642,7 +648,7 @@ def wiki_sentences(name: str, words: tuple, langs=("cs", "en")) -> dict:
                     if line in ARTICLE_END:
                         break
                     if len(line) > 60 and "." in line:  # a paragraph (not a heading or a list item)
-                        kept += [x for x in sentences(line) if 40 <= len(x) <= 260]
+                        kept += [x for x in sentences(line) if 40 <= len(x) <= 260 and _prose(x)]
                 if kept:  # with the article's picture (the band, the artist), for beside the text
                     found = {"lang": lang, "s": kept[:200], "img": (page.get("thumbnail") or {}).get("source", "")}
                     break
@@ -851,6 +857,15 @@ class History:
             rows = self.db.execute("SELECT artist, MAX(at) m FROM plays GROUP BY lower(artist) ORDER BY m DESC "
                                    "LIMIT ?", (n,)).fetchall()
         return [r[0] for r in rows]
+
+    def since(self, seconds: float) -> tuple[list[str], list[tuple[str, str]]]:
+        """The artists and the songs played within the last `seconds`, newest first (each once)."""
+        t = time.time() - seconds
+        with self.lock:
+            rows = self.db.execute("SELECT artist, title, MAX(at) m FROM plays WHERE at >= ? GROUP BY lower(artist), "
+                                   "lower(title) ORDER BY m DESC", (t,)).fetchall()
+        artists = list(dict.fromkeys(r[0] for r in rows))
+        return artists, [(r[0], r[1]) for r in rows]
 
     def songs(self, n: int = 30) -> list[tuple[str, str]]:
         """(artist, title) of the songs played lately, newest first (each once)."""
@@ -4026,7 +4041,9 @@ class Window(Adw.ApplicationWindow):
             return GLib.SOURCE_CONTINUE  # the curiosities scroll by themselves, not while the wheel just did
         adj = self.puddle_scroll.get_vadjustment()
         adj.set_value(adj.get_value() + self.PUDDLE_SPEED * (t - last))
-        if adj.get_value() >= adj.get_upper() - adj.get_page_size() - 80:  # near the end: more
+        if adj.get_value() >= adj.get_upper() - adj.get_page_size() - 80 \
+                and time.monotonic() - getattr(self, "_puddle_more_at", 0) > 4:  # near the end: one more
+            self._puddle_more_at = time.monotonic()
             item = self.app.next_curiosity()
             if item:
                 self.puddle_items.append(item)
@@ -5037,7 +5054,7 @@ class App(Adw.Application):
             while len(self.ready) < self.READY and tries < 40:
                 tries += 1
                 item = self._make_item()
-                if item:
+                if item and not any(set(item[4]) & set(x[4]) for x in self.ready):
                     self.ready.append(item)
 
     def _pool(self, name: str, words: tuple, langs=("cs", "en")) -> dict:
@@ -5062,68 +5079,95 @@ class App(Adw.Application):
         except OSError:
             pass
 
-    def _make_item(self):
-        r = random.random()
-        host = self.host
-        key = None  # the source's own name (a song's: artist – title)
-        if r < 0.10:
-            kind, name, pool = "station", "Rádio Beat", self._pool("Rádio Beat", HOST_WORDS + MUSIC_WORDS)
-        elif r < 0.15 and host:
-            kind, name, pool = "host", host, self._pool(host, HOST_WORDS)
-        elif r < 0.20:
-            others = [n for n, _ in self.db.hosts() if n != host]
-            if not others:
-                return None
-            name = random.choice(others)
-            kind, pool = "hosts", self._pool(name, HOST_WORDS)
-        elif r < 0.45:
-            songs = self.db.songs(30)
-        if 0.20 <= r < 0.45 and songs:
-            artist, name = random.choice(songs)
-            kind, key = "song", f"{artist} – {name}"
-            if key not in self.pools:  # the song's article: only when it names the artist
-                self.pools[key] = wiki_sentences(name, (artist.lower(),))
-            pool = self.pools[key]
-        elif r >= 0.20:
-            artists = self.history[-15:]
-            if len(self.history) < SEED_UNTIL:
-                artists = artists + list(SEED_ARTISTS)
-            name = random.choice(artists)
-            kind, pool = "artist", self._pool(name, MUSIC_WORDS)
-        key = key or name
+    WINDOWS = (3600, 2 * 3600, 4 * 3600, 8 * 3600, 86400, 3 * 86400, 7 * 86400, 30 * 86400, 1e12)
+
+    def _fresh(self, pool: dict, key: str):
+        """The next sentence(s) of a source not shown within the month, or None (all shown, or English while
+        there's no translating)."""
         sents = (pool or {}).get("s") or []
         if not sents:
             return None
-        order = self.orders.get(key)
-        if not order:  # each source's sentences in a shuffled order
-            order = self.orders[key] = random.sample(range(len(sents)), len(sents))
-        while order:  # none shown within the last month
-            i = order.pop()
-            if sents[i] not in self.shown:
-                break
-        else:
+        if pool.get("lang") == "en" and time.time() < _translate_off[0]:
             return None
-        pick = sents[i:i + 2] if i + 1 < len(sents) and len(sents[i]) + len(sents[i + 1]) < 220 \
-            and sents[i + 1] not in self.shown else [sents[i]]
-        for x in pick:
-            self.shown[x] = time.time()
+        order = self.orders.get(key)
+        if order is None:
+            order = self.orders[key] = random.sample(range(len(sents)), len(sents))
+        while order:
+            i = order.pop()
+            if sents[i] in self.shown:
+                continue
+            pick = sents[i:i + 2] if i + 1 < len(sents) and len(sents[i]) + len(sents[i + 1]) < 220 \
+                and sents[i + 1] not in self.shown else [sents[i]]
+            if pool.get("lang") == "en":
+                cs = [czech_sentence(x) for x in pick]
+                if not all(cs):
+                    order.append(i)  # again once there's translating
+                    return None
+                return pick, cs
+            return pick, pick
+        return None
+
+    def _make_item(self):
+        """The next curiosity: about what played in the last hour first, then two hours, four, a day, a week…
+        back through the whole history, then the station's usual artists; 10 % the station, now and then hosts."""
+        r = random.random()
+        host = self.host
+        tries = []
+        if r < 0.10:
+            tries.append(("station", "Rádio Beat", "Rádio Beat", HOST_WORDS + MUSIC_WORDS))
+        elif r < 0.16 and host:
+            tries.append(("host", host, host, HOST_WORDS))
+        elif r < 0.20:
+            others = [n for n, _ in self.db.hosts() if n != host]
+            if others:
+                name = random.choice(others)
+                tries.append(("hosts", name, name, HOST_WORDS))
+        for window in self.WINDOWS:
+            artists, songs = self.db.since(window)
+            batch = [("artist", a, a, MUSIC_WORDS) for a in artists] + \
+                    [("song", t, f"{a} – {t}", (a.lower(),)) for a, t in songs]
+            random.shuffle(batch)
+            tries += batch
+            if len(tries) > 12:
+                break
+        tries += [("artist", a, a, MUSIC_WORDS) for a in random.sample(SEED_ARTISTS, len(SEED_ARTISTS))]
+        seen = set()
+        for kind, name, key, words in tries:
+            if key in seen:
+                continue
+            seen.add(key)
+            if key not in self.pools:
+                title = plain_title(name) if kind == "song" else name
+                self.pools[key] = wiki_sentences(title, words)
+            pool = self.pools[key]
+            got = self._fresh(pool, key)
+            if not got:
+                continue
+            originals, shown = got
+            leads = [x for x in self.LEADS[kind] if x != self._last_lead] or self.LEADS[kind]
+            lead = random.choice(leads)
+            self._last_lead = lead
+            a = "ka" if name.split() and name.split()[0].endswith("a") else ""
+            title = plain_title(name) if kind == "song" else name
+            return kind, title, lead.format(n=title, a=a) + " ".join(shown), pool.get("img", ""), originals
+        return None
+
+    def mark_shown(self, originals) -> None:
+        """Shown on screen: not again within the month."""
+        now = time.time()
+        for x in originals or ():
+            self.shown[x] = now
         self._shown_save()
-        if pool.get("lang") == "en":
-            pick = [czech_sentence(x) for x in pick]
-            if not all(pick):
-                return None
-        leads = [x for x in self.LEADS[kind] if x != self._last_lead] or self.LEADS[kind]
-        lead = random.choice(leads)
-        self._last_lead = lead
-        a = "ka" if name.split() and name.split()[0].endswith("a") else ""
-        return kind, name, lead.format(n=name, a=a) + " ".join(pick), pool.get("img", "")
 
     def next_curiosity(self):
         """The next item of the mix for the 'i' puddle: (badge, title, text, picture url), or None for now."""
         self._feed.set()
         if not self.ready:
             return None
-        kind, name, text, img = self.ready.popleft()
+        kind, name, text, img, originals = self.ready.popleft()
+        if any(x in self.shown for x in originals):  # shown meanwhile
+            return self.next_curiosity()
+        self.mark_shown(originals)
         return self.cz(self.BADGE[kind]), "" if kind == "station" else name, self.cz(text), img
 
     def turn_content_ready(self) -> bool:
@@ -5139,7 +5183,8 @@ class App(Adw.Application):
         self._feed.set()
         if not self.ready:
             return None
-        kind, name, text, _img = self.ready.popleft()
+        kind, name, text, _img, originals = self.ready.popleft()
+        self.mark_shown(originals)
         # the station's badge says it already: no headline beside it
         return self.cz(self.BADGE[kind]), "" if kind == "station" else name, self.cz(text), self.logo_tex
 
