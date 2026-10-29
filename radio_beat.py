@@ -1543,6 +1543,9 @@ class Enhancer:
         self.procs: set = set()
         self.held = False
         self.held_at = 0.0
+        self.quiet = False  # a panel is open: the small pictures' quick steps only
+        self.light = False  # the job now is a small picture's quick one
+        self.light_done: set[str] = set()  # small pictures shown quick, waiting for the full enhancing
         self.cache_used = self.cache_allowed = -1  # bytes (counted at start, then kept up to date)
         self.sizes: dict[str, list] = {}  # kind -> [original bytes, enhanced bytes or None while working]
         threading.Thread(target=self._trim, daemon=True).start()
@@ -1618,13 +1621,26 @@ class Enhancer:
 
     SHARE = 0.92  # of the CPU / GPU time the enhancing may take; the rest stays free for the animations
 
+    def _stopped(self) -> bool:
+        """Waiting: something animates, or a panel is open and the job is a heavy one (the cover, the logo)."""
+        light = bool(self.running and self.running[0].startswith("pic:"))
+        return self.held or (self.quiet and not light)
+
     def hold(self, on: bool) -> None:
         """Stop (or let go on) the enhancing while something animates."""
         with self.plock:
             if on and not self.held:
                 self.held_at = time.monotonic()
             self.held = on
-            self._signal(signal.SIGSTOP if on else signal.SIGCONT)
+            self._signal(signal.SIGSTOP if self._stopped() else signal.SIGCONT)
+
+    def set_quiet(self, on: bool) -> None:
+        """A panel ('i', gear) open: only the small pictures' quick steps run, the full ones wait for it to
+        close (fluid scrolling and animations)."""
+        with self.plock:
+            self.quiet = on
+            self._signal(signal.SIGSTOP if self._stopped() else signal.SIGCONT)
+        self.wake.set()
 
     def _signal(self, sig) -> None:
         for p in list(self.procs):
@@ -1639,13 +1655,14 @@ class Enhancer:
             with self.plock:
                 if self.held and time.monotonic() - self.held_at > 30:
                     self.held = False  # a lost "mouse left": never wait for good
-                    self._signal(signal.SIGCONT)
-                if not self.procs or self.held:
+                    if not self._stopped():
+                        self._signal(signal.SIGCONT)
+                if not self.procs or self._stopped():
                     continue
                 self._signal(signal.SIGSTOP)
             time.sleep(0.1 * (1 - self.SHARE))
             with self.plock:
-                if not self.held:
+                if not self._stopped():
                     self._signal(signal.SIGCONT)
 
     def _spawn(self, cmd: list) -> subprocess.Popen:
@@ -1654,7 +1671,7 @@ class Enhancer:
                                 preexec_fn=_killed_with_parent)
         with self.plock:
             self.procs.add(proc)
-            if self.held:
+            if self._stopped():
                 os.kill(proc.pid, signal.SIGSTOP)
         return proc
 
@@ -1974,7 +1991,12 @@ class Enhancer:
             self.wake.clear()
             # Nothing before the GPU test is done: no plain resizes while AI may still come.
             while self.jobs and self.ai is not None:
-                kind = next((k for k in ("logo", "cover", "show") if k in self.jobs), next(iter(self.jobs)))
+                if self.quiet:  # a panel open: only the small pictures' quick steps, the rest after it closes
+                    kind = next((k for k in self.jobs if k.startswith("pic:")), None)
+                    if kind is None:
+                        break
+                else:
+                    kind = next((k for k in ("logo", "cover", "show") if k in self.jobs), next(iter(self.jobs)))
                 job = self.jobs[kind]
                 self.running = (kind, job[0])
                 try:
@@ -1990,6 +2012,9 @@ class Enhancer:
 
     def _enhance(self, kind: str, job: tuple) -> None:
         key, data, (w0, h0), size, done, screen = job
+        # a small picture while a panel is open: the quick AI pass and sharpening only, not cached (the full
+        # enhancing follows in the background once the panels are closed)
+        self.light = kind.startswith("pic:") and self.quiet
         what = {"cover": "Cover", "logo": "Logo"}.get(kind, "Show picture")
         self.model = ESR_MODEL_ART if kind in ("logo", "icon") else ESR_MODEL
         same = size == (w0, h0)  # big enough already: no upscaling
@@ -2018,6 +2043,10 @@ class Enhancer:
             if kind != "icon" or final:
                 GLib.idle_add(lambda: (done(pic), False)[1])
         cached = self._cache_path(key, size)
+        if self.light:
+            self.light_done.add(kind)
+        else:
+            self.light_done.discard(kind)
         if os.path.exists(cached):
             if self._jpeg_ok(cached) and self._not_black(cached):  # black ones came from the GPU giving up
                 self._used(cached)
@@ -2033,6 +2062,8 @@ class Enhancer:
                 self._picture(f"{head}, {was} (from the cache)")
                 return
             os.remove(cached)
+        if self.light:
+            cached = None  # the quick version isn't kept: the full one comes later
         work = tempfile.mkdtemp(prefix="radio-beat-esr-")
         try:
             src = os.path.join(work, "in.img")
@@ -2063,6 +2094,12 @@ class Enhancer:
             if out:
                 steps.append(f"quick AI pass in {_secs(time.monotonic() - t)}")
                 emit(open(quick, "rb").read())
+            if self.light and out:  # a small picture: the quick pass is enough
+                shutil.copyfile(quick, up)
+                if self._sharpen(up, work, steps, show, live, emit):
+                    sharp = os.path.join(work, "sharp.png")
+                    self._keep(sharp, steps, emit, cached)
+                return
             show(f", AI upscaling ({self.model}) on {self.gpu}…")
             t = time.monotonic()
             full = self._ai(src, src_size, size, up, work, self.model)
@@ -2100,6 +2137,9 @@ class Enhancer:
         if not self._ff(["-i", src], "format=rgb24", orig):
             return
         if not self._sharpen(orig, work, steps, show, live, emit):
+            return
+        if self.light:  # a small picture big enough already: sharpened is enough
+            self._keep(os.path.join(work, "sharp.png"), steps, emit, cached)
             return
         base = orig
         if self.ai:
@@ -2158,6 +2198,23 @@ class Enhancer:
         steps.append(f"sharpened in {_secs(time.monotonic() - t)}")
         emit(open(sharp, "rb").read())
         return True
+
+    def _keep(self, path: str, steps, emit, cached) -> None:
+        """A small picture's last step: shown and cached as it is (a JPEG, like the full ones)."""
+        jpg = path[:-4] + ".jpg"
+        if not self._ff(["-i", path], "format=rgb24", jpg, jpeg=True):
+            return
+        with open(jpg, "rb") as f:
+            pic = f.read()
+        emit(pic, True)
+        if cached:
+            os.makedirs(UPSCALED_DIR, exist_ok=True)
+            with open(cached + ".part", "wb") as f:
+                f.write(pic)
+            os.replace(cached + ".part", cached)
+            self.cache_used += len(pic)
+            with open(cached[:-4] + ".txt", "w") as f:
+                f.write(", ".join(steps))
 
     def _final(self, base, steps, show, live, emit, cached, work) -> None:
         """Denoised (GPU when ffmpeg can, else CPU), then sharpened: shown and cached."""
@@ -3266,6 +3323,7 @@ class Water:
 
     def show(self) -> None:
         self.open = True
+        self.win.app.enhancer.set_quiet(True)
         self.tile.remove_css_class("pumping")
         self.place()
         for g in (self.neck, self.body):
@@ -3298,6 +3356,9 @@ class Water:
             if to == 0.0 and not self.open:
                 for g in (self.neck, self.body):
                     g.set_visible(False)
+                if not any(w.open for w in self.win.waters):  # all closed: the full enhancing goes on
+                    self.win.app.enhancer.set_quiet(False)
+                    self.win.app.enhance_small_full()
         anim.connect("done", done)
         anim.play()
 
@@ -4903,6 +4964,14 @@ class App(Adw.Application):
             if self.win and self.win.puddle_open:
                 self.win.puddle_pics()
         self.enhancer.request(f"pic:{url}", url, data, (w, h), size, done, screen=self.screen_px())
+
+    def enhance_small_full(self) -> None:
+        """The panels closed: the small pictures shown with the quick pass get the full enhancing now."""
+        for kind in list(self.enhancer.light_done):
+            url = kind[4:]
+            data = self.show_src.get(url)
+            if data:
+                self._enhance_small(url, data)
 
     def _enhance_show(self) -> None:
         """The show on air's picture, sharpened and denoised (AI-upscaled if
