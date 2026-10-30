@@ -3156,17 +3156,17 @@ class MenuGlass(GlassCard):
 
 class ClockView(Gtk.Widget):
     """The time as tall as the room it's given, at its right; left of it the weekday at the top, as wide as
-    the room there, the date below it. Their letters' outlines (not the fonts' line boxes) fill the room, in
+    the room there, under it the day and month, then the year, each as big as fits (not touching). Their letters' outlines (not the fonts' line boxes) fill the room, in
     the Beat Radio fonts, white with a shadow like the song info's."""
 
-    FONTS = (("Anton", Pango.Weight.NORMAL), ("Oswald", Pango.Weight.SEMIBOLD), ("Oswald", Pango.Weight.SEMIBOLD))
-    TIME_MAX = 0.6  # of the width at most: the day and date keep the rest
-    DATE_MAX = 0.36  # the date's share of the height at most
-    GAP = 0.08  # between the time and the rest (of the width), and the day and the date (of the height)
+    FONTS = (("Anton", Pango.Weight.NORMAL),) + (("Oswald", Pango.Weight.SEMIBOLD),) * 3
+    TIME_MAX = 0.6  # of the width at most: the weekday and date keep the rest
+    DAY_MAX = 0.5  # the weekday's share of the height at most
+    GAP = 0.08  # between the time and the rest (of the width), and the lines on the left (of the height)
 
     def __init__(self, **kw):
         super().__init__(**kw)
-        self.texts = ("", "", "")
+        self.texts = ("", "", "", "")
         self.room = (0, 0)
         self.lays = None
         self.colon = True  # the time's colon blinks: a second on, a second off
@@ -3185,15 +3185,15 @@ class ClockView(Gtk.Widget):
         _, ink = self._layout(which, 100)  # measured at 100 pt, then scaled to fit
         return self._layout(which, 100 * min(w / max(1, ink.width), h / max(1, ink.height)) * 0.97)
 
-    def set_room(self, w: int, h: int, texts: tuple[str, str, str]) -> None:
+    def set_room(self, w: int, h: int, texts: tuple[str, str, str, str]) -> None:
         if (w, h) == self.room and texts == self.texts and self.lays:
             return
         self.room, self.texts = (w, h), texts
         tm = self._fit(0, w * self.TIME_MAX, h)
         rest = w - tm[1].width - w * self.GAP
-        date = self._fit(2, rest, h * self.DATE_MAX)
-        day = self._fit(1, rest, h * (1 - self.GAP) - date[1].height)  # as wide as its room
-        self.lays = (tm, day, date, rest)
+        day = self._fit(1, rest, h * self.DAY_MAX)  # as wide as its room
+        each = (h - day[1].height - 2 * h * self.GAP) / 2
+        self.lays = (tm, day, self._fit(2, rest, each), self._fit(3, rest, each), rest)
         self.set_size_request(w, h)
         self.queue_draw()
 
@@ -3201,7 +3201,8 @@ class ClockView(Gtk.Widget):
         if not self.lays:
             return
         w, h = self.room
-        (tl, ti), (yl, yi), (dl, di), rest = self.lays
+        (tl, ti), (yl, yi), (dl, di), (ql, qi), rest = self.lays
+        mid = (yi.height + h - qi.height - di.height) / 2  # the day and month between the weekday and the year
         i = self.texts[0].find(":")
         if i >= 0:  # off: drawn see-through (the time keeps its place)
             attrs = tl.get_attributes().copy()
@@ -3214,7 +3215,8 @@ class ClockView(Gtk.Widget):
         snap.push_shadow([shadow])
         for lay, ink, x, y in ((tl, ti, w - ti.width, (h - ti.height) / 2),  # right, the room's full height
                                (yl, yi, (rest - yi.width) / 2, 0),  # the weekday: top, centred
-                               (dl, di, (rest - di.width) / 2, h - di.height)):  # the date below it
+                               (dl, di, (rest - di.width) / 2, mid),  # the day and month
+                               (ql, qi, (rest - qi.width) / 2, h - qi.height)):  # the year at the bottom
             snap.save()
             snap.translate(Graphene.Point().init(x - ink.x, y - ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, 1))
@@ -3952,7 +3954,7 @@ class Window(Adw.ApplicationWindow):
     def _tick_clock(self) -> bool:
         now = time.localtime()
         self._clock_texts = (f"{now.tm_hour}:{now.tm_min:02d}", DAYS[now.tm_wday].upper(),
-                             f"{now.tm_mday}. {MONTHS[now.tm_mon - 1]} {now.tm_year}".upper())
+                             f"{now.tm_mday}. {MONTHS[now.tm_mon - 1]}".upper(), str(now.tm_year))
         if self._clock_texts != self.clock.texts:
             self._place_clock()
         self.clock.colon = now.tm_sec % 2 == 0
