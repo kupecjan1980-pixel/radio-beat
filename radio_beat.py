@@ -4175,6 +4175,8 @@ BEAT_CSS = """
 .artist { font-family: "Oswald"; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
 .album, .facts, .status, .show-sub, .show-next { font-family: "Oswald"; font-weight: 400; letter-spacing: 0.02em; }
 .on-air { font-family: "Oswald"; font-weight: 700; letter-spacing: 0.08em; }
+.gear-menu label { font-family: "Oswald"; font-weight: 400; letter-spacing: 0.03em; }
+.gear-menu row .title { font-weight: 600; }
 """
 
 
@@ -4579,6 +4581,7 @@ class Window(Adw.ApplicationWindow):
         # In the gear's water (Water, made with the puddle): it scrolls when taller.
         fit = Gtk.ScrolledWindow(child=box, hscrollbar_policy=Gtk.PolicyType.NEVER,
                                  vscrollbar_policy=Gtk.PolicyType.AUTOMATIC, vexpand=True)
+        fit.add_css_class("gear-menu")
         self.menu_content = fit
         btn = Gtk.Button(icon_name="emblem-system-symbolic", tooltip_text="Settings")
         btn.add_css_class("gear-button")
@@ -4902,6 +4905,8 @@ class Window(Adw.ApplicationWindow):
                 self._puddle_last = None
                 self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
         water.show()
+        if water is self.gear_water:  # from the top (a control taking the focus scrolled it a row down)
+            GLib.idle_add(lambda: (self.menu_content.get_vadjustment().set_value(0), False)[1])
 
     # the tabs it goes through by itself, and for how long (s)
     TOUR = (("DNES", 20), ("ZAJÍMAVOSTI", 10), ("AKTUALITY", 10), ("ZÍTRA", 10), ("POZÍTŘÍ", 10))
@@ -5229,7 +5234,11 @@ class Window(Adw.ApplicationWindow):
                 f".vol-icon {{ -gtk-icon-size: {22 * f:.0f}px; }}\n"
                 f".overlay-header button {{ min-width: {34 * f:.0f}px; min-height: {34 * f:.0f}px; }}\n"
                 f".overlay-header button image {{ -gtk-icon-size: {16 * f:.0f}px; }}\n"
-                f".show-card {{ border-radius: {28 * max(1.0, f):.0f}px; }}\n")
+                f".show-card {{ border-radius: {28 * max(1.0, f):.0f}px; }}\n"
+                # the gear menu's text grows too (on a Full HD TV the standard sizes were too small to read)
+                f".gear-menu label {{ font-size: {8.5 * f:.1f}pt; }}\n"
+                f".gear-menu row .title {{ font-size: {9.5 * f:.1f}pt; }}\n"
+                f".gear-menu row .subtitle, .gear-menu label.caption {{ font-size: {8 * f:.1f}pt; }}\n")
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
         self.logo.set_pixel_size(int(34 * f))
