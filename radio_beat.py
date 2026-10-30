@@ -813,10 +813,11 @@ def name_about(name: str, words: tuple, langs=("en", "cs")) -> str:
 
 class History:
     """Every song played (when, the artist, the title, the album, the show, who was on air) and every host
-    seen (their shows, when last on), in SQLite under ~/.local/share/radio-beat. The newest come first; the
-    oldest plays go past KEEP. Feeds the show card's mix: artists played earlier, all the station's hosts."""
+    seen (their shows, when last on), in SQLite under ~/.local/share/radio-beat. Every play is kept (the 'i'
+    panel's HRÁLO lists them all) and shared with the other computers (CacheShare). Feeds the show card's mix
+    too: artists played earlier, all the station's hosts."""
 
-    KEEP = 50000
+    SAME = 600  # s: the same song this close in time is the same play (each computer logs the stream itself)
 
     def __init__(self, path: str):
         import sqlite3
@@ -829,12 +830,69 @@ class History:
             self.db.execute("CREATE INDEX IF NOT EXISTS plays_at ON plays (at DESC)")
             self.db.execute("CREATE TABLE IF NOT EXISTS hosts (name TEXT PRIMARY KEY, shows TEXT, first REAL, "
                             "last REAL)")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:  # once: a song logged twice (the app
+                kept: dict = {}                                             # restarted during it) kept once
+                gone = []
+                for rowid, at, artist, title in self.db.execute("SELECT rowid, at, artist, title FROM plays "
+                                                                "ORDER BY at").fetchall():
+                    song = ((artist or "").lower(), (title or "").lower())
+                    if song in kept and at - kept[song] < self.SAME:
+                        gone.append((rowid,))
+                    else:
+                        kept[song] = at
+                self.db.executemany("DELETE FROM plays WHERE rowid = ?", gone)
+                self.db.execute("PRAGMA user_version = 1")
 
     def play(self, artist: str, title: str, show: str | None, host: str | None) -> None:
+        now = time.time()
         with self.lock, self.db:
-            self.db.execute("INSERT INTO plays VALUES (?, ?, ?, NULL, ?, ?)", (time.time(), artist, title, show, host))
-            self.db.execute("DELETE FROM plays WHERE rowid IN (SELECT rowid FROM plays ORDER BY at DESC "
-                            f"LIMIT -1 OFFSET {self.KEEP})")
+            if self.db.execute("SELECT 1 FROM plays WHERE at > ? AND lower(artist) = lower(?) AND lower(title) = "
+                               "lower(?)", (now - self.SAME, artist, title)).fetchone():
+                return  # logged already (the app restarted during the song)
+            self.db.execute("INSERT INTO plays VALUES (?, ?, ?, NULL, ?, ?)", (now, artist, title, show, host))
+        if self.on_play:
+            self.on_play()
+
+    on_play = None  # called after a play is logged (the HRÁLO view shows it)
+
+    def page(self, before: float, n: int = 60) -> list[tuple]:
+        """(at, artist, title, album, show) of the plays before `before`, newest first."""
+        with self.lock:
+            return self.db.execute("SELECT at, artist, title, album, show FROM plays WHERE at < ? ORDER BY at DESC "
+                                   "LIMIT ?", (before, n)).fetchall()
+
+    def count(self) -> int:
+        with self.lock:
+            return self.db.execute("SELECT COUNT(*) FROM plays").fetchone()[0]
+
+    def export(self, since: float, n: int = 2000) -> list[list]:
+        """Plays after `since`, oldest first: [at, artist, title, album, show, host] (for the other computers)."""
+        with self.lock:
+            return [list(r) for r in self.db.execute("SELECT at, artist, title, album, show, host FROM plays WHERE "
+                                                     "at > ? ORDER BY at LIMIT ?", (since, n)).fetchall()]
+
+    def merge(self, rows) -> int:
+        """Plays from another computer: each kept unless this one logged it too (the same song within SAME s;
+        its album taken if this one hasn't one). Returns how many were new."""
+        new = 0
+        with self.lock, self.db:
+            for r in rows:
+                if not (isinstance(r, list) and len(r) == 6 and isinstance(r[0], (int, float))
+                        and all(isinstance(x, str) and len(x) <= 300 for x in r[1:3])
+                        and all(x is None or (isinstance(x, str) and len(x) <= 300) for x in r[3:])
+                        and 1e9 < r[0] < time.time() + 86400):
+                    continue
+                at, artist, title, album, show, host = r
+                same = self.db.execute("SELECT rowid, album FROM plays WHERE at BETWEEN ? AND ? AND lower(artist) = "
+                                       "lower(?) AND lower(title) = lower(?) LIMIT 1",
+                                       (at - self.SAME, at + self.SAME, artist, title)).fetchone()
+                if same:
+                    if album and not same[1]:
+                        self.db.execute("UPDATE plays SET album = ? WHERE rowid = ?", (album, same[0]))
+                    continue
+                self.db.execute("INSERT INTO plays VALUES (?, ?, ?, ?, ?, ?)", (at, artist, title, album, show, host))
+                new += 1
+        return new
 
     def album(self, artist: str, title: str, album: str) -> None:
         """The album, once the lookup found it (the newest play of that song)."""
@@ -2544,8 +2602,16 @@ SHARE_MAX = 40 << 20  # bytes a picture may have
 
 
 class CacheShare:
-    def __init__(self, enhancer, on_status):
+    def __init__(self, enhancer, on_status, history=None):
         self.enh = enhancer
+        self.history = history  # the plays (History): shared too
+        self.plays_in = self.plays_out = 0
+        self.marks_path = os.path.join(DATA_DIR, "share-plays.json")  # per computer: plays fetched / sent up to
+        try:
+            with open(self.marks_path) as f:
+                self.marks = json.load(f)
+        except (OSError, ValueError):
+            self.marks = {}
         self.on_status = on_status
         self.on = False
         self.peers: dict[str, str] = {}  # address -> its name
@@ -2677,6 +2743,14 @@ class CacheShare:
             def do_GET(self):
                 if not self._local():
                     return
+                if self.path.startswith("/radio-beat/v1/plays?since=") and share.history:
+                    try:
+                        since = float(self.path.split("=", 1)[1])
+                    except ValueError:
+                        return self.send_error(400)
+                    rows = share.history.export(since)
+                    return self._reply(json.dumps({"plays": rows, "more": len(rows) == 2000}).encode(),
+                                       "application/json")
                 if self.path == "/radio-beat/v1/list":
                     return self._reply(json.dumps({"id": share.id, "files": sorted(share._names())}).encode(),
                                        "application/json")
@@ -2692,8 +2766,18 @@ class CacheShare:
             def do_PUT(self):
                 if not self._local():
                     return
-                name = self.path.rsplit("/", 1)[-1]
                 n = int(self.headers.get("Content-Length") or 0)
+                if self.path == "/radio-beat/v1/plays" and share.history:
+                    if not 0 < n <= 4 << 20:
+                        return self.send_error(400)
+                    try:
+                        rows = json.loads(self.rfile.read(n))
+                    except ValueError:
+                        return self.send_error(400)
+                    got = share.history.merge(rows if isinstance(rows, list) else [])
+                    share.plays_in += got
+                    return self._reply(json.dumps({"new": got}).encode(), "application/json")
+                name = self.path.rsplit("/", 1)[-1]
                 if not self.path.startswith("/radio-beat/v1/file/") or not SHARE_NAME.match(name) \
                         or not 0 < n <= SHARE_MAX:
                     return self.send_error(400)
@@ -2834,6 +2918,38 @@ class CacheShare:
                 found[ip] = got["id"]
         return found
 
+    def _plays(self, ip: str, who: str) -> str:
+        """The played songs both ways: theirs since the last fetch, ours since the last send (an overlap is
+        harmless: the same play twice is kept once). Returns a note for the status, "" when not shared."""
+        if not self.history:
+            return ""
+        mark = self.marks.setdefault(who, {"in": 0.0, "out": 0.0})
+        got = sent = 0
+        try:
+            while True:  # theirs
+                reply = json.loads(self._ask(ip, f"/radio-beat/v1/plays?since={mark['in']}", timeout=30))
+                rows = reply.get("plays") or []
+                got += self.history.merge(rows)
+                if rows:
+                    mark["in"] = max(mark["in"], max(r[0] for r in rows if isinstance(r, list) and r))
+                if not reply.get("more") or not rows:
+                    break
+            while rows := self.history.export(mark["out"]):  # ours
+                self._ask(ip, "/radio-beat/v1/plays", json.dumps(rows).encode(), timeout=60)
+                sent += len(rows)
+                mark["out"] = rows[-1][0]
+        except (OSError, ValueError, TypeError, KeyError):
+            pass  # an older Rádio Beat there (no plays yet), or gone: next round
+        try:
+            with open(self.marks_path + ".part", "w") as f:
+                json.dump(self.marks, f)
+            os.replace(self.marks_path + ".part", self.marks_path)
+        except OSError:
+            pass
+        self.plays_in += got
+        self.plays_out += sent
+        return f"; played songs: {got} new from there, {sent} sent ({self.history.count()} in all here)"
+
     def fetch(self, name: str) -> str | None:
         """A picture about to be made: fetched from a computer that has it already (with its notes).
         Returns that computer's name, None when none has it."""
@@ -2907,8 +3023,10 @@ class CacheShare:
                     break  # it turns us away (its firewall): it fetches from us itself
             self.got += got
             self.gave += gave
+            plays = self._plays(ip, who)
             self._say(f"Shared with {who.rsplit('-', 1)[0]} ({ip}) at {time.strftime('%H:%M')}: "
-                      f"{got} pictures fetched, {gave} handed over (since the start: {self.got} in, {self.gave} out)")
+                      f"{got} pictures fetched, {gave} handed over (since the start: {self.got} in, {self.gave} out)"
+                      f"{plays}")
         if self.got:
             self.enh._trim()
 
@@ -4794,7 +4912,7 @@ class Window(Adw.ApplicationWindow):
         return False
 
     # --- the 'i' button's puddle: programme and curiosities ------------------------------------------
-    PUDDLE_MODES = ("DNES", "ZAJÍMAVOSTI", "AKTUALITY", "ZÍTRA", "POZÍTŘÍ")
+    PUDDLE_MODES = ("DNES", "ZAJÍMAVOSTI", "AKTUALITY", "ZÍTRA", "POZÍTŘÍ", "HRÁLO")
     PUDDLE_SPEED = 7  # px a second the views scroll by themselves
     PUDDLE_WAIT = 15  # s before they start: after opening, a tab or the wheel
 
@@ -4833,7 +4951,8 @@ class Window(Adw.ApplicationWindow):
         # They wrap when narrow. Each tab's cell gets the same share of the spare width, the tab centred in it:
         # the gaps between the tabs are all the same, whatever their names' lengths.
         self.puddle_head = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6, row_spacing=6,
-                                       min_children_per_line=1, max_children_per_line=5, homogeneous=False)
+                                       min_children_per_line=1, max_children_per_line=len(self.PUDDLE_MODES),
+                                       homogeneous=False)
         self.puddle_tabs = []
         for i in range(len(self.PUDDLE_MODES)):
             tab = Gtk.Button(label="", has_frame=False, halign=Gtk.Align.CENTER, hexpand=True)
@@ -4848,6 +4967,10 @@ class Window(Adw.ApplicationWindow):
         # DNES: the show on air pinned one show from the top, the day's lineup scrolling behind it
         self.puddle_pin = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.START, visible=False)
         self.puddle_scroll.pin = self.puddle_pin
+        # HRÁLO: older plays loaded as the list nears its end (scrolled by hand or by itself): never-ending
+        self.puddle_scroll.get_vadjustment().connect("value-changed", lambda *_: self._played_more())
+        self._played_before = None  # the oldest play listed (None: not this view)
+        self._played_day = None
         stage = Gtk.Overlay(child=self.puddle_scroll, vexpand=True)
         stage.add_overlay(self.puddle_pin)
         self.puddle.append(self.puddle_head)
@@ -5093,6 +5216,7 @@ class Window(Adw.ApplicationWindow):
             tab.set_label(a.cz(self.PUDDLE_MODES[i]))
             (tab.add_css_class if i == self.puddle_mode else tab.remove_css_class)("on-air")
         self._clear_puddle()
+        self._played_before = None
         now = time.localtime()
         if mode == "ZAJÍMAVOSTI":
             if a.about:
@@ -5103,6 +5227,10 @@ class Window(Adw.ApplicationWindow):
                 self.puddle_items.append(item)
             for item in self.puddle_items:  # under ZAJÍMAVOSTI: just the name, the picture beside
                 self._puddle_block("", item[1] or "Rádio Beat", item[2], img=item[3] if len(item) > 3 else "")
+            return
+        if mode == "HRÁLO":  # every song played, newest first, a heading for each day; more as it scrolls
+            self._played_before, self._played_day = time.time() + 1, None
+            self._played_more(force=True)
             return
         if mode == "AKTUALITY":  # the station's news: a click opens the article
             if not a.news:
@@ -5123,6 +5251,36 @@ class Window(Adw.ApplicationWindow):
         for show in shows:
             when = f'{show["start"] // 60}:{show["start"] % 60:02d}'
             self._puddle_block(when, show["title"], a.cz(show.get("desc") or ""), img=show.get("img") or "")
+
+    def _played_more(self, force: bool = False) -> None:
+        """HRÁLO: the next page of older plays, when the list is near its end."""
+        if self._played_before is None or self.PUDDLE_MODES[self.puddle_mode] != "HRÁLO":
+            return
+        adj = self.puddle_scroll.get_vadjustment()
+        if not force and adj.get_value() < adj.get_upper() - adj.get_page_size() * 2:
+            return
+        rows = self.app.db.page(self._played_before)
+        if not rows:
+            if force:
+                self._puddle_block("", "", self.app.cz("Zatím nic nehrálo."))
+            self._played_before = 0.0  # all shown
+            return
+        for at, artist, title, album, show in rows:
+            t = time.localtime(at)
+            day = (t.tm_year, t.tm_yday)
+            if day != self._played_day:
+                self._played_day = day
+                self._puddle_block("", f"{DAYS[t.tm_wday].upper()} {t.tm_mday}. {MONTHS[t.tm_mon - 1].upper()} "
+                                       f"{t.tm_year}", "")
+            self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{artist} – {plain_title(title)}",
+                               " · ".join(x for x in (plain_title(album or ""), show) if x))
+        self._played_before = rows[-1][0]
+
+    def played_new(self) -> None:
+        """A song just logged: HRÁLO open at its top shows it (further down, it's there on the next look)."""
+        if self.PUDDLE_MODES[self.puddle_mode] == "HRÁLO" and self.puddle_open \
+                and self.puddle_scroll.get_vadjustment().get_value() < 40:
+            self._fill_puddle()
 
     def _puddle_today(self, shows: list, cur, mins: int) -> None:
         """The show on air pinned one show from the top (it may have begun yesterday evening), today's shows
@@ -5443,7 +5601,8 @@ class App(Adw.Application):
         self.logo_tex = None
         self.refined = None  # (before, after) of the last enhancing step: redrawn in, not morphed
         self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
-        self.share = CacheShare(self.enhancer, self._share_changed)
+        self.share = CacheShare(self.enhancer, self._share_changed, self.db)
+        self.db.on_play = lambda: GLib.idle_add(lambda: (self.win and self.win.played_new(), False)[1])
         self.share.set_on(self.settings.get("share", True))
         if self.settings.get("npu", False):
             self.enhancer.npu_wanted = True
