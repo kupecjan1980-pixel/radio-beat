@@ -3160,9 +3160,9 @@ class ClockView(Gtk.Widget):
     the Beat Radio fonts, white with a shadow like the song info's."""
 
     FONTS = (("Anton", Pango.Weight.NORMAL),) + (("Oswald", Pango.Weight.SEMIBOLD),) * 3
-    TIME_MAX = 0.6  # of the width at most: the weekday and date keep the rest
-    DAY_MAX = 0.5  # the weekday's share of the height at most
-    GAP = 0.08  # between the time and the rest (of the width), and the lines on the left (of the height)
+    TIME_MAX = 0.75  # of the width at most: the weekday and date keep the rest
+    DAY_MAX = 0.4  # the weekday's share of the height at most
+    GAP = 0.06  # between the time and the rest (of the width), and the lines on the left (of the height)
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -3949,7 +3949,7 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(self._place_clock)
 
     CLOCK_GAP = 22  # from the screen's right edge (as the song info from its left)
-    CLOCK_PAD = 10  # off the volume slider and the screen's bottom
+    CLOCK_PAD = 6  # off the volume slider's knob and the screen's bottom
 
     def _tick_clock(self) -> bool:
         now = time.localtime()
@@ -3967,7 +3967,20 @@ class Window(Adw.ApplicationWindow):
         if not cover or not ok or not getattr(self, "_clock_texts", None):
             self.clock.set_visible(False)
             return False
+        # just below the slider's knob (the slider widget itself is taller than what's drawn of it)
         top = vol.get_y() + vol.get_height()
+        stack = [self.vol]
+        while stack:
+            w = stack.pop()
+            if w.get_css_name() == "slider":
+                ok2, knob = w.compute_bounds(self)
+                if ok2:
+                    top = knob.get_y() + knob.get_height()
+                break
+            c = w.get_first_child()
+            while c is not None:
+                stack.append(c)
+                c = c.get_next_sibling()
         room_w = int(W - self.CLOCK_GAP - (cover[2] + self.CLOCK_GAP))
         room_h = int(H - top - 2 * self.CLOCK_PAD)  # (a little off the slider and the screen's bottom)
         if room_w < 60 or room_h < 16:
