@@ -2053,23 +2053,21 @@ class Enhancer:
         what = {"cover": "Cover", "logo": "Logo"}.get(kind, "Show picture")
         self.model = ESR_MODEL_ART if kind in ("logo", "icon") else ESR_MODEL
         same = size == (w0, h0)  # big enough already: no upscaling
-        orig = f"original {_size(len(data))}"
+        orig = _size(len(data))
         self.sizes[kind] = [len(data), None, None]  # source, fast enhanced (the first step shown), final
         if same:
             scr = f"the {screen[0]}×{screen[1]} px screen" if screen else "the screen"
-            head = f"{what}: {w0}×{h0} px ({orig}), no upscaling needed (big enough for {scr})"
+            head = f"{what}: original {w0}×{h0} px ({orig}), no upscaling needed (big enough for {scr})"
         else:
-            head = f"{what}: {w0}×{h0} px ({orig}) → {size[0]}×{size[1]} px"
+            head = f"{what}: original {w0}×{h0} px ({orig}) → {size[0]}×{size[1]} px"
         # The icon master only wants the final picture; everything else shows each step.
         sizes = self.sizes
         steps: list[str] = []
-        last = [len(data)]  # the size the step before left
 
         def emit(pic, final=False):
-            # each step's time, and the size it left when that's new: "sharpened in 0.4 s (3.9 MB)"
-            if steps and len(pic) != last[0] and not steps[-1].endswith(")"):
+            # each step: what, how long, where, and the size it left: "sharpened 0.4 s on CPU (3.9 MB)"
+            if steps and not steps[-1].endswith(")"):
                 steps[-1] += f" ({_size(len(pic))})"
-            last[0] = len(pic)
             got = sizes.setdefault(kind, [len(data), None, None])
             if final:
                 got[2] = len(pic)
@@ -2094,6 +2092,8 @@ class Enhancer:
                         was = f.read().strip()
                 except OSError:
                     was = "enhanced"
+                if "final " not in was:
+                    was += f", final {_size(len(pic))}"
                 self._picture(f"{head}, {was} (from the cache)")
                 return
             os.remove(cached)
@@ -2127,7 +2127,7 @@ class Enhancer:
             if out == "killed" or not live():
                 return
             if out:
-                steps.append(f"quick AI pass in {_secs(time.monotonic() - t)}")
+                steps.append(f"quick AI redraw {_secs(time.monotonic() - t)} on {self._where()}")
                 emit(open(quick, "rb").read())
             if self.light and out:  # a small picture: the quick pass is enough
                 shutil.copyfile(quick, up)
@@ -2141,7 +2141,7 @@ class Enhancer:
             if full == "killed" or not live():
                 return
             if full:
-                label = f"AI-{full} ({self.model}) on {self.gpu}"
+                label = f"AI {full} ({self.model}) {_secs(time.monotonic() - t)} on {self._where()}"
             elif out:
                 shutil.copyfile(quick, up)
                 label = "(full AI pass failed, the quick one kept)"
@@ -2154,7 +2154,7 @@ class Enhancer:
             label = "upscaled (smooth: no Vulkan here for AI)" if not self.ai else "upscaled (smooth: AI failed)"
             if self.ai:
                 cached = None  # AI again next time
-        steps.append(f"{label} in {_secs(time.monotonic() - t)}" if label.startswith(("AI", "up")) else label)
+        steps.append(f"{label} {_secs(time.monotonic() - t)} on CPU" if label.startswith("up") else label)
         emit(open(up, "rb").read())
         if not self.ffmpeg:
             show(" (sharpening and denoising: no ffmpeg yet)")
@@ -2185,7 +2185,7 @@ class Enhancer:
             if out == "killed" or not live():
                 return
             if out:
-                steps.append(f"AI-redrawn for detail ({self.model}) on {self.gpu} in {_secs(time.monotonic() - t)}")
+                steps.append(f"AI redraw for detail ({self.model}) {_secs(time.monotonic() - t)} on {self._where()}")
                 base = redrawn
             else:
                 cached = None  # the redraw again next time
@@ -2230,9 +2230,13 @@ class Enhancer:
             if live():
                 show(" (sharpening failed)")
             return False
-        steps.append(f"sharpened in {_secs(time.monotonic() - t)}")
+        steps.append(f"sharpened {_secs(time.monotonic() - t)} on CPU")
         emit(open(sharp, "rb").read())
         return True
+
+    def _where(self) -> str:
+        """Where the AI runs, for the steps' notes."""
+        return "NPU" if self.npu_ready else "CPU (no GPU for Vulkan)" if self.soft else "GPU"
 
     def _keep(self, path: str, steps, emit, cached) -> None:
         """A small picture's last step: shown and cached as it is (a JPEG, like the full ones)."""
@@ -2242,6 +2246,7 @@ class Enhancer:
         with open(jpg, "rb") as f:
             pic = f.read()
         emit(pic, True)
+        steps.append(f"final {_size(len(pic))}")
         if cached:
             os.makedirs(UPSCALED_DIR, exist_ok=True)
             with open(cached + ".part", "wb") as f:
@@ -2264,17 +2269,18 @@ class Enhancer:
             # The GPU gives up on big pictures without an error (all black: Renoir from about 3 MP, hence the
             # strips); if it still does: the CPU does this one, and ones as big from now on.
             ok, self.vk_fail_px = False, min(self.vk_fail_px, w * h)
-        where = "on the GPU"
+        where = "GPU"
         if not ok and live():
-            ok, where = self._ff(["-i", base], f"{DENOISE},{SHARPEN}", final, jpeg=True), "on the CPU"
+            ok, where = self._ff(["-i", base], f"{DENOISE},{SHARPEN}", final, jpeg=True), "CPU"
         if not ok or not live():
             if live():
                 show(" (denoising failed)")
             return
-        steps.append(f"denoised {where} in {_secs(time.monotonic() - t)}")
+        steps.append(f"denoised {_secs(time.monotonic() - t)} on {where}")
         with open(final, "rb") as f:
             pic = f.read()
         emit(pic, True)
+        steps.append(f"final {_size(len(pic))}")
         show("" if cached else " (not cached: tried again next time)")
         if not cached:
             return
