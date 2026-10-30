@@ -2812,7 +2812,7 @@ class CacheShare:
         me = self._own_ip()
         if not me or not __import__("ipaddress").ip_address(me).is_private:
             return {}
-        net = me.rsplit(".", 1)[0]
+        nets = dict.fromkeys([me.rsplit(".", 1)[0]] + self._upstream())
 
         def knock(ip):
             try:
@@ -2821,7 +2821,7 @@ class CacheShare:
             except OSError:
                 return None
 
-        cands = [f"{net}.{i}" for i in range(1, 255) if f"{net}.{i}" != me] + list(self.peers)
+        cands = [f"{net}.{i}" for net in nets for i in range(1, 255) if f"{net}.{i}" != me] + list(self.peers)
         with concurrent.futures.ThreadPoolExecutor(64) as pool:
             open_ = {ip for ip in pool.map(knock, dict.fromkeys(cands)) if ip}
         found = {}
@@ -2852,6 +2852,24 @@ class CacheShare:
             self.got += 1
             return who.rsplit("-", 1)[0]
         return None
+
+    @staticmethod
+    def _upstream() -> list[str]:
+        """The networks of the routers on the way out (a router behind another one: the computer behind the
+        first router can reach the one on the outer network, not the other way round; the one that can does
+        the fetching and the handing over). Their first three numbers, private addresses only, the first three
+        hops (the house's routers: further out lies the internet provider's network, not to be searched)."""
+        try:
+            out = subprocess.run(["tracepath", "-n", "-m", "3", "1.1.1.1"], capture_output=True, text=True,
+                                 timeout=20).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        ipaddress = __import__("ipaddress")
+        nets = []
+        for hop in re.findall(r"^\s*\d+:\s+(\d+\.\d+\.\d+\.\d+)", out, re.M):
+            if ipaddress.ip_address(hop).is_private and hop.rsplit(".", 1)[0] not in nets:
+                nets.append(hop.rsplit(".", 1)[0])
+        return nets
 
     def _round(self) -> None:
         self.peers = self._find()
@@ -5418,6 +5436,10 @@ class App(Adw.Application):
                              daemon=True).start()
         self.card = CardVolume(self._card_changed)
         self._holds = 0  # animations running: the enhancing waits while any is
+        self._frame_tick_id = None  # their frames timed meanwhile (the gear notes: Animations)
+        self._frame_last = None
+        self._frame_run: list[float] = []
+        self._frames: list = []  # [(when, [frame intervals ms])], the last 10 minutes
         _ANIM_HOLD[0] = self.anim_hold
         self.card_vol = None  # the sound card's volume, percent (card_on)
         self.card_name = ""
@@ -5678,6 +5700,43 @@ class App(Adw.Application):
     def anim_hold(self, on: bool) -> None:
         self._holds = max(0, self._holds + (1 if on else -1))
         self.enhancer.hold(self._holds > 0)
+        if self._holds and self.win and self._frame_tick_id is None:  # an animation: its frames timed
+            self._frame_last = None
+            self._frame_run = []
+            self._frame_tick_id = self.win.add_tick_callback(self._frame_tick)
+
+    def _frame_tick(self, _widget, clock) -> bool:
+        t = clock.get_frame_time() / 1000
+        if self._frame_last is not None:
+            self._frame_run.append(t - self._frame_last)
+        self._frame_last = t
+        if self._holds:
+            return GLib.SOURCE_CONTINUE
+        self._frame_tick_id = None
+        if len(self._frame_run) >= 10:
+            self._frames.append((time.monotonic(), self._frame_run))
+            self._frames = [f for f in self._frames if time.monotonic() - f[0] < 600]
+            self.win.enhance_note.set_text(self.notes_text())
+        return GLib.SOURCE_REMOVE
+
+    def frames_text(self) -> str:
+        """How smooth the animations run on this screen: measured, the last one and the last 10 minutes."""
+        if not self._frames:
+            return "no animation measured yet"
+        hz = 60.0
+        try:
+            mon = self.win.get_display().get_monitor_at_surface(self.win.get_surface())
+            hz = (mon.get_refresh_rate() / 1000) or 60.0
+        except (AttributeError, TypeError):
+            pass
+        late = 1000 / hz * 1.25
+        last = sorted(self._frames[-1][1])
+        every = [x for _, run in self._frames for x in run]
+        on_time = sum(1 for x in every if x <= late) / len(every)
+        size = self.screen_px()
+        where = f"{size[0]}×{size[1]} px, {hz:.0f} Hz" if size else f"{hz:.0f} Hz"
+        return (f"{where}: the last one {1000 / last[len(last) // 2]:.0f} fps, slowest frame {last[-1]:.0f} ms; "
+                f"the last 10 minutes {on_time:.0%} of {len(every)} frames on time (within {late:.0f} ms)")
 
     # volume: Rádio Beat's own (mpv), or the sound card's (card_on: mpv stays at 100 %, a knob on the card moves the slider)
     def card_on(self) -> bool:
@@ -6027,6 +6086,7 @@ class App(Adw.Application):
     def notes_text(self) -> str:
         """The gear menu's notes: the picture steps, and what the song recognition did last."""
         text = self.enhancer.notes()
+        text += f"\n• Animations: {self.frames_text()}"
         if self.settings.get("recognise", False):
             text += f"\n• Song recognition (testing): {self.recognise_text}"
         return text
