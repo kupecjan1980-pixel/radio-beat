@@ -2899,7 +2899,7 @@ class CacheShare:
 
 CSS = b"""
 .cover-bg { background: #111; }
-.backdrop { filter: blur(36px) brightness(0.55); transform: scale(1.15); }  /* GlassCard draws it the same: BACKDROP_* */
+.backdrop { transform: scale(1.15); }  /* blurred and darkened by CoverView itself; GlassCard draws it the same: BACKDROP_* */
 .scrim { background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.75) 55%, rgba(0,0,0,0) 100%); }
 .scrim label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65), 0 0 2px rgba(0,0,0,0.5); }  /* left and bottom: readable on pale covers */
 .song { font-weight: 800; }
@@ -2992,9 +2992,15 @@ class CoverView(Gtk.Widget):
     MORPH_BLUR = 8.0  # a little soft halfway through the morph
     REDRAW_MS = 4000
 
-    def __init__(self, fit: str, **kw):
+    SOFT_RES = 0.5  # a blurred picture's texture, of the widget's size: a blur this wide hides the lower resolution
+
+    def __init__(self, fit: str, soft: float = 0.0, dim: float = 1.0, **kw):
         super().__init__(hexpand=True, vexpand=True, overflow=Gtk.Overflow.HIDDEN, **kw)
         self.fit = fit
+        # Blurred by `soft` px and darkened to `dim` (the backdrop): each picture blurred once into a texture,
+        # a morph then cross-fades two textures (a CSS blur redid the blur every frame: ~10 fps while morphing)
+        self.soft, self.dim = soft, dim
+        self._soft: list = []  # [(picture, w, h, texture)], the pictures up now only
         self.pic = None
         self.old = None
         self.t = 1.0
@@ -3053,27 +3059,93 @@ class CoverView(Gtk.Widget):
         pic.snapshot(snap, dw, dh)
         snap.restore()
 
+    def _soft_tex(self, pic, w: int, h: int):
+        for p, pw, ph, tex in self._soft:
+            if p is pic and (pw, ph) == (w, h):
+                return tex
+        native = self.get_native()
+        if not native:
+            return None
+        q = self.SOFT_RES
+        s = Gtk.Snapshot()
+        s.scale(q, q)
+        s.push_blur(self.soft)  # in the scaled space: the blur as wide on the picture as at full size
+        s.push_clip(Graphene.Rect().init(0, 0, w, h))
+        self.draw(s, pic, w, h)
+        s.pop()
+        s.pop()
+        node = s.to_node()
+        if node is None:
+            return None
+        tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, w * q, h * q))
+        self._soft = [e for e in self._soft if e[0] is self.pic or e[0] is self.old] + [(pic, w, h, tex)]
+        return tex
+
+    def _draw_soft(self, snap, w: int, h: int) -> None:
+        box = Graphene.Rect().init(0, 0, w, h)
+        snap.push_color_matrix(_dim_matrix(self.dim), Graphene.Vec4().init(0, 0, 0, 0))
+        new = self._soft_tex(self.pic, w, h)
+        old = self._soft_tex(self.old, w, h) if self.old is not None and self.t < 1.0 else None
+        if old and new:
+            snap.push_cross_fade(self.t)
+            snap.append_texture(old, box)
+            snap.pop()
+            snap.append_texture(new, box)
+            snap.pop()
+        elif new:
+            snap.append_texture(new, box)
+        snap.pop()
+
     def do_snapshot(self, snap) -> None:
         w, h = self.get_width(), self.get_height()
         if not self.pic or w <= 0 or h <= 0:
+            return
+        if self.soft:
+            self._draw_soft(snap, w, h)
             return
         if self.old is None or self.t >= 1.0:
             self.draw(snap, self.pic, w, h)
             return
         # The old picture morphs into the new one: a cross-fade, softened a little halfway.
         blur = self.blur * math.sin(math.pi * self.t)
-        if blur > 0.5:
+        # a wider blur at half resolution (it hides it; a quarter of the pixels: at 4K the full one dropped
+        # frames to 20-30 ms halfway)
+        half = blur > 2.0
+        if half:
+            snap.save()
+            snap.scale(0.5, 0.5)
+            snap.push_blur(blur / 2)
+            snap.scale(2.0, 2.0)
+        elif blur > 0.5:
             snap.push_blur(blur)
         snap.push_cross_fade(self.t)
         self.draw(snap, self.old, w, h)
         snap.pop()
         self.draw(snap, self.pic, w, h)
         snap.pop()
-        if blur > 0.5:
+        if half:
+            snap.pop()
+            snap.restore()
+        elif blur > 0.5:
             snap.pop()
 
 
-BACKDROP_BLUR, BACKDROP_SCALE = 36.0, 1.15  # the .backdrop CSS above
+BACKDROP_BLUR, BACKDROP_SCALE = 36.0, 1.15  # the backdrop's blur (CoverView soft) and its CSS zoom
+BACKDROP_DIM = 0.55  # its brightness
+
+
+def _opaque(tex):
+    """A rendered texture as a plain opaque one: GTK then skips whatever it covers (an alpha texture is
+    blended over everything under it: the lens's 2800 stacked rings cost 1 ms each, opaque 0.1 ms)."""
+    d = Gdk.TextureDownloader.new(tex)
+    d.set_format(Gdk.MemoryFormat.R8G8B8)
+    data, stride = d.download_bytes()
+    return Gdk.MemoryTexture.new(tex.get_width(), tex.get_height(), Gdk.MemoryFormat.R8G8B8, data, stride)
+
+
+def _dim_matrix(k: float) -> Graphene.Matrix:
+    """Colours times k, alpha as it is (CSS brightness(k))."""
+    return Graphene.Matrix().init_from_float([k, 0, 0, 0, 0, k, 0, 0, 0, 0, k, 0, 0, 0, 0, 1])
 
 
 class FlagLogo(Gtk.Widget):
@@ -3189,6 +3261,9 @@ class GlassCard(Gtk.Box):
         self.pulse_tick = None  # the mouse on it: the magnification breathes, like a magnifier moved up and down
         self.lift = 0.0  # the card drawn this much bigger meanwhile (it pumps, outline and all)
         self._lens_cache = (None, None)
+        self._flat_cache = (None, None)  # (key, (texture, where)): what's behind, flattened for the lens
+        self._build = None  # a lens texture being built over several frames (_lens_texture)
+        self._build_tick = None
         self.concave = False  # lit like a dish: shade along the top inside edge, light along the bottom
         self.color = None  # (r, g, b, alpha): colored glass
         self.scrim = None  # the shaded panel it lies on: its shading copied into the glass (see-through)
@@ -3440,6 +3515,8 @@ class GlassCard(Gtk.Box):
         tex = self._lens_texture(w, h) if self.cache_lens else None
         if tex:
             snap.append_texture(tex, box)
+        elif self.cache_lens:  # its first texture still being built: plainly magnified meanwhile
+            self._behind(snap, w, h, self.mag, self.mag)
         else:
             self._lens(snap, w, h)
         self._finish(snap, w, h, box, rr, rim)
@@ -3454,28 +3531,75 @@ class GlassCard(Gtk.Box):
             key += [id(view.pic), view.get_width(), view.get_height()]
         return tuple(key)
 
+    BUILD_MS = 8.0  # time a frame gives to building lens textures, all glass together (its own drawing on top)
+    _spent = [None, 0.0]  # [frame, s]: the building time this frame has had so far
+
     def _lens_texture(self, w: float, h: float):
-        """The lens layers rendered once into a texture (at the screen's scale, sharp) and drawn from it until
-        something behind it changes: one texture a frame instead of a hundred layers (smooth animations)."""
+        """The lens layers rendered into a texture (at the screen's scale, sharp) and drawn from it until
+        something behind it changes: one texture a frame instead of a hundred layers (smooth animations).
+        A big one is built over several frames, BUILD_MS each: the big panel's 2800 rings took 2.1 s in one go,
+        a frozen window, and past ~2 s the kernel resets the GPU (the app's drawing gone with it). Meanwhile
+        the last one shows (None at first: the caller shows it plainly magnified)."""
         key = self._lens_key(w, h)
         if self._lens_cache[0] == key:
             return self._lens_cache[1]
         native = self.get_native()
         if not native:
             return None
-        surf = native.get_surface()
-        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
-        s = Gtk.Snapshot()
-        s.scale(k, k)
-        self._lens(s, w, h)
-        node = s.to_node()
-        if node is None:
-            return None
-        tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, w * k, h * k))
-        self._lens_cache = (key, tex)
-        return tex
+        build = self._build
+        if build is None or build["key"] != key:
+            surf = native.get_surface()
+            k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+            plan = self._lens_plan(w, h)
+            build = self._build = {"key": key, "k": k, "plan": plan, "next": 0, "per": 64, "tex": None,
+                                   "flat": "later" if len(plan["rings"]) > 9 else None}
+        renderer, k = native.get_renderer(), build["k"]
+        area = Graphene.Rect().init(0, 0, w * k, h * k)
+        rings = build["plan"]["rings"]
+        clock = self.get_frame_clock()
+        frame = clock.get_frame_counter() if clock else None
+        if GlassCard._spent[0] != frame:
+            GlassCard._spent[:] = [frame, 0.0]
+        start = time.perf_counter()
+        end = start + max(0.0, self.BUILD_MS / 1000 - GlassCard._spent[1])
+        if build["flat"] == "later":  # what's behind flattened: a step of its own
+            if time.perf_counter() < end:
+                build["flat"] = self._flat(w, h, build["plan"]["rx"], build["plan"]["ry"])
+                end = start  # its frame is used up
+        while build["flat"] != "later" and build["next"] < len(rings) and time.perf_counter() < end:
+            first, last = build["next"], min(len(rings), build["next"] + build["per"])
+            t = time.perf_counter()
+            s = Gtk.Snapshot()
+            if build["tex"]:
+                s.append_texture(build["tex"], area)  # the rings so far: the next ones go on top
+            s.scale(k, k)
+            self._rings(s, w, h, rings, first, last, build["flat"])
+            node = s.to_node()
+            if node is not None:
+                build["tex"] = renderer.render_texture(node, area)
+            build["next"] = last
+            took = time.perf_counter() - t  # render_texture waits for the GPU: its real time
+            # each piece has a cost of its own (the rings so far copied in and out): grow or shrink towards
+            # BUILD_MS rather than scaling by it (that shrank the pieces to a ring each, never done)
+            build["per"] = min(4096, build["per"] * 3 // 2 + 1) if took * 1000 < self.BUILD_MS \
+                else max(1, build["per"] * 2 // 3)
+        GlassCard._spent[1] += time.perf_counter() - start
+        if build["next"] >= len(rings):
+            self._build = None
+            self._lens_cache = (key, _opaque(build["tex"]) if build["tex"] else None)  # drawn every frame: opaque
+            return self._lens_cache[1]
+        if self._build_tick is None:  # frames keep coming until it's built
+            self._build_tick = self.add_tick_callback(self._build_step)
+        return self._lens_cache[1]
 
-    def _lens(self, snap, w: float, h: float) -> None:
+    def _build_step(self, *_) -> bool:
+        if self._build is None:
+            self._build_tick = None
+            return GLib.SOURCE_REMOVE
+        self.queue_draw()
+        return GLib.SOURCE_CONTINUE
+
+    def _lens_plan(self, w: float, h: float) -> dict:
         # A fish-eye lens, sharp: the middle magnified most (mag), less and less towards the edges, which are
         # bent the other way (they show what lies beyond, squeezed in). No blending (that ghosts and looks
         # blurred): hard-edged layers from the edge in, each shifted under 1 px from the one outside it.
@@ -3490,15 +3614,63 @@ class GlassCard(Gtk.Box):
         # The bend runs over the outer three quarters only: the middle is one layer, magnified evenly (rings
         # reaching the middle become thin strips, their seams lines across the glass)
         depth = lens * 0.75
+        rings = []
         for k in range(0, steps + 1):
             bend = 1 - k / steps  # 1 at the edge, 0 inside
             d = depth * (1 - bend ** (1 / self.curve))  # where the curve falls to `bend`
-            sx, sy = self.mag + (rx - self.mag) * bend, self.mag + (ry - self.mag) * bend
-            if k:
+            rings.append((d, self.mag + (rx - self.mag) * bend, self.mag + (ry - self.mag) * bend))
+        return {"rx": rx, "ry": ry, "rings": rings}
+
+    def _lens(self, snap, w: float, h: float) -> None:
+        """The whole lens drawn at once (live glass: the gear menu's)."""
+        rings = self._lens_plan(w, h)["rings"]
+        self._rings(snap, w, h, rings, 0, len(rings), None)
+
+    def _rings(self, snap, w: float, h: float, rings: list, first: int, last: int, flat) -> None:
+        """Rings first..last-1, each clipped to its rounded rect. With `flat` (what's behind as one texture),
+        each draws that one picture (a ring of all the layers behind, the side bars' blur nine times over,
+        took 0.8 ms; one picture 0.08). Drawing only each ring's band was slower: more pieces, not less paint."""
+        for i in range(first, last):
+            d, sx, sy = rings[i]
+            if i:
                 snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self._ring_r(d, w, h)))
-            self._behind(snap, w, h, sx, sy)
-            if k:
+            if flat:
+                snap.save()
+                snap.translate(Graphene.Point().init(w / 2, h / 2))
+                snap.scale(sx, sy)
+                snap.translate(Graphene.Point().init(-w / 2, -h / 2))
+                snap.append_texture(*flat)
+                snap.restore()
+            else:
+                self._behind(snap, w, h, sx, sy)
+            if i:
                 snap.pop()
+
+    def _flat(self, w: float, h: float, rx: float, ry: float):
+        """(texture, where) of what's behind the glass, as far out as its edge squeezes in (rx, ry), at the
+        screen's scale times the middle's magnification: as sharp as the layers drawn one by one."""
+        lk = self._lens_key(w, h)
+        key = (lk[:3] + lk[4:], rx, ry, bool(self.pulse_tick))  # not the magnification: it breathes
+        if self._flat_cache[0] == key:
+            return self._flat_cache[1]
+        native = self.get_native()
+        if not native:
+            return None
+        surf = native.get_surface()
+        most = self._base_mag + self.PULSE if self.pulse_tick else self.mag
+        k = (surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()) * max(1.0, most)
+        ew, eh = w / min(1.0, rx) + 4, h / min(1.0, ry) + 4
+        box = Graphene.Rect().init((w - ew) / 2, (h - eh) / 2, ew, eh)
+        s = Gtk.Snapshot()
+        s.scale(k, k)
+        s.translate(Graphene.Point().init(-box.get_x(), -box.get_y()))
+        self._behind(s, w, h, 1.0, 1.0)
+        node = s.to_node()
+        if node is None:
+            return None
+        self._flat_cache = (key, (_opaque(native.get_renderer().render_texture(
+            node, Graphene.Rect().init(0, 0, ew * k, eh * k))), box))
+        return self._flat_cache[1]
 
     def _finish(self, snap, w: float, h: float, box, rr, rim: float) -> None:
         """Over the lens: the flash, the shading, the light on the edges (cheap, drawn each time)."""
@@ -4035,7 +4207,7 @@ class Window(Adw.ApplicationWindow):
         # centred in a wide one), over a blurred copy of itself that fills the
         # rest of the window, whatever its shape; everything else lies on top.
         # A new cover morphs in (CoverView).
-        self.backdrop = CoverView("cover")
+        self.backdrop = CoverView("cover", soft=BACKDROP_BLUR, dim=BACKDROP_DIM)
         self.backdrop.add_css_class("backdrop")
         self.cover = CoverView("contain")
         bg = Gtk.Overlay(child=self.backdrop, hexpand=True, vexpand=True, overflow=Gtk.Overflow.HIDDEN)
