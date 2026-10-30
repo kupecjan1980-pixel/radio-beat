@@ -8,7 +8,8 @@ iTunes) for the album, proper spelling and the cover.
 
 It starts playing right away. Closing the window keeps it playing, with an
 icon in the bar's tray (StatusNotifierItem) that shows the window again;
-Stop quits. Started at login (--autostart) it plays with only the tray icon.
+Stop quits. Started at login (--autostart) it opens in full screen; --hidden (a restart after an update while
+the window was closed) plays with only the tray icon.
 """
 
 import collections
@@ -4599,7 +4600,7 @@ class App(Adw.Application):
         self._started = True
         if first:
             self.play()
-        if "--autostart" in args and first:
+        if "--hidden" in args and first:
             return 0
         self.show_window()
         return 0
@@ -4680,7 +4681,7 @@ class App(Adw.Application):
             return False
         # Start the new version once this one is gone (same app id), then quit; with the window only if it was up.
         shown = self.win is not None and self.win.get_visible()
-        subprocess.Popen(["sh", "-c", f"sleep 2; exec {launcher()}{'' if shown else ' --autostart'}"],
+        subprocess.Popen(["sh", "-c", f"sleep 2; exec {launcher()}{'' if shown else ' --hidden'}"],
                          start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.quit_all()
