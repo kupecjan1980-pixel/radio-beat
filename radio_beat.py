@@ -1573,6 +1573,7 @@ class Enhancer:
         self.light = False  # the job now is a small picture's quick one
         self.light_done: set[str] = set()  # small pictures shown quick, waiting for the full enhancing
         self.cache_used = self.cache_allowed = -1  # bytes (counted at start, then kept up to date)
+        self.on_gone = None  # called with each picture the cache lets go (CacheShare: not fetched back)
         self.sizes: dict[str, list] = {}  # kind -> [original bytes, enhanced bytes or None while working]
         threading.Thread(target=self._trim, daemon=True).start()
         # NPU (testing, off unless switched on): AMD XDNA through ONNX Runtime's Vitis AI provider.
@@ -2420,6 +2421,8 @@ class Enhancer:
             self.cache_used = used
             uses.pop(os.path.basename(f), None)
             gone = True
+            if self.on_gone:
+                self.on_gone(os.path.basename(f))
             for p in (f, f[:-4] + ".txt"):
                 try:
                     os.remove(p)
@@ -2432,6 +2435,278 @@ class Enhancer:
                 os.replace(self.USES + ".tmp", self.USES)
             except OSError:
                 pass
+
+
+# --- the picture cache shared on the local network ------------------------------------------------
+# Every computer running Rádio Beat on the same network keeps its own full copy of the enhanced pictures:
+# each one serves its cache (read, and new pictures given to it) on SHARE_PORT, finds the others by
+# trying that port on its own /24 network every SHARE_EVERY s, then fetches what it lacks and hands over
+# what they lack. A picture is the same file (the same name) on every computer, so nothing's there twice.
+# Only computers on the local network (private addresses) are answered; only cache files are accepted
+# (40-hex names, a whole JPEG or a short text), and none the cache let go before (they'd come right back).
+# Either way round is enough: a computer whose firewall turns the others away still fetches and hands over.
+
+SHARE_PORT = 48765
+SHARE_SCREEN = (3840, 2160)  # pictures enhanced for at least this (App.enhance_px): the same files everywhere
+SHARE_EVERY = 600
+SHARE_NAME = re.compile(r"^[0-9a-f]{40}\.(jpg|txt)$")
+SHARE_MAX = 40 << 20  # bytes a picture may have
+
+
+class CacheShare:
+    def __init__(self, enhancer, on_status):
+        self.enh = enhancer
+        self.on_status = on_status
+        self.on = False
+        self.peers: dict[str, str] = {}  # address -> its name
+        self.text = "Off"
+        self.got = self.gave = 0  # pictures fetched and handed over since the start
+        self.server = None
+        self.wake = threading.Event()
+        self.gone_path = os.path.join(UPSCALED_DIR, "gone.json")
+        try:
+            with open(self.gone_path) as f:
+                self.gone = set(json.load(f))
+        except (OSError, ValueError):
+            self.gone = set()
+        enhancer.on_gone = self._let_go
+        try:
+            with open(os.path.join(DATA_DIR, "share-id")) as f:
+                self.id = f.read().strip()
+        except OSError:
+            self.id = ""
+        if not self.id:
+            self.id = f"{socket.gethostname()}-{random.getrandbits(32):08x}"
+            try:
+                os.makedirs(DATA_DIR, exist_ok=True)
+                with open(os.path.join(DATA_DIR, "share-id"), "w") as f:
+                    f.write(self.id)
+            except OSError:
+                pass
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def set_on(self, on: bool) -> None:
+        self.on = on
+        if on and self.server is None:
+            self._serve()
+        elif not on and self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
+        self._say("Looking for other computers on this network…" if on else "Off")
+        if on:
+            self.wake.set()
+
+    def _say(self, text: str) -> None:
+        self.text = text
+        GLib.idle_add(lambda: (self.on_status(), False)[1])
+
+    def _let_go(self, name: str) -> None:
+        self.gone.add(name)
+        if len(self.gone) > 20000:
+            self.gone = set(list(self.gone)[-10000:])
+        try:
+            with open(self.gone_path + ".tmp", "w") as f:
+                json.dump(sorted(self.gone), f)
+            os.replace(self.gone_path + ".tmp", self.gone_path)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _names() -> set[str]:
+        try:
+            return {f for f in os.listdir(UPSCALED_DIR) if SHARE_NAME.match(f)}
+        except OSError:
+            return set()
+
+    def _room(self, n: int) -> bool:
+        e = self.enh
+        return e.cache_allowed < 0 or e.cache_used + n <= e.cache_allowed
+
+    def _store(self, name: str, data: bytes) -> bool:
+        """A picture (or its notes) from another computer, kept when it's whole and new here."""
+        path = os.path.join(UPSCALED_DIR, name)
+        if not SHARE_NAME.match(name) or name in self.gone or os.path.exists(path):
+            return False
+        if name.endswith(".txt"):
+            if len(data) > 4096 or not os.path.exists(path[:-4] + ".jpg"):  # only with its picture
+                return False
+            try:
+                data.decode()
+            except UnicodeDecodeError:
+                return False
+        elif not (data[:2] == b"\xff\xd8" and data[-2:] == b"\xff\xd9") or not self._room(len(data)):
+            return False
+        os.makedirs(UPSCALED_DIR, exist_ok=True)
+        with open(path + ".part", "wb") as f:
+            f.write(data)
+        os.replace(path + ".part", path)
+        if name.endswith(".jpg"):
+            self.enh.cache_used += len(data)
+        return True
+
+    # serving
+    def _serve(self) -> None:
+        import http.server
+        import ipaddress
+        share = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def _local(self) -> bool:
+                try:
+                    ip = ipaddress.ip_address(self.client_address[0])
+                except ValueError:
+                    return False
+                if ip.is_private or ip.is_link_local or ip.is_loopback:
+                    return True
+                self.send_error(403)
+                return False
+
+            def _reply(self, body: bytes, kind: str = "application/octet-stream") -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if not self._local():
+                    return
+                if self.path == "/radio-beat/v1/list":
+                    return self._reply(json.dumps({"id": share.id, "files": sorted(share._names())}).encode(),
+                                       "application/json")
+                name = self.path.rsplit("/", 1)[-1]
+                if self.path.startswith("/radio-beat/v1/file/") and SHARE_NAME.match(name):
+                    try:
+                        with open(os.path.join(UPSCALED_DIR, name), "rb") as f:
+                            return self._reply(f.read())
+                    except OSError:
+                        pass
+                self.send_error(404)
+
+            def do_PUT(self):
+                if not self._local():
+                    return
+                name = self.path.rsplit("/", 1)[-1]
+                n = int(self.headers.get("Content-Length") or 0)
+                if not self.path.startswith("/radio-beat/v1/file/") or not SHARE_NAME.match(name) \
+                        or not 0 < n <= SHARE_MAX:
+                    return self.send_error(400)
+                ok = share._store(name, self.rfile.read(n))
+                if ok and name.endswith(".jpg"):
+                    share.got += 1
+                self.send_response(201 if ok else 409)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        try:
+            self.server = http.server.ThreadingHTTPServer(("0.0.0.0", SHARE_PORT), Handler)
+        except OSError as e:
+            self.server = None
+            self._say(f"Can't serve the pictures (port {SHARE_PORT}: {e.strerror}); still fetches from others")
+            return
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    # finding the others, and swapping pictures with them
+    def _loop(self) -> None:
+        time.sleep(30)  # the cache counted first (its room)
+        while True:
+            if self.on:
+                try:
+                    self._round()
+                except Exception as e:  # never the app's end
+                    self._say(f"Sharing failed: {e}")
+            self.wake.wait(SHARE_EVERY)
+            self.wake.clear()
+
+    @staticmethod
+    def _own_ip() -> str | None:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))  # no packet goes out: just the address it'd use
+            return s.getsockname()[0]
+        except OSError:
+            return None
+        finally:
+            s.close()
+
+    def _ask(self, ip: str, path: str, data: bytes | None = None, timeout: float = 20):
+        req = urllib.request.Request(f"http://{ip}:{SHARE_PORT}{path}", data=data,
+                                     method="PUT" if data is not None else "GET")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+
+    def _find(self) -> dict[str, str]:
+        import concurrent.futures
+        me = self._own_ip()
+        if not me or not __import__("ipaddress").ip_address(me).is_private:
+            return {}
+        net = me.rsplit(".", 1)[0]
+
+        def knock(ip):
+            try:
+                with socket.create_connection((ip, SHARE_PORT), timeout=0.4):
+                    return ip
+            except OSError:
+                return None
+
+        cands = [f"{net}.{i}" for i in range(1, 255) if f"{net}.{i}" != me] + list(self.peers)
+        with concurrent.futures.ThreadPoolExecutor(64) as pool:
+            open_ = {ip for ip in pool.map(knock, dict.fromkeys(cands)) if ip}
+        found = {}
+        for ip in open_:
+            try:
+                got = json.loads(self._ask(ip, "/radio-beat/v1/list", timeout=5))
+            except (OSError, ValueError):
+                continue
+            if got.get("id") and got["id"] != self.id:
+                found[ip] = got["id"]
+        return found
+
+    def _round(self) -> None:
+        self.peers = self._find()
+        if not self.peers:
+            self._say(f"No other computer with Rádio Beat on this network yet (looks every {SHARE_EVERY // 60} min)")
+            return
+        for ip, who in self.peers.items():
+            theirs = set(json.loads(self._ask(ip, "/radio-beat/v1/list")).get("files", []))
+            mine = self._names()
+            got = gave = 0
+            # a picture's notes travel with it
+            for name in sorted(theirs - mine - self.gone, key=lambda n: n.endswith(".txt")):
+                if not self.on:
+                    return
+                if name.endswith(".txt") and name[:-4] + ".jpg" not in self._names():
+                    continue
+                if name.endswith(".jpg") and not self._room(0):
+                    break  # full here
+                try:
+                    if self._store(name, self._ask(ip, f"/radio-beat/v1/file/{name}", timeout=60)) \
+                            and name.endswith(".jpg"):
+                        got += 1
+                except OSError:
+                    continue
+            for name in sorted(mine - theirs, key=lambda n: n.endswith(".txt")):
+                if not self.on:
+                    return
+                try:
+                    with open(os.path.join(UPSCALED_DIR, name), "rb") as f:
+                        self._ask(ip, f"/radio-beat/v1/file/{name}", f.read(), timeout=60)
+                    gave += name.endswith(".jpg")
+                except urllib.error.HTTPError:
+                    continue  # it doesn't want that one (it let it go, or it's full)
+                except OSError:
+                    break  # it turns us away (its firewall): it fetches from us itself
+            self.got += got
+            self.gave += gave
+            self._say(f"Shared with {who.rsplit('-', 1)[0]} ({ip}) at {time.strftime('%H:%M')}: "
+                      f"{got} pictures fetched, {gave} handed over (since the start: {self.got} in, {self.gave} out)")
+        if self.got:
+            self.enh._trim()
 
 
 # --- window ---------------------------------------------------------------------
@@ -3851,6 +4126,11 @@ class Window(Adw.ApplicationWindow):
         self.enhance_row.set_active(self.app.settings.get("enhance", True))
         self.enhance_row.connect("notify::active", lambda r, _: self.app.set_enhance(r.get_active()))
         group.add(self.enhance_row)
+        self.share_row = Adw.SwitchRow(title="Share pictures on this network", subtitle_lines=0,
+                                       subtitle=GLib.markup_escape_text(self.app.share_status()))
+        self.share_row.set_active(self.app.settings.get("share", True))
+        self.share_row.connect("notify::active", lambda r, _: self.app.set_share(r.get_active()))
+        group.add(self.share_row)
         self.npu_row = Adw.SwitchRow(title="Use the NPU (testing)", subtitle=self.app.enhancer.npu_text,
                                      subtitle_lines=0)
         self.npu_row.set_active(self.app.settings.get("npu", False))
@@ -4752,6 +5032,8 @@ class App(Adw.Application):
         self.logo_tex = None
         self.refined = None  # (before, after) of the last enhancing step: redrawn in, not morphed
         self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
+        self.share = CacheShare(self.enhancer, self._share_changed)
+        self.share.set_on(self.settings.get("share", True))
         if self.settings.get("npu", False):
             self.enhancer.npu_wanted = True
             threading.Thread(target=lambda: (self.enhancer.npu_probe(), GLib.idle_add(self._npu_checked)),
@@ -5264,7 +5546,11 @@ class App(Adw.Application):
         if not tex:
             return
         w, h = tex.get_width(), tex.get_height()
-        want = int(TEXT_PT["pic"] * 0.7 * 2 * max(1.0, self.win._scale if self.win else 1.0))
+        px = self.enhance_px()
+        if not px:
+            return
+        # (for the 4K full screen every computer enhances for: the same file everywhere, CacheShare)
+        want = int(TEXT_PT["pic"] * 0.7 * 2 * max(1.0, min(px[0] / BASE_SIZE[0], px[1] / BASE_SIZE[1]) / 2))
         f = max(1.0, want / max(1, min(w, h)))
         size = (round(w * f), round(h * f)) if f >= UPSCALE_FROM else (w, h)
 
@@ -5275,7 +5561,7 @@ class App(Adw.Application):
                 return
             if self.win and self.win.puddle_open:
                 self.win.puddle_pics()
-        self.enhancer.request(f"pic:{url}", url, data, (w, h), size, done, screen=self.screen_px())
+        self.enhancer.request(f"pic:{url}", url, data, (w, h), size, done, screen=px)
 
     def enhance_small_full(self) -> None:
         """The panels closed: the small pictures shown with the quick pass get the full enhancing now."""
@@ -5290,7 +5576,7 @@ class App(Adw.Application):
         full screen shows it bigger than it is), like the cover."""
         cur, _ = on_air(self.schedule, time.localtime())
         url = cur and cur["img"]
-        tex, data, size = self.show_pics.get(url), self.show_src.get(url), self.screen_px()
+        tex, data, size = self.show_pics.get(url), self.show_src.get(url), self.enhance_px()
         if not url or not tex or not data or not size or url in self.show_done:
             return
         if not self.settings.get("enhance", True) or (self.enhancer.ai is None and not self.enhancer.ffmpeg):
@@ -5725,6 +6011,25 @@ class App(Adw.Application):
         size = self.enhancer.size_text(getattr(self, "picture_kind", "cover"))
         return "\n".join(x for x in (self.picture_text, size, self.enhancer.cache_text()) if x)
 
+    def set_share(self, on: bool) -> None:
+        self.settings["share"] = on
+        save_settings(self.settings)
+        self.share.set_on(on)
+
+    def _share_changed(self) -> None:
+        if self.win:
+            self.win.share_row.set_subtitle(GLib.markup_escape_text(self.share_status()))
+
+    def share_status(self) -> str:
+        return ("Every computer with Rádio Beat on this network keeps the same enhanced pictures (each its own "
+                f"copy, none twice): what one makes, the others have too. {self.share.text}")
+
+    def enhance_px(self) -> tuple[int, int] | None:
+        """The screen size pictures are enhanced for: at least 4K, so every computer makes (and shares) the same
+        files whatever its screen (a smaller screen shows them scaled down)."""
+        size = self.screen_px()
+        return (max(size[0], SHARE_SCREEN[0]), max(size[1], SHARE_SCREEN[1])) if size else None
+
     def set_npu(self, on: bool) -> None:
         """AI upscaling on the NPU first (testing): checks what's there, says so in the menu."""
         self.settings["npu"] = on
@@ -5778,7 +6083,7 @@ class App(Adw.Application):
         and sharpened and denoised either way."""
         tex = self.orig_tex.get(kind)
         src = self.upscale_src.get(kind)
-        size = self.screen_px()
+        size = self.enhance_px()
         if not tex or not src or not size:
             return
         w, h = tex.get_width(), tex.get_height()
