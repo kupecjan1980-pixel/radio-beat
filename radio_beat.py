@@ -2466,6 +2466,7 @@ class CacheShare:
         self.on = False
         self.peers: dict[str, str] = {}  # address -> its name
         self.text = "Off"
+        self.port_note = ""
         self.got = self.gave = 0  # pictures fetched and handed over since the start
         self.server = None
         self.wake = threading.Event()
@@ -2491,7 +2492,12 @@ class CacheShare:
                 pass
         threading.Thread(target=self._loop, daemon=True).start()
 
-    def set_on(self, on: bool) -> None:
+    def set_on(self, on: bool, asked: bool = False) -> None:
+        if asked:  # turned on by hand: the firewall question may be asked again
+            try:
+                os.remove(self.REFUSED)
+            except OSError:
+                pass
         self.on = on
         if on and self.server is None:
             self._serve()
@@ -2502,6 +2508,11 @@ class CacheShare:
         self._say("Looking for other computers on this network…" if on else "Off")
         if on:
             self.wake.set()
+
+    def _note(self, text: str) -> None:
+        """What the firewall question came to: shown after the sharing's own status."""
+        self.port_note = text
+        GLib.idle_add(lambda: (self.on_status(), False)[1])
 
     def _say(self, text: str) -> None:
         self.text = text
@@ -2616,6 +2627,71 @@ class CacheShare:
             return
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        threading.Thread(target=self._open_port, daemon=True).start()
+
+    # the firewall: the port opened for the local network (once, with the administrator's password)
+    PRIVATE = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    REFUSED = os.path.join(DATA_DIR, "share-port-refused")
+
+    @staticmethod
+    def _run(cmd: list[str]) -> subprocess.CompletedProcess | None:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def _blocked(self) -> tuple[str, str] | None:
+        """(firewall, the root command opening the port) when a firewall turns the others away, else None."""
+        if shutil.which("ufw") and (r := self._run(["systemctl", "is-active", "ufw"])) and r.stdout.strip() == "active":
+            try:
+                with open("/etc/ufw/user.rules") as f:
+                    if f"--dport {SHARE_PORT} " in f.read():
+                        return None
+            except OSError:
+                pass
+            return "ufw", " && ".join(f"ufw allow proto tcp from {net} to any port {SHARE_PORT} comment radio-beat"
+                                      for net in self.PRIVATE)
+        if shutil.which("firewall-cmd") and (r := self._run(["firewall-cmd", "--state"])) \
+                and r.stdout.strip() == "running":
+            zone = (self._run(["firewall-cmd", "--get-default-zone"]) or subprocess.CompletedProcess([], 0, "")).stdout.strip()
+            if not zone:
+                return None
+            ports = (self._run(["firewall-cmd", f"--zone={zone}", "--list-ports"])
+                     or subprocess.CompletedProcess([], 0, "")).stdout.split()
+            for p in ports:  # "48765/tcp", "1025-65535/tcp" (Fedora's desktop zone)
+                rng, _, proto = p.partition("/")
+                lo, _, hi = rng.partition("-")
+                if proto == "tcp" and lo.isdigit() and int(lo) <= SHARE_PORT <= int(hi or lo):
+                    return None
+            return "firewalld", (f"firewall-cmd --permanent --zone={zone} --add-port={SHARE_PORT}/tcp && "
+                                 f"firewall-cmd --reload")
+        return None
+
+    def _open_port(self) -> None:
+        got = self._blocked()
+        if not got:
+            self._note("")
+            return
+        wall, cmd = got
+        how = f"run once in a terminal: sudo sh -c '{cmd}'"
+        if os.path.exists(self.REFUSED):
+            self._note(f"The firewall ({wall}) turns the others away; this one still fetches and hands over. "
+                      f"To let them in, turn sharing off and on (asks again), or {how}")
+            return
+        self._note(f"Asking for the administrator's password to open port {SHARE_PORT} ({wall}, this network only)…")
+        r = self._run(["pkexec", "sh", "-c", cmd]) if shutil.which("pkexec") else None
+        if r is not None and r.returncode == 0:
+            self._note(f"Port {SHARE_PORT} opened in the firewall ({wall}, local network only).")
+            self.wake.set()
+            return
+        if r is not None and r.returncode in (126, 127) and "agent" not in (r.stderr or "").lower():
+            try:  # turned down: not asked at every start
+                with open(self.REFUSED, "w") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M"))
+            except OSError:
+                pass
+        self._note(f"Couldn't open port {SHARE_PORT} in the firewall ({wall}); this one still fetches and hands "
+                  f"over. To let the others in too, {how}")
 
     # finding the others, and swapping pictures with them
     def _loop(self) -> None:
@@ -4476,8 +4552,14 @@ class Window(Adw.ApplicationWindow):
         mid = Gtk.GestureClick(button=Gdk.BUTTON_MIDDLE)
         mid.connect("pressed", lambda g, *_: (g.set_state(Gtk.EventSequenceState.CLAIMED), self._puddle_next()))
         self.puddle.add_controller(mid)
+        # the wheel anywhere on it: noted first (the views wait before scrolling by themselves again) ...
+        touch = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        touch.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        touch.connect("scroll", lambda *_: (setattr(self, "_puddle_touched", time.monotonic()), False)[1])
+        self.puddle.add_controller(touch)
+        # ... and where the list doesn't take it itself (over the pinned show, the tabs), it scrolls the list
         wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
-        wheel.connect("scroll", lambda *_: (setattr(self, "_puddle_touched", time.monotonic()), False)[1])
+        wheel.connect("scroll", self._puddle_wheel)
         self.puddle.add_controller(wheel)
         self.info_water = Water(self, self.info_tile, self.puddle, overlay)
         self.neck = self.info_water.neck
@@ -4581,6 +4663,11 @@ class Window(Adw.ApplicationWindow):
         for water in self.waters:
             if water.open and not water.contains(w):
                 water.hide()
+
+    def _puddle_wheel(self, _ctl, _dx, dy) -> bool:
+        adj = self.puddle_scroll.get_vadjustment()
+        adj.set_value(adj.get_value() + dy * 60)
+        return True  # never the window's volume
 
     def _puddle_next(self) -> None:
         self._puddle_go((self.puddle_mode + 1) % len(self.PUDDLE_MODES))
@@ -6020,7 +6107,7 @@ class App(Adw.Application):
     def set_share(self, on: bool) -> None:
         self.settings["share"] = on
         save_settings(self.settings)
-        self.share.set_on(on)
+        self.share.set_on(on, asked=True)
 
     def _share_changed(self) -> None:
         if self.win:
@@ -6028,7 +6115,8 @@ class App(Adw.Application):
 
     def share_status(self) -> str:
         return ("Every computer with Rádio Beat on this network keeps the same enhanced pictures (each its own "
-                f"copy, none twice): what one makes, the others have too. {self.share.text}")
+                f"copy, none twice): what one makes, the others have too. {self.share.text} "
+                f"{self.share.port_note}").strip()
 
     def enhance_px(self) -> tuple[int, int] | None:
         """The screen size pictures are enhanced for: at least 4K, so every computer makes (and shares) the same
