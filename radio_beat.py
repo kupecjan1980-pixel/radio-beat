@@ -3219,21 +3219,44 @@ class Puddle(GlassCard):
             self._mirror_paint = Gtk.WidgetPaintable.new(src)
             # the buttons change (pumping, ticking): their reflection along
             self._mirror_paint.connect("invalidate-contents", lambda *_: self.get_mapped() and self.queue_draw())
-        band = min(vis, 70.0)
-        snap.push_mask(Gsk.MaskMode.ALPHA)
-        snap.append_linear_gradient(Graphene.Rect().init(0, 0, w, band), Graphene.Point().init(0, 0),
-                                    Graphene.Point().init(0, band),
-                                    [_stop(0.0, 0, 0, 0, 0.22), _stop(1.0, 0, 0, 0, 0.0)])
-        snap.pop()
-        snap.push_blur(1.5)
-        snap.save()
-        snap.translate(Graphene.Point().init(p.x, -p.y))  # mirrored about the glass's top edge
-        snap.scale(1, -1)
-        self._mirror_paint.snapshot(snap, sw, sh)
-        snap.restore()
-        snap.pop()
-        snap.pop()
+        band = min(vis, 90.0)
+        r = min(self.radius, w / 2)
 
+        def slice_(x0: float, x1: float) -> None:
+            # Under a rounded corner the glass's top bends down and away: the reflection follows its arc, and
+            # squeezes towards the edge as the surface turns from the eye.
+            d = max(0.0, r - (x0 + x1) / 2, (x0 + x1) / 2 - (w - r)) if r > 0 else 0.0
+            u = min(1.0, d / r) if r > 0 else 0.0
+            off = r - math.sqrt(max(0.0, r * r - d * d)) if r > 0 else 0.0
+            k = 0.35 + 0.65 * math.sqrt(max(0.0, 1 - u * u))
+            snap.save()
+            snap.push_clip(Graphene.Rect().init(x0, 0, x1 - x0, band + off))
+            snap.translate(Graphene.Point().init(0, off))
+            snap.scale(1, k)
+            snap.push_mask(Gsk.MaskMode.ALPHA)
+            snap.append_linear_gradient(Graphene.Rect().init(x0, 0, x1 - x0, band), Graphene.Point().init(0, 0),
+                                        Graphene.Point().init(0, band),
+                                        [_stop(0.0, 0, 0, 0, 0.45), _stop(0.5, 0, 0, 0, 0.16), _stop(1.0, 0, 0, 0, 0.0)])
+            snap.pop()
+            snap.translate(Graphene.Point().init(p.x, -p.y))  # mirrored about the glass's top edge
+            snap.scale(1, -1)
+            self._mirror_paint.snapshot(snap, sw, sh)
+            snap.pop()
+            snap.pop()
+            snap.restore()
+
+        snap.push_blur(1.0)
+        # the straight top in one piece; the corners in 1 px strips, each bent to the arc
+        lo, hi = max(0.0, p.x), min(w, p.x + sw)
+        x = lo
+        while x < hi:
+            if r <= x < w - r:
+                nx = min(hi, w - r)
+            else:
+                nx = min(hi, x + 1.0, r if x < r else hi)
+            slice_(x, nx)
+            x = nx
+        snap.pop()
 
 class Water:
     """A glass button's water: a neck from the button, then a tall body with what it holds; it flows down
@@ -3607,7 +3630,7 @@ class Window(Adw.ApplicationWindow):
         # Pause, stop and the speaker in round dishes of glass, magnifying sharply in the middle, bent at the
         # rim, lit like a dish; pause in red glass; each a little smaller than the one before.
         self.discs = []
-        for child, color, margin in ((self.play_btn, (227, 5, 26, 0.55), 0), (stop, None, 0), (vol_icon, None, 6)):
+        for child, color, margin in ((self.play_btn, (227, 5, 26, 0.55), 0), (stop, None, 0), (vol_icon, None, 0)):
             disc = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER,
                              halign=Gtk.Align.CENTER, margin_start=margin)
             disc.add_css_class("glass-disc")
@@ -3946,8 +3969,9 @@ class Window(Adw.ApplicationWindow):
         return False
 
     # --- the 'i' button's puddle: programme and curiosities ------------------------------------------
-    PUDDLE_MODES = ("ZAJÍMAVOSTI", "AKTUALITY", "DNES", "ZÍTRA", "POZÍTŘÍ")
-    PUDDLE_SPEED = 7  # px a second the curiosities scroll by themselves
+    PUDDLE_MODES = ("DNES", "ZAJÍMAVOSTI", "AKTUALITY", "ZÍTRA", "POZÍTŘÍ")
+    PUDDLE_SPEED = 7  # px a second the views scroll by themselves
+    PUDDLE_WAIT = 15  # s before they start: after opening, a tab or the wheel
 
     def cover_rect(self):
         """(left, top, right, bottom) of the cover as shown, in the window; None when there's none."""
@@ -3980,11 +4004,13 @@ class Window(Adw.ApplicationWindow):
         self.puddle = Puddle(behind, orientation=Gtk.Orientation.VERTICAL, spacing=8, halign=Gtk.Align.END,
                              valign=Gtk.Align.START)
         # The views as tabs (a click), and the wheel's button goes to the next one.
+        # They wrap when narrow. Each tab's cell gets the same share of the spare width, the tab centred in it:
+        # the gaps between the tabs are all the same, whatever their names' lengths.
         self.puddle_head = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6, row_spacing=6,
-                                       min_children_per_line=1, max_children_per_line=5)  # they wrap when narrow
+                                       min_children_per_line=1, max_children_per_line=5, homogeneous=False)
         self.puddle_tabs = []
         for i in range(len(self.PUDDLE_MODES)):
-            tab = Gtk.Button(label="", has_frame=False)
+            tab = Gtk.Button(label="", has_frame=False, halign=Gtk.Align.CENTER, hexpand=True)
             tab.add_css_class("puddle-tab")
             tab.connect("clicked", lambda _b, i=i: self._puddle_go(i))
             self.puddle_tabs.append(tab)
@@ -4017,6 +4043,10 @@ class Window(Adw.ApplicationWindow):
         self.puddle_items: list = []  # the curiosities shown this session
         self._puddle_touched = 0.0
         self._puddle_tick = None
+        # A new show on air: the panel opens on DNES by itself, for 10 s (unless it's touched meanwhile)
+        self._show_seen = None
+        self._auto_shown = 0.0
+        GLib.timeout_add_seconds(15, self._watch_show)
 
     @property
     def puddle_open(self) -> bool:
@@ -4031,11 +4061,28 @@ class Window(Adw.ApplicationWindow):
                 other.hide()
         if water is self.info_water:
             self.puddle_mode = 0
+            self._puddle_touched = time.monotonic()
             self._fill_puddle()
             if self._puddle_tick is None:
                 self._puddle_last = None
                 self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
         water.show()
+
+    def _watch_show(self) -> bool:
+        cur, _ = on_air(self.app.schedule, time.localtime())
+        key = cur and (cur["title"], cur["start"])
+        seen, self._show_seen = self._show_seen, key or self._show_seen
+        if key and seen is not None and key != seen and self.get_visible() \
+                and not any(w.open for w in self.waters):
+            self.toggle_water(self.info_water)  # opens on the first tab, DNES
+            self._auto_shown = self._puddle_touched
+            GLib.timeout_add_seconds(10, self._auto_hide, self._auto_shown)
+        return GLib.SOURCE_CONTINUE
+
+    def _auto_hide(self, token: float) -> bool:
+        if self.info_water.open and self._auto_shown == token and self._puddle_touched <= token:
+            self.info_water.hide()
+        return False
 
     def toggle_puddle(self) -> None:
         self.toggle_water(self.info_water)
@@ -4063,6 +4110,7 @@ class Window(Adw.ApplicationWindow):
 
     def _puddle_go(self, mode: int) -> None:
         self.puddle_mode = mode
+        self._puddle_touched = time.monotonic()
         self._fill_puddle()
 
     def _clear_puddle(self) -> None:
@@ -4128,13 +4176,13 @@ class Window(Adw.ApplicationWindow):
 
     def _fill_puddle(self) -> None:
         a = self.app
-        mode = self.puddle_mode
+        mode = self.PUDDLE_MODES[self.puddle_mode]
         for i, tab in enumerate(self.puddle_tabs):
             tab.set_label(a.cz(self.PUDDLE_MODES[i]))
-            (tab.add_css_class if i == mode else tab.remove_css_class)("on-air")
+            (tab.add_css_class if i == self.puddle_mode else tab.remove_css_class)("on-air")
         self._clear_puddle()
         now = time.localtime()
-        if mode == 0:
+        if mode == "ZAJÍMAVOSTI":
             if a.about:
                 info = a.info or {}
                 self._puddle_block(a.badge("NOW PLAYING"), plain_title(info.get("title") or a.song or ""),
@@ -4144,27 +4192,27 @@ class Window(Adw.ApplicationWindow):
             for item in self.puddle_items:  # under ZAJÍMAVOSTI: just the name, the picture beside
                 self._puddle_block("", item[1] or "Rádio Beat", item[2], img=item[3] if len(item) > 3 else "")
             return
-        if mode == 1:  # the station's news: a click opens the article
+        if mode == "AKTUALITY":  # the station's news: a click opens the article
             if not a.news:
                 self._puddle_block("", "", a.cz("Aktuality se načítají…"))
             for item in a.news:
                 self._puddle_block(item["date"], item["title"], a.cz(item["text"]), img=item["img"],
                                    url=item["url"])
             return
-        day = (now.tm_wday + mode - 2) % 7
+        day = (now.tm_wday + ("DNES", "ZÍTRA", "POZÍTŘÍ").index(mode)) % 7
         mins = now.tm_hour * 60 + now.tm_min
         cur, _ = on_air(a.schedule, now)
         shows = a.schedule.get(day) or []
-        if mode == 2 and cur:  # today: what's on air first (it may have begun yesterday evening)
+        if mode == "DNES" and cur:  # today: what's on air first (it may have begun yesterday evening)
             host = a.host if a.host and norm(a.host) != norm(cur["title"]) else None
             self._puddle_block("ON AIR", cur["title"], a.cz(" · ".join(x for x in (host, cur["desc"]) if x)),
                                now=True, img=cur.get("img") or "")
             shows = [x for x in shows if x is not cur]
-        if not shows and not (mode == 2 and cur):
+        if not shows and not (mode == "DNES" and cur):
             self._puddle_block("", "", a.cz("Program pro tento den zatím není."))
         for show in shows:
             when = f'{show["start"] // 60}:{show["start"] % 60:02d}'
-            is_now = mode == 2 and cur is not None and show is cur
+            is_now = mode == "DNES" and cur is not None and show is cur
             self._puddle_block(when, show["title"], a.cz(show.get("desc") or ""), now=is_now, img=show.get("img") or "")
 
     def _puddle_scroll_step(self, _w, clock) -> bool:
@@ -4173,11 +4221,11 @@ class Window(Adw.ApplicationWindow):
             return GLib.SOURCE_REMOVE
         t = clock.get_frame_time() / 1e6
         last, self._puddle_last = self._puddle_last, t
-        if self.puddle_mode != 0 or last is None or time.monotonic() - self._puddle_touched < 6:
-            return GLib.SOURCE_CONTINUE  # the curiosities scroll by themselves, not while the wheel just did
+        if last is None or time.monotonic() - self._puddle_touched < self.PUDDLE_WAIT:
+            return GLib.SOURCE_CONTINUE  # every view scrolls by itself, a while after it's shown or the wheel moved
         adj = self.puddle_scroll.get_vadjustment()
         adj.set_value(adj.get_value() + self.PUDDLE_SPEED * (t - last))
-        if adj.get_value() >= adj.get_upper() - adj.get_page_size() - 80 \
+        if self.PUDDLE_MODES[self.puddle_mode] == "ZAJÍMAVOSTI" and adj.get_value() >= adj.get_upper() - adj.get_page_size() - 80 \
                 and time.monotonic() - getattr(self, "_puddle_more_at", 0) > 4:  # near the end: one more
             self._puddle_more_at = time.monotonic()
             item = self.app.next_curiosity()
