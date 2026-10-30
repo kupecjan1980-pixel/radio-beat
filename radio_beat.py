@@ -2446,6 +2446,7 @@ CSS = b"""
 .puddle button.puddle-tab:hover { background: rgba(255,255,255,0.22); }
 .puddle button.puddle-tab.on-air { background: #E3051A; }
 .puddle .puddle-now { background: rgba(227,5,26,0.25); border-radius: 10px; padding: 6px; }
+.puddle .puddle-past { opacity: 0.55; }
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
 popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
 popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
@@ -3154,13 +3155,13 @@ class MenuGlass(GlassCard):
 
 
 class ClockView(Gtk.Widget):
-    """The time as tall as the room it's given, at its right; left of it the weekday at the top, centred, a
-    little bigger than the date below it. Their letters' outlines (not the fonts' line boxes) fill the room, in
+    """The time as tall as the room it's given, at its right; left of it the weekday at the top, as wide as
+    the room there, the date below it. Their letters' outlines (not the fonts' line boxes) fill the room, in
     the Beat Radio fonts, white with a shadow like the song info's."""
 
     FONTS = (("Anton", Pango.Weight.NORMAL), ("Oswald", Pango.Weight.SEMIBOLD), ("Oswald", Pango.Weight.SEMIBOLD))
     TIME_MAX = 0.6  # of the width at most: the day and date keep the rest
-    DAY_OVER_DATE = 1.15  # the weekday this much taller than the date
+    DATE_MAX = 0.36  # the date's share of the height at most
     GAP = 0.08  # between the time and the rest (of the width), and the day and the date (of the height)
 
     def __init__(self, **kw):
@@ -3168,6 +3169,7 @@ class ClockView(Gtk.Widget):
         self.texts = ("", "", "")
         self.room = (0, 0)
         self.lays = None
+        self.colon = True  # the time's colon blinks: a second on, a second off
 
     def _layout(self, which: int, pt: float):
         family, weight = self.FONTS[which]
@@ -3189,8 +3191,8 @@ class ClockView(Gtk.Widget):
         self.room, self.texts = (w, h), texts
         tm = self._fit(0, w * self.TIME_MAX, h)
         rest = w - tm[1].width - w * self.GAP
-        date = self._fit(2, rest, (h * (1 - self.GAP)) / (1 + self.DAY_OVER_DATE))
-        day = self._fit(1, rest, date[1].height * self.DAY_OVER_DATE)
+        date = self._fit(2, rest, h * self.DATE_MAX)
+        day = self._fit(1, rest, h * (1 - self.GAP) - date[1].height)  # as wide as its room
         self.lays = (tm, day, date, rest)
         self.set_size_request(w, h)
         self.queue_draw()
@@ -3200,6 +3202,13 @@ class ClockView(Gtk.Widget):
             return
         w, h = self.room
         (tl, ti), (yl, yi), (dl, di), rest = self.lays
+        i = self.texts[0].find(":")
+        if i >= 0:  # off: drawn see-through (the time keeps its place)
+            attrs = tl.get_attributes().copy()
+            alpha = Pango.attr_foreground_alpha_new(65535 if self.colon else 1)
+            alpha.start_index, alpha.end_index = i, i + 1
+            attrs.change(alpha)
+            tl.set_attributes(attrs)
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
         snap.push_shadow([shadow])
@@ -3210,6 +3219,32 @@ class ClockView(Gtk.Widget):
             snap.translate(Graphene.Point().init(x - ink.x, y - ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, 1))
             snap.restore()
+        snap.pop()
+
+
+class PinnedScroll(Gtk.ScrolledWindow):
+    """A scrolled list with a widget pinned over it (`pin`, in an overlay): what scrolls behind the pin isn't
+    drawn, so the pin stays clearly readable."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.pin = None
+
+    def do_snapshot(self, snap) -> None:
+        w, h = self.get_width(), self.get_height()
+        ok, b = (self.pin.compute_bounds(self) if self.pin is not None and self.pin.get_visible()
+                 else (False, None))
+        if not ok or b.get_height() <= 0 or h <= 0:
+            Gtk.ScrolledWindow.do_snapshot(self, snap)
+            return
+        y0, y1, soft = b.get_y() - 6, b.get_y() + b.get_height() + 6, 10  # the pin's band, a bit wider, soft
+        snap.push_mask(Gsk.MaskMode.ALPHA)
+        snap.append_linear_gradient(
+            Graphene.Rect().init(0, 0, w, h), Graphene.Point().init(0, 0), Graphene.Point().init(0, h),
+            [_stop(max(0.0, (y0 - soft) / h), 0, 0, 0, 1), _stop(max(0.0, y0 / h), 0, 0, 0, 0),
+             _stop(min(1.0, y1 / h), 0, 0, 0, 0), _stop(min(1.0, (y1 + soft) / h), 0, 0, 0, 1)])
+        snap.pop()
+        Gtk.ScrolledWindow.do_snapshot(self, snap)
         snap.pop()
 
 
@@ -3920,6 +3955,8 @@ class Window(Adw.ApplicationWindow):
                              f"{now.tm_mday}. {MONTHS[now.tm_mon - 1]} {now.tm_year}".upper())
         if self._clock_texts != self.clock.texts:
             self._place_clock()
+        self.clock.colon = now.tm_sec % 2 == 0
+        self.clock.queue_draw()
         return GLib.SOURCE_CONTINUE
 
     def _place_clock(self) -> bool:
@@ -4092,11 +4129,16 @@ class Window(Adw.ApplicationWindow):
             self.puddle_tabs.append(tab)
             self.puddle_head.append(tab)
         self.puddle_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        self.puddle_scroll = Gtk.ScrolledWindow(child=self.puddle_list, vexpand=True,
-                                                hscrollbar_policy=Gtk.PolicyType.NEVER,
-                                                vscrollbar_policy=Gtk.PolicyType.EXTERNAL)
+        self.puddle_scroll = PinnedScroll(child=self.puddle_list, vexpand=True,
+                                          hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                          vscrollbar_policy=Gtk.PolicyType.EXTERNAL)
+        # DNES: the show on air pinned one show from the top, the day's lineup scrolling behind it
+        self.puddle_pin = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.START, visible=False)
+        self.puddle_scroll.pin = self.puddle_pin
+        stage = Gtk.Overlay(child=self.puddle_scroll, vexpand=True)
+        stage.add_overlay(self.puddle_pin)
         self.puddle.append(self.puddle_head)
-        self.puddle.append(self.puddle_scroll)
+        self.puddle.append(stage)
         mid = Gtk.GestureClick(button=Gdk.BUTTON_MIDDLE)
         mid.connect("pressed", lambda g, *_: (g.set_state(Gtk.EventSequenceState.CLAIMED), self._puddle_next()))
         self.puddle.add_controller(mid)
@@ -4190,12 +4232,43 @@ class Window(Adw.ApplicationWindow):
         self._fill_puddle()
 
     def _clear_puddle(self) -> None:
-        while (c := self.puddle_list.get_first_child()) is not None:
-            self.puddle_list.remove(c)
+        for box in (self.puddle_list, self.puddle_pin):
+            while (c := box.get_first_child()) is not None:
+                box.remove(c)
+        self.puddle_pin.set_visible(False)
+        self._puddle_mark = None
         self.puddle_scroll.get_vadjustment().set_value(0)
 
+    def _center_now(self, tries: int = 100) -> bool:
+        """DNES: the show on air pinned one show from the top (the one before it above, more of the coming ones
+        below); the gap left for it in the lineup as tall as it is, and scrolled to just behind it."""
+        mark = self._puddle_mark
+        if mark is None or mark.get_parent() is not self.puddle_list:
+            return False
+        page, width = self.puddle_scroll.get_height(), self.puddle_scroll.get_width()
+        if page <= 0 or width <= 0:
+            if tries:
+                GLib.timeout_add(30, self._center_now, tries - 1)  # not laid out yet (the water still flowing)
+            return False
+        ph = self.puddle_pin.measure(Gtk.Orientation.VERTICAL, width)[1] if self.puddle_pin.get_visible() else 0
+        before = mark.get_prev_sibling()
+        # the show before it above, or as much of it as the pinned one is tall (a long one would push the
+        # coming shows out of view)
+        top = min(before.measure(Gtk.Orientation.VERTICAL, width)[1], ph) + 14 if before is not None else 0
+        top = max(0, min(top, page - ph))  # the pinned one always whole in view
+        self.puddle_pin.set_margin_top(top)
+        mark.set_size_request(-1, ph)
+        self.puddle_list.get_last_child().set_size_request(-1, max(0, int(page - top - ph - 28)))  # room below
+        ok, b = mark.compute_bounds(self.puddle_list)
+        if (not ok or abs(b.get_height() - ph) > 1) and tries:
+            GLib.timeout_add(30, self._center_now, tries - 1)  # once the new sizes are laid out
+            return False
+        if ok:
+            self.puddle_scroll.get_vadjustment().set_value(max(0.0, b.get_y() - top))
+        return False
+
     def _puddle_block(self, badge: str, title: str, text: str, now: bool = False, img: str | None = None,
-                      url: str = "") -> None:
+                      url: str = "", past: bool = False, into=None) -> None:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         if img is not None:  # a show: its picture beside its lines
             row = Gtk.Box(spacing=12)
@@ -4229,17 +4302,19 @@ class Window(Adw.ApplicationWindow):
             box.append(body)
         if now:
             outer.add_css_class("puddle-now")
+        if past:
+            outer.add_css_class("puddle-past")
         if url:  # a news item: the whole article in the browser
             click = Gtk.GestureClick()
             click.connect("released", lambda *_: Gtk.UriLauncher.new(url).launch(self, None, None, None))
             outer.add_controller(click)
             outer.set_cursor_from_name("pointer")
             outer.set_tooltip_text("Celý článek na radiobeat.cz")
-        self.puddle_list.append(outer)
+        (into or self.puddle_list).append(outer)
 
     def puddle_pics(self) -> None:
         """The lineup's pictures that came in since."""
-        stack = [self.puddle_list]
+        stack = [self.puddle_list, self.puddle_pin]
         while stack:
             w = stack.pop()
             url = getattr(w, "img_url", None)
@@ -4279,17 +4354,39 @@ class Window(Adw.ApplicationWindow):
         mins = now.tm_hour * 60 + now.tm_min
         cur, _ = on_air(a.schedule, now)
         shows = a.schedule.get(day) or []
-        if mode == "DNES" and cur:  # today: what's on air first (it may have begun yesterday evening)
-            host = a.host if a.host and norm(a.host) != norm(cur["title"]) else None
-            self._puddle_block("ON AIR", cur["title"], a.cz(" · ".join(x for x in (host, cur["desc"]) if x)),
-                               now=True, img=cur.get("img") or "")
-            shows = [x for x in shows if x is not cur]
-        if not shows and not (mode == "DNES" and cur):
+        if mode == "DNES":  # today by time: what's been on (a little grey), the show on air, what's coming
+            self._puddle_today(shows, cur, mins)
+            return
+        if not shows:
             self._puddle_block("", "", a.cz("Program pro tento den zatím není."))
         for show in shows:
             when = f'{show["start"] // 60}:{show["start"] % 60:02d}'
-            is_now = mode == "DNES" and cur is not None and show is cur
-            self._puddle_block(when, show["title"], a.cz(show.get("desc") or ""), now=is_now, img=show.get("img") or "")
+            self._puddle_block(when, show["title"], a.cz(show.get("desc") or ""), img=show.get("img") or "")
+
+    def _puddle_today(self, shows: list, cur, mins: int) -> None:
+        """The show on air pinned one show from the top (it may have begun yesterday evening), today's shows
+        before it above, greyed a little, the coming ones below; they scroll behind it, unseen there."""
+        a = self.app
+        for show in shows:
+            if show is not cur and show["start"] <= mins:
+                when = f'{show["start"] // 60}:{show["start"] % 60:02d}'
+                self._puddle_block(when, show["title"], a.cz(show.get("desc") or ""), img=show.get("img") or "",
+                                   past=True)
+        self._puddle_mark = Gtk.Box()  # where the show on air would be: a gap as tall as the pinned one
+        self.puddle_list.append(self._puddle_mark)
+        if cur:
+            host = a.host if a.host and norm(a.host) != norm(cur["title"]) else None
+            self._puddle_block("ON AIR", cur["title"], a.cz(" · ".join(x for x in (host, cur["desc"]) if x)),
+                               now=True, img=cur.get("img") or "", into=self.puddle_pin)
+            self.puddle_pin.set_visible(True)
+        for show in shows:
+            if show is not cur and show["start"] > mins:
+                when = f'{show["start"] // 60}:{show["start"] % 60:02d}'
+                self._puddle_block(when, show["title"], a.cz(show.get("desc") or ""), img=show.get("img") or "")
+        if not shows and not cur:
+            self._puddle_block("", "", a.cz("Program pro tento den zatím není."))
+        self.puddle_list.append(Gtk.Box())  # room below (_center_now)
+        GLib.idle_add(self._center_now)
 
     def _puddle_scroll_step(self, _w, clock) -> bool:
         if not self.puddle_open and not self.puddle.get_visible():
