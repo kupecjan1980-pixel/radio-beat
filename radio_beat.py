@@ -5133,6 +5133,7 @@ class App(Adw.Application):
             md = {k.lower(): v for k, v in (data or {}).items()}
             icy = md.get("icy-title")
             if icy and icy != self.icy:
+                self._recognised_last = None  # the stream's own title: a song recognised before shows again
                 self.new_title(icy)
         elif name == "audio-codec-name":
             self.codec = {"aac": "AAC", "mp3": "MP3", "flac": "FLAC"}.get(data or "", (data or "").upper() or None)
@@ -5414,6 +5415,10 @@ class App(Adw.Application):
             self._recognise_changed()
             return False
         self.recognise_text = f"{when}: found {found[0]} – {found[1]} in {_secs(took)} {how}"
+        if not self.station_only():
+            self.recognise_text += " – not shown: the stream names a song by now"
+        elif found == self._recognised_last:
+            self.recognise_text += " – shown already"
         self._recognise_changed()
         if self.station_only() and found != self._recognised_last:
             self._recognised_last = found
