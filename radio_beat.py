@@ -2988,7 +2988,8 @@ class GlassCard(Gtk.Box):
         most = lens * (self.reach if not self.band else 0.9)
         rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the edge's zoom
         # each ring shifted under a pixel from the next (half a pixel on big glass: its seams would show)
-        step = 2.5 if self.pulse_tick else 0.5  # rings half a pixel apart: no ring pattern showing
+        # rings half a pixel apart (a fifth on big glass: its rim bends fastest, coarser steps show as lines there)
+        step = 2.5 if self.pulse_tick else (0.2 if w * h > 120000 else 0.5)
         steps = max(1, math.ceil((most + abs(self.mag - 1) * max(w, h) / 2) / step))
         # The bend runs over the outer three quarters only: the middle is one layer, magnified evenly (rings
         # reaching the middle become thin strips, their seams lines across the glass)
