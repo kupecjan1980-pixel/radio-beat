@@ -3154,7 +3154,7 @@ BACKDROP_DIM = 0.55  # its brightness
 
 def _opaque(tex):
     """A rendered texture as a plain opaque one: GTK then skips whatever it covers (an alpha texture is
-    blended over everything under it: the lens's 2800 stacked rings cost 1 ms each, opaque 0.1 ms)."""
+    blended over everything under it). For a finished lens, drawn once a frame; not for stacked rings."""
     d = Gdk.TextureDownloader.new(tex)
     d.set_format(Gdk.MemoryFormat.R8G8B8)
     data, stride = d.download_bytes()
@@ -3689,8 +3689,10 @@ class GlassCard(Gtk.Box):
         node = s.to_node()
         if node is None:
             return None
-        self._flat_cache = (key, (_opaque(native.get_renderer().render_texture(
-            node, Graphene.Rect().init(0, 0, ew * k, eh * k))), box))
+        # kept with its alpha: opaque, GTK skips what each ring seems to cover, and on the DeskMini's 780M the
+        # round buttons then showed a crosshair through the middle (hairline gaps where a circle's quarters meet)
+        self._flat_cache = (key, (native.get_renderer().render_texture(
+            node, Graphene.Rect().init(0, 0, ew * k, eh * k)), box))
         return self._flat_cache[1]
 
     def _finish(self, snap, w: float, h: float, box, rr, rim: float) -> None:
