@@ -3274,44 +3274,21 @@ class Puddle(GlassCard):
             self._mirror_paint = Gtk.WidgetPaintable.new(src)
             # the buttons change (pumping, ticking): their reflection along
             self._mirror_paint.connect("invalidate-contents", lambda *_: self.get_mapped() and self.queue_draw())
-        band = min(vis, 90.0)
-        r = min(self.radius, w / 2)
-
-        def slice_(x0: float, x1: float) -> None:
-            # Under a rounded corner the glass's top bends down and away: the reflection follows its arc, and
-            # squeezes towards the edge as the surface turns from the eye.
-            d = max(0.0, r - (x0 + x1) / 2, (x0 + x1) / 2 - (w - r)) if r > 0 else 0.0
-            u = min(1.0, d / r) if r > 0 else 0.0
-            off = r - math.sqrt(max(0.0, r * r - d * d)) if r > 0 else 0.0
-            k = 0.35 + 0.65 * math.sqrt(max(0.0, 1 - u * u))
-            snap.save()
-            snap.push_clip(Graphene.Rect().init(x0, 0, x1 - x0, band + off))
-            snap.translate(Graphene.Point().init(0, off))
-            snap.scale(1, k)
-            snap.push_mask(Gsk.MaskMode.ALPHA)
-            snap.append_linear_gradient(Graphene.Rect().init(x0, 0, x1 - x0, band), Graphene.Point().init(0, 0),
-                                        Graphene.Point().init(0, band),
-                                        [_stop(0.0, 0, 0, 0, 0.45), _stop(0.5, 0, 0, 0, 0.16), _stop(1.0, 0, 0, 0, 0.0)])
-            snap.pop()
-            snap.translate(Graphene.Point().init(p.x, -p.y))  # mirrored about the glass's top edge
-            snap.scale(1, -1)
-            self._mirror_paint.snapshot(snap, sw, sh)
-            snap.pop()
-            snap.pop()
-            snap.restore()
-
-        snap.push_blur(1.0)
-        # the straight top in one piece; the corners in 1 px strips, each bent to the arc
-        lo, hi = max(0.0, p.x), min(w, p.x + sw)
-        x = lo
-        while x < hi:
-            if r <= x < w - r:
-                nx = min(hi, w - r)
-            else:
-                nx = min(hi, x + 1.0, r if x < r else hi)
-            slice_(x, nx)
-            x = nx
+        band = min(vis, 70.0)
+        snap.push_mask(Gsk.MaskMode.ALPHA)
+        snap.append_linear_gradient(Graphene.Rect().init(0, 0, w, band), Graphene.Point().init(0, 0),
+                                    Graphene.Point().init(0, band),
+                                    [_stop(0.0, 0, 0, 0, 0.22), _stop(1.0, 0, 0, 0, 0.0)])
         snap.pop()
+        snap.push_blur(1.5)
+        snap.save()
+        snap.translate(Graphene.Point().init(p.x, -p.y))  # mirrored about the glass's top edge
+        snap.scale(1, -1)
+        self._mirror_paint.snapshot(snap, sw, sh)
+        snap.restore()
+        snap.pop()
+        snap.pop()
+
 
 class Water:
     """A glass button's water: a neck from the button, then a tall body with what it holds; it flows down
