@@ -3281,6 +3281,9 @@ class GlassCard(Gtk.Box):
         self._lens_cache = (None, None)
         self._flat_cache = (None, None)  # (key, (texture, where)): what's behind, flattened for the lens
         self._build = None  # a lens texture being built over several frames (_lens_texture)
+        # each ring drawn from every layer behind, not one flattened picture: slower (the 'i' panel ~2 s of work
+        # at 4K, spread over the frames), but its edges show the faint echoes of the picture the user likes
+        self.echoes = False
         self._build_tick = None
         self.concave = False  # lit like a dish: shade along the top inside edge, light along the bottom
         self.color = None  # (r, g, b, alpha): colored glass
@@ -3570,7 +3573,7 @@ class GlassCard(Gtk.Box):
             k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
             plan = self._lens_plan(w, h)
             build = self._build = {"key": key, "k": k, "plan": plan, "next": 0, "per": 64, "tex": None,
-                                   "flat": "later" if len(plan["rings"]) > 9 else None}
+                                   "flat": "later" if len(plan["rings"]) > 9 and not self.echoes else None}
         renderer, k = native.get_renderer(), build["k"]
         area = Graphene.Rect().init(0, 0, w * k, h * k)
         rings = build["plan"]["rings"]
@@ -4031,6 +4034,7 @@ class Water:
             # exactly the show card's glass (as HHC's buttons have it): only its size differs; its curved edge
             # as deep as the card's (spread over a big panel it would look thin)
             g.scrim, g.sharp_bars = win.scrim, True  # what's under it sharp, the bars beside the cover too
+            g.echoes = True  # the picture's echoes along its edges
             if g is body:  # big glass: its edge a thick rounded wall (the bend there), lit and shaded like one
                 g.curve, g.wall, g.reach, g.shine = 3.0, 2.8, 0.9, True  # a strong bend at the rim: thick
                 g.warp_content = False  # what's inside stays flat (the glass behind it bends)
