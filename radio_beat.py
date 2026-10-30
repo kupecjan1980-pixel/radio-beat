@@ -1465,8 +1465,13 @@ FFMPEG_URL = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-sta
 DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat")
 UPSCALED_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat", "upscaled")
 UPSCALE_FROM = 1.05
-def _size(n: int) -> str:
-    return f"{n / 1e6:.1f} MB" if n >= 1e5 else f"{n / 1e3:.0f} kB"
+def _size(n: float) -> str:
+    """Bytes in the biggest unit they make at least one of: KB, MB or GB."""
+    if n >= 2**30:
+        return f"{n / 2**30:.2f} GB"
+    if n >= 2**20:
+        return f"{n / 2**20:.1f} MB"
+    return f"{n / 2**10:.0f} KB"
 
 
 # The cache (this computer's own disk) may take 80 % of the space it could have (the free space plus what it
@@ -1479,6 +1484,26 @@ SHARPEN = "unsharp=3:3:1.2:3:3:0,unsharp=9:9:0.5:9:9:0,cas=strength=0.6"
 REDRAW_FROM = 1000  # px: bigger pictures go through Real-ESRGAN from half size
 DENOISE = "nlmeans=s=1.0:p=7:r=15"
 DENOISE_VK = "format=rgba,hwupload,nlmeans_vulkan=s=1.0:p=7:r=15,hwdownload,format=rgba"
+VK_STRIP_PX = 2_000_000  # some GPUs give a bigger picture back black (Renoir: from about 3 MP): done in strips
+VK_OVERLAP = 32  # px each strip reaches into its neighbours (more than the denoiser's 22 px reach): no seams
+
+
+def denoise_vk(w: int, h: int) -> str:
+    """DENOISE_VK for a w x h picture: whole when small, else in overlapping horizontal strips, put back."""
+    n = 1
+    while w * (math.ceil(h / n) + 2 * VK_OVERLAP * (n > 1)) > VK_STRIP_PX and n < h // 64:
+        n += 1
+    if n == 1:
+        return DENOISE_VK
+    base = math.ceil(h / n)
+    labels = "".join(f"[s{i}]" for i in range(n))
+    parts = [f"split={n}{labels}"]
+    for i in range(n):
+        top, bottom = i * base, min(h, (i + 1) * base)
+        y0, y1 = max(0, top - VK_OVERLAP), min(h, bottom + VK_OVERLAP)
+        parts.append(f"[s{i}]crop={w}:{y1 - y0}:0:{y0},{DENOISE_VK},crop={w}:{bottom - top}:0:{top - y0}[d{i}]")
+    parts.append("".join(f"[d{i}]" for i in range(n)) + f"vstack=inputs={n}")
+    return ";".join(parts)
 SOFTWARE_GPU = re.compile(r"llvmpipe|lavapipe|swiftshader", re.I)
 DISCRETE_GPU = re.compile(r"nvidia|geforce|rtx|gtx|quadro|radeon (rx|pro)|\bDG2\b|\bBMG\b|arc\(tm\) [ab]\d", re.I)
 
@@ -1530,7 +1555,7 @@ class Enhancer:
         self.gpu: str | None = None
         self.gpu_index: int | None = None
         self.soft = False  # AI on the CPU through software Vulkan (no GPU)
-        self.vk_denoise = False
+        self.vk_denoise = None  # None: not tested yet (the start-up test, after the downloads)
         self.vk_fail_px = 1 << 62  # pictures this big (pixels) came out black from the GPU denoise
         self.tile = self._load_tile()
         self.status = "Starting…"
@@ -1707,7 +1732,8 @@ class Enhancer:
             parts = [f"No Vulkan at all here (not even software), so smooth (Lanczos) upscaling: CPU {cpu}"]
         if self.ffmpeg:
             parts.append(f"sharpening: CPU {cpu}")
-            parts.append(f"denoising: {gpu}" if self.vk_denoise else f"denoising: CPU {cpu}")
+            parts.append(f"denoising: {gpu}" if self.vk_denoise else
+                         "denoising: testing the GPU…" if self.vk_denoise is None else f"denoising: CPU {cpu}")
         else:
             parts.append("sharpening and denoising wait for ffmpeg (downloading)")
         self._say("On. " + "; ".join(parts) + ".")
@@ -1730,8 +1756,15 @@ class Enhancer:
             lines.append(f"• Upscaling: no Vulkan at all, so Lanczos (ffmpeg, not AI) on the {cpu}")
         if self.ffmpeg:
             lines.append(f"• Sharpening: ffmpeg unsharp (fine + wide) and CAS on the {cpu}")
-            lines.append(f"• Denoising: ffmpeg nlmeans_vulkan on GPU {self.gpu}" if self.vk_denoise
-                         else f"• Denoising: ffmpeg NL-means on the {cpu}")
+            if self.vk_denoise:
+                big = (f"; pictures of {self.vk_fail_px / 1e6:.1f} MP and more on the {cpu} (this GPU gives them "
+                       f"back black)" if self.vk_fail_px < 1 << 62 else "")
+                lines.append(f"• Denoising: ffmpeg nlmeans_vulkan on GPU {self.gpu}{big}")
+            elif self.vk_denoise is None:
+                lines.append("• Denoising: testing the GPU (ffmpeg nlmeans_vulkan); the CPU meanwhile")
+            else:
+                lines.append(f"• Denoising: ffmpeg NL-means on the {cpu} (ffmpeg's Vulkan denoiser can't run "
+                             f"here)")
             lines.append(f"• App icon sizes: Lanczos down from the AI master (ffmpeg) on the {cpu}")
         else:
             lines.append("• Sharpening and denoising: waiting for ffmpeg")
@@ -2225,10 +2258,10 @@ class Enhancer:
         from gi.repository import GdkPixbuf
         _, w, h = GdkPixbuf.Pixbuf.get_file_info(base)
         ok = self.vk_denoise and w * h < self.vk_fail_px \
-            and self._ff(["-i", base], f"{DENOISE_VK},{SHARPEN}", final, vulkan=True, jpeg=True)
+            and self._ff(["-i", base], f"{denoise_vk(w, h)},{SHARPEN}", final, vulkan=True, jpeg=True)
         if ok and not self._not_black(final):
-            # The GPU gives up on big pictures without an error (all black: a 2160 px logo on Renoir): the CPU
-            # does this one, and ones as big from now on.
+            # The GPU gives up on big pictures without an error (all black: Renoir from about 3 MP, hence the
+            # strips); if it still does: the CPU does this one, and ones as big from now on.
             ok, self.vk_fail_px = False, min(self.vk_fail_px, w * h)
         where = "on the GPU"
         if not ok and live():
@@ -2359,7 +2392,7 @@ class Enhancer:
     def cache_text(self) -> str:
         if self.cache_used < 0:
             return "Cache: counting…"
-        return (f"Cache: {self.cache_used / 2**30:.2f} GB used of {self.cache_allowed / 2**30:.0f} GB set aside "
+        return (f"Cache: {_size(self.cache_used)} used of {self.cache_allowed / 2**30:.1f} GB set aside "
                 f"(80 % of the free space, on this computer)")
 
     def _trim(self) -> None:
