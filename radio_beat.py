@@ -2449,8 +2449,6 @@ CSS = b"""
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
 popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
 popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
-.clock { color: white; font-weight: 700;
-         text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65), 0 0 2px rgba(0,0,0,0.5); }
 .overlay-header:backdrop, .overlay-header:backdrop * { opacity: 1; filter: none; }  /* not faded when unfocused */
 
 /* Under the mouse: pause, stop, the speaker and close pump once a second; the gear ticks round like a watch's
@@ -3155,6 +3153,60 @@ class MenuGlass(GlassCard):
         self._tex = None
 
 
+class ClockView(Gtk.Widget):
+    """The time over the date, right-aligned, both as big as fit the room it's given (their letters' outlines,
+    not the fonts' line boxes, fill it: the time's top at the room's top, the date's bottom at its bottom), in
+    the Beat Radio fonts, white with a shadow like the song info's."""
+
+    FONTS = (("Anton", Pango.Weight.NORMAL), ("Oswald", Pango.Weight.SEMIBOLD))
+    DATE_MAX = 0.34  # the date's share of the height at most: the time's bigger
+    GAP = 0.08  # between them, of the height
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.texts = ("", "")
+        self.room = (0, 0)
+        self.lays = None
+
+    def _layout(self, which: int, pt: float):
+        family, weight = self.FONTS[which]
+        lay = self.create_pango_layout(self.texts[which])
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_family_new(family))
+        attrs.insert(Pango.attr_weight_new(weight))
+        attrs.insert(Pango.attr_size_new(int(pt * Pango.SCALE)))
+        lay.set_attributes(attrs)
+        return lay, lay.get_pixel_extents()[0]
+
+    def _fit(self, which: int, w: float, h: float):
+        _, ink = self._layout(which, 100)  # measured at 100 pt, then scaled to fit
+        return self._layout(which, 100 * min(w / max(1, ink.width), h / max(1, ink.height)) * 0.97)
+
+    def set_room(self, w: int, h: int, texts: tuple[str, str]) -> None:
+        if (w, h) == self.room and texts == self.texts and self.lays:
+            return
+        self.room, self.texts = (w, h), texts
+        date = self._fit(1, w, h * self.DATE_MAX)
+        self.lays = (self._fit(0, w, h - date[1].height - h * self.GAP), date)
+        self.set_size_request(w, h)
+        self.queue_draw()
+
+    def do_snapshot(self, snap) -> None:
+        if not self.lays:
+            return
+        w, h = self.room
+        shadow = Gsk.Shadow()
+        shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
+        snap.push_shadow([shadow])
+        (tl, ti), (dl, di) = self.lays
+        for lay, ink, top in ((tl, ti, 0), (dl, di, h - di.height)):
+            snap.save()
+            snap.translate(Graphene.Point().init(w - ink.x - ink.width, top - ink.y))
+            snap.append_layout(lay, _rgba(255, 255, 255, 1))
+            snap.restore()
+        snap.pop()
+
+
 class Puddle(GlassCard):
     """The 'i' button's water: glass hanging from it (a neck, then a tall body), flowing down when opened
     (its front edge round like a drop) and drawn back up into the button when closed. `reveal` 0..1."""
@@ -3659,13 +3711,11 @@ class Window(Adw.ApplicationWindow):
         self.status.add_css_class("status")
         inner.append(self.status)
         overlay.add_overlay(scrim)
-        # The time and date (in Czech, "8:50 pátek 30. října 2026") at the bottom right: below the volume
-        # slider, right of the cover, against the screen's right edge, as big as fits there.
-        self.clock = Gtk.Label(halign=Gtk.Align.END, valign=Gtk.Align.END, xalign=1, can_target=False)
-        self.clock.add_css_class("clock")
+        # The time and date (in Czech, capitals: "8:50" over "PÁTEK 30. ŘÍJNA 2026") at the bottom right: below
+        # the volume slider, right of the cover, against the screen's right edge, filling that room.
+        self.clock = ClockView(halign=Gtk.Align.END, valign=Gtk.Align.END, can_target=False)
         self.clock.set_visible(False)
         overlay.add_overlay(self.clock)
-        self._clock_at = None
         GLib.timeout_add_seconds(1, self._tick_clock)
         self._tick_clock()
         self._make_puddle(overlay, scrim)
@@ -3879,45 +3929,31 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(self._place_clock)
 
     CLOCK_GAP = 22  # from the screen's right edge (as the song info from its left)
+    CLOCK_PAD = 10  # off the volume slider and the screen's bottom
 
     def _tick_clock(self) -> bool:
         now = time.localtime()
-        text = f"{now.tm_hour}:{now.tm_min:02d} {DAYS[now.tm_wday]} {now.tm_mday}. {MONTHS[now.tm_mon - 1]} {now.tm_year}"
-        if text != self.clock.get_text():
-            self.clock.set_text(text)
-            self._clock_at = None
+        self._clock_texts = (f"{now.tm_hour}:{now.tm_min:02d}",
+                             f"{DAYS[now.tm_wday]} {now.tm_mday}. {MONTHS[now.tm_mon - 1]} {now.tm_year}".upper())
+        if self._clock_texts != self.clock.texts:
             self._place_clock()
         return GLib.SOURCE_CONTINUE
 
     def _place_clock(self) -> bool:
         cover, W, H = self.cover_rect(), self.get_width(), self.get_height()
         ok, vol = self.vol.compute_bounds(self)
-        if not cover or not ok or not self.clock.get_text():
+        if not cover or not ok or not getattr(self, "_clock_texts", None):
             self.clock.set_visible(False)
             return False
         top = vol.get_y() + vol.get_height()
-        room_w = W - self.CLOCK_GAP - (cover[2] + self.CLOCK_GAP)
-        room_h = (H - top) * 0.8
-        at = (room_w, room_h, self.clock.get_text())
-        if at == self._clock_at:
-            return False
-        self._clock_at = at
-        if room_w < 60 or room_h < 8:
+        room_w = int(W - self.CLOCK_GAP - (cover[2] + self.CLOCK_GAP))
+        room_h = int(H - top - 2 * self.CLOCK_PAD)  # (a little off the slider and the screen's bottom)
+        if room_w < 60 or room_h < 16:
             self.clock.set_visible(False)
             return False
-        # as big as fits the room's width and height
-        lay = self.clock.create_pango_layout(self.clock.get_text())
-        attrs = Pango.AttrList()
-        attrs.insert(Pango.attr_size_new(100 * Pango.SCALE))  # measured at 100 pt, then scaled to fit
-        attrs.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
-        lay.set_attributes(attrs)
-        tw, th = lay.get_pixel_size()
-        pt = 100 * min(room_w / max(1, tw), room_h / max(1, th)) * 0.97  # (sizes round up a little)
-        attrs = Pango.AttrList()
-        attrs.insert(Pango.attr_size_new(int(pt * Pango.SCALE)))
-        self.clock.set_attributes(attrs)
+        self.clock.set_room(room_w, room_h, self._clock_texts)
         self.clock.set_margin_end(self.CLOCK_GAP)
-        self.clock.set_margin_bottom(int((H - top) * 0.1))  # in the middle of the room's height
+        self.clock.set_margin_bottom(self.CLOCK_PAD)
         self.clock.set_visible(True)
         return False
 
