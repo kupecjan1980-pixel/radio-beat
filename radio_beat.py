@@ -4161,9 +4161,10 @@ class Window(Adw.ApplicationWindow):
         self.puddle_items: list = []  # the curiosities shown this session
         self._puddle_touched = 0.0
         self._puddle_tick = None
-        # A new show on air: the panel opens on DNES by itself, for 10 s (unless it's touched meanwhile)
+        # A new show on air, and every half hour: the panel opens by itself and goes through its tabs (TOUR)
         self._show_seen = None
-        self._auto_shown = 0.0
+        self._half_seen = None
+        self._tour = None
         GLib.timeout_add_seconds(15, self._watch_show)
 
     @property
@@ -4186,20 +4187,44 @@ class Window(Adw.ApplicationWindow):
                 self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
         water.show()
 
+    # the tabs it goes through by itself, and for how long (s)
+    TOUR = (("DNES", 20), ("ZAJÍMAVOSTI", 10), ("AKTUALITY", 10), ("ZÍTRA", 10), ("POZÍTŘÍ", 10))
+
     def _watch_show(self) -> bool:
-        cur, _ = on_air(self.app.schedule, time.localtime())
+        now = time.localtime()
+        cur, _ = on_air(self.app.schedule, now)
         key = cur and (cur["title"], cur["start"])
         seen, self._show_seen = self._show_seen, key or self._show_seen
-        if key and seen is not None and key != seen and self.get_visible() \
-                and not any(w.open for w in self.waters):
-            self.toggle_water(self.info_water)  # opens on the first tab, DNES
-            self._auto_shown = self._puddle_touched
-            GLib.timeout_add_seconds(10, self._auto_hide, self._auto_shown)
+        half = (now.tm_yday, now.tm_hour, now.tm_min // 30)  # at :00 and :30
+        half_seen, self._half_seen = self._half_seen, half
+        if (key and seen is not None and key != seen) or (half_seen is not None and half != half_seen):
+            self._start_tour()
         return GLib.SOURCE_CONTINUE
 
-    def _auto_hide(self, token: float) -> bool:
-        if self.info_water.open and self._auto_shown == token and self._puddle_touched <= token:
+    def _start_tour(self) -> None:
+        """Opens the panel and shows its tabs one after another (TOUR), then closes it; not when the window's
+        hidden or a panel's already open, and it stops (leaving the panel open) once it's touched."""
+        if not self.get_visible() or any(w.open for w in self.waters) or self._tour is not None:
+            return
+        self.toggle_water(self.info_water)
+        self._tour = object()
+        self._tour_step(self._tour, 0)
+
+    def _tour_step(self, token, i: int) -> bool:
+        if self._tour is not token:
+            return False
+        if not self.info_water.open or (i and self._puddle_touched != self._tour_touched):
+            self._tour = None  # closed or touched meanwhile: left as it is
+            return False
+        if i == len(self.TOUR):
+            self._tour = None
             self.info_water.hide()
+            return False
+        name, secs = self.TOUR[i]
+        if i:
+            self._puddle_go(self.PUDDLE_MODES.index(name))
+        self._tour_touched = self._puddle_touched
+        GLib.timeout_add_seconds(secs, self._tour_step, token, i + 1)
         return False
 
     def toggle_puddle(self) -> None:
