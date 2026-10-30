@@ -2449,6 +2449,8 @@ CSS = b"""
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
 popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
 popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
+.clock { color: white; font-weight: 700;
+         text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65), 0 0 2px rgba(0,0,0,0.5); }
 .overlay-header:backdrop, .overlay-header:backdrop * { opacity: 1; filter: none; }  /* not faded when unfocused */
 
 /* Under the mouse: pause, stop, the speaker and close pump once a second; the gear ticks round like a watch's
@@ -3657,6 +3659,15 @@ class Window(Adw.ApplicationWindow):
         self.status.add_css_class("status")
         inner.append(self.status)
         overlay.add_overlay(scrim)
+        # The time and date (in Czech, "8:50 pátek 30. října 2026") at the bottom right: below the volume
+        # slider, right of the cover, against the screen's right edge, as big as fits there.
+        self.clock = Gtk.Label(halign=Gtk.Align.END, valign=Gtk.Align.END, xalign=1, can_target=False)
+        self.clock.add_css_class("clock")
+        self.clock.set_visible(False)
+        overlay.add_overlay(self.clock)
+        self._clock_at = None
+        GLib.timeout_add_seconds(1, self._tick_clock)
+        self._tick_clock()
         self._make_puddle(overlay, scrim)
         overlay.add_overlay(header)  # last: on top of the text
 
@@ -3865,6 +3876,50 @@ class Window(Adw.ApplicationWindow):
             GLib.idle_add(self._fit_info)
         if getattr(self, "puddle_open", False):
             GLib.idle_add(lambda: (self._place_puddle(), False)[1])  # it follows the window
+        GLib.idle_add(self._place_clock)
+
+    CLOCK_GAP = 22  # from the screen's right edge (as the song info from its left)
+
+    def _tick_clock(self) -> bool:
+        now = time.localtime()
+        text = f"{now.tm_hour}:{now.tm_min:02d} {DAYS[now.tm_wday]} {now.tm_mday}. {MONTHS[now.tm_mon - 1]} {now.tm_year}"
+        if text != self.clock.get_text():
+            self.clock.set_text(text)
+            self._clock_at = None
+            self._place_clock()
+        return GLib.SOURCE_CONTINUE
+
+    def _place_clock(self) -> bool:
+        cover, W, H = self.cover_rect(), self.get_width(), self.get_height()
+        ok, vol = self.vol.compute_bounds(self)
+        if not cover or not ok or not self.clock.get_text():
+            self.clock.set_visible(False)
+            return False
+        top = vol.get_y() + vol.get_height()
+        room_w = W - self.CLOCK_GAP - (cover[2] + self.CLOCK_GAP)
+        room_h = (H - top) * 0.8
+        at = (room_w, room_h, self.clock.get_text())
+        if at == self._clock_at:
+            return False
+        self._clock_at = at
+        if room_w < 60 or room_h < 8:
+            self.clock.set_visible(False)
+            return False
+        # as big as fits the room's width and height
+        lay = self.clock.create_pango_layout(self.clock.get_text())
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_size_new(100 * Pango.SCALE))  # measured at 100 pt, then scaled to fit
+        attrs.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
+        lay.set_attributes(attrs)
+        tw, th = lay.get_pixel_size()
+        pt = 100 * min(room_w / max(1, tw), room_h / max(1, th)) * 0.97  # (sizes round up a little)
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_size_new(int(pt * Pango.SCALE)))
+        self.clock.set_attributes(attrs)
+        self.clock.set_margin_end(self.CLOCK_GAP)
+        self.clock.set_margin_bottom(int((H - top) * 0.1))  # in the middle of the room's height
+        self.clock.set_visible(True)
+        return False
 
     FIT_STEP = 0.95
 
@@ -3998,6 +4053,7 @@ class Window(Adw.ApplicationWindow):
                 end = max(0, int((W - 22) - (cover[0] - self.INFO_GAP)))
         if self.info.get_margin_end() != end:
             self.info.set_margin_end(end)
+        self._place_clock()  # beside the cover as it is now
         return False
 
     def _make_puddle(self, overlay, scrim) -> None:
