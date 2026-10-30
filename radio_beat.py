@@ -4250,7 +4250,8 @@ class Window(Adw.ApplicationWindow):
             if tries:
                 GLib.timeout_add(30, self._center_now, tries - 1)  # not laid out yet (the water still flowing)
             return False
-        ph = self.puddle_pin.measure(Gtk.Orientation.VERTICAL, width)[1] if self.puddle_pin.get_visible() else 0
+        pin = self.puddle_pin
+        ph = pin.measure(Gtk.Orientation.VERTICAL, width)[1] - pin.get_margin_top() if pin.get_visible() else 0  # (without its margin)
         before = mark.get_prev_sibling()
         # the show before it above, or as much of it as the pinned one is tall (a long one would push the
         # coming shows out of view)
