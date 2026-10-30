@@ -1521,6 +1521,67 @@ def _cpu_name() -> str:
     return "(unknown)"
 
 
+def _simd() -> str:
+    """The widest vector instructions this CPU has: ffmpeg picks its own code by them."""
+    try:
+        with open("/proc/cpuinfo") as f:
+            flags = next((line.split(":", 1)[1].split() for line in f if line.startswith("flags")), [])
+    except OSError:
+        return ""
+    return next((name for flag, name in (("avx512f", "AVX-512"), ("avx2", "AVX2"), ("avx", "AVX"),
+                                         ("sse4_2", "SSE4.2"), ("sse2", "SSE2")) if flag in flags), "")
+
+
+SIMD = _simd()
+# NL-means on the CPU: more threads aren't faster (it waits on the memory: 16 threads took 9 s like 1, at 7x
+# the CPU time), they only take the cores from the rest
+DENOISE_THREADS = 2
+
+
+class GpuWatch:
+    """How busy the GPU was during a step and at what clock (amdgpu's sysfs; nothing where there's none)."""
+
+    def __init__(self):
+        self.busy: list[int] = []
+        self.mhz: list[int] = []
+        self.top = 0
+        self.dev = next((os.path.dirname(p) for p in sorted(glob.glob("/sys/class/drm/card*/device/gpu_busy_percent"))),
+                        None)
+        self.run = self.dev is not None
+        if self.run:
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self) -> None:
+        end = time.monotonic() + 3600
+        while self.run and time.monotonic() < end:
+            try:
+                with open(os.path.join(self.dev, "gpu_busy_percent")) as f:
+                    busy = int(f.read())
+                with open(os.path.join(self.dev, "pp_dpm_sclk")) as f:
+                    levels = [(int(m.group(1)), "*" in line) for line in f
+                              if (m := re.search(r"(\d+)\s*mhz", line, re.I))]
+            except (OSError, ValueError):  # "busy" now and then: the next look
+                time.sleep(0.2)
+                continue
+            self.busy.append(busy)
+            if levels:
+                self.top = max(self.top, *(c for c, _ in levels))
+                cur = next((c for c, on in levels if on), None)
+                if cur and busy:
+                    self.mhz.append(cur)
+            time.sleep(0.2)
+
+    def stop(self) -> str:
+        """ "84 % busy at 1980 of 2000 MHz" (averages over the step), or "" when it couldn't tell."""
+        self.run = False
+        if len(self.busy) < 2:
+            return ""
+        text = f"{round(sum(self.busy) / len(self.busy))} % busy"
+        if self.mhz and self.top:
+            text += f" at {round(sum(self.mhz) / len(self.mhz))} of {self.top} MHz"
+        return text
+
+
 def _secs(t: float) -> str:
     return f"{t:.1f} s" if t < 10 else f"{t:.0f} s"
 
@@ -1574,6 +1635,8 @@ class Enhancer:
         self.light_done: set[str] = set()  # small pictures shown quick, waiting for the full enhancing
         self.cache_used = self.cache_allowed = -1  # bytes (counted at start, then kept up to date)
         self.on_gone = None  # called with each picture the cache lets go (CacheShare: not fetched back)
+        self.fetch = None  # asks the other computers for a picture before making it (CacheShare): who gave it
+        self.watches: list[GpuWatch] = []  # the GPU watched during the job's steps
         self.sizes: dict[str, list] = {}  # kind -> [original bytes, enhanced bytes or None while working]
         threading.Thread(target=self._trim, daemon=True).start()
         # NPU (testing, off unless switched on): AMD XDNA through ONNX Runtime's Vitis AI provider.
@@ -1722,7 +1785,7 @@ class Enhancer:
 
     def _say_ready(self) -> None:
         """What runs where: the GPU (Vulkan) and the CPU, by name, and for what."""
-        cpu = _cpu_name()
+        cpu = f"{_cpu_name()} ({SIMD})" if SIMD else _cpu_name()
         gpu = f"GPU {self.gpu} (Vulkan)"
         if self.ai and self.soft:
             parts = [f"No GPU for Vulkan here, so AI upscaling (Real-ESRGAN) on {self.gpu}: slow, but AI"]
@@ -1741,7 +1804,7 @@ class Enhancer:
 
     def notes(self) -> str:
         """For the gear menu's notes: every picture step, its tool / AI model, and where it runs."""
-        cpu = f"CPU {_cpu_name()}"
+        cpu = f"CPU {_cpu_name()}" + (f" ({SIMD}: ffmpeg's widest code on it)" if SIMD else "")
         on = (self.gpu if self.soft else f"GPU {self.gpu} (Vulkan)") if self.ai else None
         lines = ["How pictures are made better:"]
         if self.ai is None:
@@ -1764,8 +1827,8 @@ class Enhancer:
             elif self.vk_denoise is None:
                 lines.append("• Denoising: testing the GPU (ffmpeg nlmeans_vulkan); the CPU meanwhile")
             else:
-                lines.append(f"• Denoising: ffmpeg NL-means on the {cpu} (ffmpeg's Vulkan denoiser can't run "
-                             f"here)")
+                lines.append(f"• Denoising: ffmpeg NL-means on the {cpu}, {DENOISE_THREADS} threads (more aren't "
+                             f"faster: it waits on the memory; ffmpeg's Vulkan denoiser can't run here)")
             lines.append(f"• App icon sizes: Lanczos down from the AI master (ffmpeg) on the {cpu}")
         else:
             lines.append("• Sharpening and denoising: waiting for ffmpeg")
@@ -2080,6 +2143,9 @@ class Enhancer:
             self.light_done.add(kind)
         else:
             self.light_done.discard(kind)
+        fetched = None
+        if not self.light and self.fetch and not os.path.exists(cached):
+            fetched = self.fetch(os.path.basename(cached))  # another computer may have made it already
         if os.path.exists(cached):
             if self._jpeg_ok(cached) and self._not_black(cached):  # black ones came from the GPU giving up
                 self._used(cached)
@@ -2094,7 +2160,7 @@ class Enhancer:
                     was = "enhanced"
                 if "final " not in was:
                     was += f", final {_size(len(pic))}"
-                self._picture(f"{head}, {was} (from the cache)")
+                self._picture(f"{head}, {was} ({f'fetched from {fetched}' if fetched else 'from the cache'})")
                 return
             os.remove(cached)
         if self.light:
@@ -2111,6 +2177,9 @@ class Enhancer:
             else:
                 self._bigger(src, (w0, h0), size, work, steps, show, live, emit, cached)
         finally:
+            for watch in self.watches:
+                watch.run = False
+            self.watches.clear()
             shutil.rmtree(work, ignore_errors=True)
 
     def _bigger(self, src, src_size, size, work, steps, show, live, emit, cached) -> None:
@@ -2121,13 +2190,13 @@ class Enhancer:
         t = time.monotonic()
         if self.ai:
             show(f": quick AI pass on {self.gpu}…")
-            t = time.monotonic()
+            t, watch = time.monotonic(), self._watch()
             quick = os.path.join(work, "quick.png")
             out = self._ai(src, src_size, size, quick, work, ESR_QUICK)
             if out == "killed" or not live():
                 return
             if out:
-                steps.append(f"quick AI redraw {_secs(time.monotonic() - t)} on {self._where()}")
+                steps.append(f"quick AI redraw {_secs(time.monotonic() - t)} on {self._where(watch)}")
                 emit(open(quick, "rb").read())
             if self.light and out:  # a small picture: the quick pass is enough
                 shutil.copyfile(quick, up)
@@ -2137,11 +2206,12 @@ class Enhancer:
                 return
             show(f", AI upscaling ({self.model}) on {self.gpu}…")
             t = time.monotonic()
+            watch = self._watch()
             full = self._ai(src, src_size, size, up, work, self.model)
             if full == "killed" or not live():
                 return
             if full:
-                label = f"AI {full} ({self.model}) {_secs(time.monotonic() - t)} on {self._where()}"
+                label = f"AI {full} ({self.model}) {_secs(time.monotonic() - t)} on {self._where(watch)}"
             elif out:
                 shutil.copyfile(quick, up)
                 label = "(full AI pass failed, the quick one kept)"
@@ -2179,13 +2249,14 @@ class Enhancer:
         base = orig
         if self.ai:
             show(f", AI redrawing for detail on {self.gpu}…")
-            t = time.monotonic()
+            t, watch = time.monotonic(), self._watch()
             redrawn = os.path.join(work, "redrawn.png")
             out = self._ai(orig, size, size, redrawn, work, self.model)
             if out == "killed" or not live():
                 return
             if out:
-                steps.append(f"AI redraw for detail ({self.model}) {_secs(time.monotonic() - t)} on {self._where()}")
+                steps.append(f"AI redraw for detail ({self.model}) {_secs(time.monotonic() - t)} "
+                             f"on {self._where(watch)}")
                 base = redrawn
             else:
                 cached = None  # the redraw again next time
@@ -2230,13 +2301,20 @@ class Enhancer:
             if live():
                 show(" (sharpening failed)")
             return False
-        steps.append(f"sharpened {_secs(time.monotonic() - t)} on CPU")
+        steps.append(f"sharpened {_secs(time.monotonic() - t)} on CPU{', ' + SIMD if SIMD else ''}")
         emit(open(sharp, "rb").read())
         return True
 
-    def _where(self) -> str:
-        """Where the AI runs, for the steps' notes."""
-        return "NPU" if self.npu_ready else "CPU (no GPU for Vulkan)" if self.soft else "GPU"
+    def _where(self, watch: GpuWatch | None = None) -> str:
+        """Where the AI runs, for the steps' notes: on the GPU with how busy it was and its clock."""
+        where = "NPU" if self.npu_ready else "CPU (no GPU for Vulkan)" if self.soft else "GPU"
+        load = watch.stop() if watch else ""
+        return f"{where}, {load}" if where == "GPU" and load else where
+
+    def _watch(self) -> GpuWatch:
+        watch = GpuWatch()
+        self.watches.append(watch)
+        return watch
 
     def _keep(self, path: str, steps, emit, cached) -> None:
         """A small picture's last step: shown and cached as it is (a JPEG, like the full ones)."""
@@ -2259,7 +2337,7 @@ class Enhancer:
     def _final(self, base, steps, show, live, emit, cached, work) -> None:
         """Denoised (GPU when ffmpeg can, else CPU), then sharpened: shown and cached."""
         show(", denoising…")
-        t = time.monotonic()
+        t, watch = time.monotonic(), self._watch()
         final = os.path.join(work, "final.jpg")
         from gi.repository import GdkPixbuf
         _, w, h = GdkPixbuf.Pixbuf.get_file_info(base)
@@ -2269,9 +2347,12 @@ class Enhancer:
             # The GPU gives up on big pictures without an error (all black: Renoir from about 3 MP, hence the
             # strips); if it still does: the CPU does this one, and ones as big from now on.
             ok, self.vk_fail_px = False, min(self.vk_fail_px, w * h)
-        where = "GPU"
+        load = watch.stop()
+        where = f"GPU, {load}" if load else "GPU"  # the NPU never denoises: not _where()
         if not ok and live():
-            ok, where = self._ff(["-i", base], f"{DENOISE},{SHARPEN}", final, jpeg=True), "CPU"
+            t = time.monotonic()  # the CPU's own time
+            ok = self._ff(["-i", base], f"{DENOISE},{SHARPEN}", final, jpeg=True, threads=DENOISE_THREADS)
+            where = f"CPU, {SIMD + ', ' if SIMD else ''}{DENOISE_THREADS} threads"
         if not ok or not live():
             if live():
                 show(" (denoising failed)")
@@ -2314,10 +2395,13 @@ class Enhancer:
             return None, err
         return out, err
 
-    def _ff(self, inputs: list[str], vf: str, out: str, vulkan: bool = False, jpeg: bool = False) -> bool:
+    def _ff(self, inputs: list[str], vf: str, out: str, vulkan: bool = False, jpeg: bool = False,
+            threads: int = 0) -> bool:
         if not self.ffmpeg:
             return False
         cmd = ["nice", "-n", "19", self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+        if threads:
+            cmd += ["-filter_threads", str(threads)]
         if vulkan:
             dev = f"vulkan=vk:{self.gpu_index}" if self.gpu_index is not None else "vulkan=vk"
             cmd += ["-init_hw_device", dev, "-filter_hw_device", "vk"]
@@ -2477,6 +2561,7 @@ class CacheShare:
         except (OSError, ValueError):
             self.gone = set()
         enhancer.on_gone = self._let_go
+        enhancer.fetch = self.fetch
         try:
             with open(os.path.join(DATA_DIR, "share-id")) as f:
                 self.id = f.read().strip()
@@ -2748,6 +2833,25 @@ class CacheShare:
             if got.get("id") and got["id"] != self.id:
                 found[ip] = got["id"]
         return found
+
+    def fetch(self, name: str) -> str | None:
+        """A picture about to be made: fetched from a computer that has it already (with its notes).
+        Returns that computer's name, None when none has it."""
+        if not self.on or name in self.gone:
+            return None
+        for ip, who in list(self.peers.items()):
+            try:
+                if not self._store(name, self._ask(ip, f"/radio-beat/v1/file/{name}", timeout=15)):
+                    continue
+            except OSError:  # not there (404), or gone off the network
+                continue
+            try:
+                self._store(name[:-4] + ".txt", self._ask(ip, f"/radio-beat/v1/file/{name[:-4]}.txt", timeout=5))
+            except OSError:
+                pass
+            self.got += 1
+            return who.rsplit("-", 1)[0]
+        return None
 
     def _round(self) -> None:
         self.peers = self._find()
@@ -4555,7 +4659,7 @@ class Window(Adw.ApplicationWindow):
         # the wheel anywhere on it: noted first (the views wait before scrolling by themselves again) ...
         touch = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         touch.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        touch.connect("scroll", lambda *_: (setattr(self, "_puddle_touched", time.monotonic()), False)[1])
+        touch.connect("scroll", lambda *_: (self._puddle_touch(), False)[1])
         self.puddle.add_controller(touch)
         # ... and where the list doesn't take it itself (over the pinned show, the tabs), it scrolls the list
         wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
@@ -4623,6 +4727,7 @@ class Window(Adw.ApplicationWindow):
         if not self.get_visible() or any(w.open for w in self.waters) or self._tour is not None:
             return
         self.toggle_water(self.info_water)
+        self.app.enhancer.set_quiet(False)  # nobody's scrolling it: the enhancing goes on (paused once touched)
         self._tour = object()
         self._tour_step(self._tour, 0)
 
@@ -4631,6 +4736,8 @@ class Window(Adw.ApplicationWindow):
             return False
         if not self.info_water.open or (i and self._puddle_touched != self._tour_touched):
             self._tour = None  # closed or touched meanwhile: left as it is
+            if self.info_water.open:
+                self.app.enhancer.set_quiet(True)  # someone's using it: fluid, as when opened by hand
             return False
         if i == len(self.TOUR):
             self._tour = None
@@ -4668,6 +4775,12 @@ class Window(Adw.ApplicationWindow):
         adj = self.puddle_scroll.get_vadjustment()
         adj.set_value(adj.get_value() + dy * 60)
         return True  # never the window's volume
+
+    def _puddle_touch(self) -> None:
+        self._puddle_touched = time.monotonic()
+        if self._tour is not None:  # the tour ends here: the panel is someone's now, fluid
+            self._tour = None
+            self.app.enhancer.set_quiet(True)
 
     def _puddle_next(self) -> None:
         self._puddle_go((self.puddle_mode + 1) % len(self.PUDDLE_MODES))
