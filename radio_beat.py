@@ -4268,6 +4268,8 @@ class GlassCard(Gtk.Box):
         # upside down, the closest part right at the edge (the buttons in `mirrors` drawn over it as before).
         self.edge_mirror = False
         self._edge_reach = 0.0  # how far beyond its edges the rim reaches (_lens_plan)
+        self._edge_reach_x = 0.0
+        self._mirror_tex = None  # the mirrored strips, rendered once per lens build (drawn by every ring)
         self._mirror_paints = {}
 
     PULSE = 0.2  # how much more it magnifies at the top of a breath
@@ -4375,8 +4377,8 @@ class GlassCard(Gtk.Box):
             if darken:
                 snap.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(0, 0, vw, vh))
             snap.restore()
-        if self.edge_mirror and not getattr(self, "_mirroring", False):
-            self._mirror_edges(snap, w, h)
+        if self.edge_mirror and sy < 1 and not getattr(self, "_mirroring", False):
+            self._mirror_edges(snap, w, h)  # (only rings squeezing it in see beyond the edges)
         for tile in self.mirrors:
             ok, p = self._where(tile)
             if ok and tile.get_mapped():
@@ -4393,19 +4395,40 @@ class GlassCard(Gtk.Box):
         b = self._edge_reach + 2
         if b <= 2:
             return
-        far = 4 * max(w, h)
+        # Rendered once into textures (thousands of rings at 4K each drawing the pictures again was 3x the
+        # work: menus stuttered), then each ring draws just those.
+        key = (round(w), round(h), round(b), self._build["key"] if self._build else None)
+        if self._mirror_tex is None or self._mirror_tex[0] != key:
+            self._mirror_tex = (key, self._render_strips(w, h, b))
+        for tex, rect in self._mirror_tex[1]:
+            snap.append_texture(tex, rect)
+
+    def _render_strips(self, w: float, h: float, b: float) -> list:
+        native = self.get_native()
+        if not native:
+            return []
+        surf = native.get_surface()
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+        x0, sw = -self._edge_reach_x - 2, w + 2 * self._edge_reach_x + 4
+        out = []
         self._mirroring = True
         try:
             for y0 in (-b, h):  # the strip above, the strip below
-                snap.push_clip(Graphene.Rect().init(-far, y0, w + 2 * far, b))
-                snap.save()
-                snap.translate(Graphene.Point().init(0, 2 * y0 + b))  # y -> 2*y0 + b - y: flipped within it
-                snap.scale(1, -1)
-                self._behind_pictures(snap, w, h)
-                snap.restore()
-                snap.pop()
+                st = Gtk.Snapshot()
+                st.scale(k, k)
+                st.translate(Graphene.Point().init(-x0, -y0))
+                st.push_clip(Graphene.Rect().init(x0, y0, sw, b))
+                st.translate(Graphene.Point().init(0, 2 * y0 + b))  # y -> 2*y0 + b - y: flipped within it
+                st.scale(1, -1)
+                self._behind_pictures(st, w, h)
+                st.pop()
+                node = st.to_node()
+                if node is not None:
+                    tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, sw * k, b * k))
+                    out.append((tex, Graphene.Rect().init(x0, y0, sw, b)))
         finally:
             self._mirroring = False
+        return out
 
     def _behind_pictures(self, snap, w: float, h: float) -> None:
         """What's behind, unzoomed, without the mirrored buttons."""
@@ -4667,6 +4690,7 @@ class GlassCard(Gtk.Box):
         most = lens * (self.reach if not self.band else 0.9)
         rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)  # the edge's zoom
         self._edge_reach = most  # the rim shows this far beyond the edge
+        self._edge_reach_x = w / 2 * (1 / rx - 1)
         # each ring shifted under a pixel from the next (half a pixel on big glass: its seams would show)
         # rings half a pixel apart (a fifth on big glass: its rim bends fastest, coarser steps show as lines there)
         step = 2.5 if self.pulse_tick else (0.2 if w * h > 120000 else 0.5)
