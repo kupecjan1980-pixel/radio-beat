@@ -4646,6 +4646,32 @@ class MenuGlass(GlassCard):
         self._tex = None
 
 
+# The clock's lines in the month's colors (autumn ones in October and November, frost in winter, blossom in
+# spring, sun in summer), bright enough on the dark sides; shuffled anew every day.
+MONTH_COLORS = {
+    1: ("#cfe8ff", "#9ecbff", "#ffffff", "#b8c0ff", "#e0e1dd", "#a0c4ff"),
+    2: ("#ffb3c6", "#ff8fab", "#e0aaff", "#cdb4db", "#ffffff", "#bde0fe"),
+    3: ("#b9fbc0", "#98f5e1", "#fff3b0", "#ffd6a5", "#caffbf", "#a0e7e5"),
+    4: ("#ffd1dc", "#c1fba4", "#fdffb6", "#9bf6ff", "#ffc6ff", "#b5ead7"),
+    5: ("#ff99c8", "#fcf6bd", "#d0f4de", "#a9def9", "#e4c1f9", "#ffe066"),
+    6: ("#ffe066", "#ff9f1c", "#2ec4b6", "#cbf3f0", "#ffbf69", "#ff6b6b"),
+    7: ("#ffd166", "#ef476f", "#06d6a0", "#4cc9f0", "#ff9e00", "#ffd60a"),
+    8: ("#ffb703", "#fb8500", "#8ecae6", "#ffd166", "#f4a261", "#e9c46a"),
+    9: ("#e9c46a", "#f4a261", "#e76f51", "#a7c957", "#f2e8cf", "#ffb347"),
+    10: ("#ff8c1a", "#ffb347", "#ff6b4a", "#ffd166", "#e25822", "#f4a259"),
+    11: ("#d4a373", "#e76f51", "#f4a261", "#ffcc80", "#bc8a5f", "#c9ada7"),
+    12: ("#e0f7ff", "#a8dadc", "#ffffff", "#ff4d4d", "#7bd389", "#ffd700"),
+}
+
+
+def day_colors(n: int) -> list:
+    """`n` colors from this month's palette, in today's order."""
+    t = time.localtime()
+    pal = list(MONTH_COLORS[t.tm_mon])
+    random.Random(t.tm_year * 1000 + t.tm_yday).shuffle(pal)
+    return [_rgba(*(int(c[i:i + 2], 16) for i in (1, 3, 5)), 1) for c in (pal * n)[:n]]
+
+
 class ClockView(Gtk.Widget):
     """Above the volume slider, right of the cover, one under another: the weekday, the day, the month, the
     year and the time (lowest, just above the slider). Each as wide as the room (their letters' outlines, not
@@ -4709,12 +4735,132 @@ class ClockView(Gtk.Widget):
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
         snap.push_shadow([shadow])
         y = 0.0
-        for lay, ink in lays:
+        for (lay, ink), color in zip(lays, day_colors(len(lays))):
             snap.save()
             snap.translate(Graphene.Point().init((w - ink.width) / 2 - ink.x, y - ink.y))
-            snap.append_layout(lay, _rgba(255, 255, 255, 1))
+            snap.append_layout(lay, color)
             snap.restore()
             y += ink.height + gap
+        snap.pop()
+
+
+class InfoStack(Gtk.Widget):
+    """The song info in a wide window, like the clock: the title, the artist, the album and the track info,
+    each broken into lines and every line as wide as the room (beside the cover, below the logo, above the
+    buttons), all made smaller together when they wouldn't fit its height; never touching."""
+
+    # each part: its font, its weight, its share of the size (as the labels' sizes), its alpha
+    PARTS = (("Anton", Pango.Weight.NORMAL, 24, 1.0), ("Oswald", Pango.Weight.SEMIBOLD, 16.5, 1.0),
+             ("Oswald", Pango.Weight.NORMAL, 13, 0.8), ("Oswald", Pango.Weight.NORMAL, 10.5, 1.0))
+    GAP_IN, GAP_OUT = 0.04, 0.07  # between a part's lines, between the parts (of the width)
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.key = None
+        self.lines = []  # [(layout, ink, y, alpha)]
+        self.beat = True
+
+    def _lay(self, text: str, part: int, pt: float):
+        family, weight = self.PARTS[part][:2]
+        lay = self.create_pango_layout(text)
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_family_new(family if self.beat else "Sans"))
+        attrs.insert(Pango.attr_weight_new(weight if self.beat else Pango.Weight.BOLD if part < 2 else weight))
+        attrs.insert(Pango.attr_size_new(int(pt * Pango.SCALE)))
+        lay.set_attributes(attrs)
+        return lay, lay.get_pixel_extents()[0]
+
+    @staticmethod
+    def _split(widths: list, space: float, n: int) -> list:
+        """The words split into `n` lines as even as can be (the widest line as narrow as it gets)."""
+        k = len(widths)
+        best = {}
+
+        def go(i, m):  # words i.. in m lines: (widest line, breaks)
+            if (i, m) in best:
+                return best[(i, m)]
+            if m == 1:
+                res = (sum(widths[i:]) + space * (k - i - 1), [])
+            else:
+                res = None
+                for j in range(i + 1, k - m + 2):
+                    line = sum(widths[i:j]) + space * (j - i - 1)
+                    rest, cuts = go(j, m - 1)
+                    cand = (max(line, rest), [j] + cuts)
+                    if res is None or cand[0] < res[0]:
+                        res = cand
+            best[(i, m)] = res
+            return res
+        return go(0, n)[1]
+
+    def _part_lines(self, text: str, part: int, w: float, target: float) -> list:
+        """A part's text in lines as wide as `w`, as many as bring each line's height nearest `target`."""
+        words = text.split()
+        if not words:
+            return []
+        widths = [self._lay(x, part, 100)[1].width for x in words]
+        space = self._lay("a b", part, 100)[1].width - self._lay("ab", part, 100)[1].width
+        best = None
+        for n in range(1, min(len(words), 8) + 1):
+            cuts = [0] + self._split(widths, space, n) + [len(words)]
+            rows = [" ".join(words[a:b]) for a, b in zip(cuts, cuts[1:])]
+            hs = []
+            for row in rows:
+                ink = self._lay(row, part, 100)[1]
+                hs.append(100 * w / max(1, ink.width) * ink.height / 100)
+            err = sum(abs(h - target) for h in hs) / len(hs)
+            if best is None or err < best[0]:
+                best = (err, rows)
+        return best[1]
+
+    def set_room(self, w: int, h: int, texts: tuple, beat: bool) -> None:
+        key = (w, h, texts, beat)
+        if key == self.key:
+            return
+        self.key, self.beat = key, beat
+        texts = [t.upper() if i == 1 and beat else t for i, t in enumerate(texts)]
+        gin, gout = w * self.GAP_IN, w * self.GAP_OUT
+
+        def build(scale: float, shrink: float = 1.0):
+            out, y = [], 0.0
+            for part, text in enumerate(texts):
+                rows = self._part_lines(text, part, w, self.PARTS[part][2] * scale) if text else []
+                if not rows:
+                    continue
+                if out:
+                    y += gout - gin
+                for row in rows:
+                    lay, ink = self._lay(row, part, 100)
+                    lay, ink = self._lay(row, part, 100 * w * shrink / max(1, ink.width) * 0.98)
+                    out.append((lay, ink, y, self.PARTS[part][3]))
+                    y += ink.height + gin
+            return out, y - gin if out else 0.0
+
+        # the biggest size whose lines fit the height (each line as wide as the room)
+        lo, hi = 0.3, 12.0
+        lines, tall = build(lo)
+        for _ in range(14):
+            mid = (lo + hi) / 2
+            cand, t = build(mid)
+            if t <= h:
+                lo, lines, tall = mid, cand, t
+            else:
+                hi = mid
+        if tall > h:  # even the smallest too tall: all smaller together, as much
+            lines, tall = build(lo, max(0.1, h / max(1, tall)))
+        self.lines = lines
+        self.set_size_request(w, int(tall) + 1)
+        self.queue_draw()
+
+    def do_snapshot(self, snap) -> None:
+        shadow = Gsk.Shadow()
+        shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
+        snap.push_shadow([shadow])
+        for lay, ink, y, alpha in self.lines:
+            snap.save()
+            snap.translate(Graphene.Point().init(-ink.x, y - ink.y))
+            snap.append_layout(lay, _rgba(255, 255, 255, alpha))
+            snap.restore()
         snap.pop()
 
 
@@ -5192,8 +5338,11 @@ class Window(Adw.ApplicationWindow):
         for w in (self.song, self.artist, self.album, self.facts):
             w.set_wrap_mode(Pango.WrapMode.WORD)  # between words only: a word too wide shrinks the text instead
             self.info.append(w)
+        # in a wide window: the same lines, each as wide as the room (the labels above keep the text)
+        self.info_stack = InfoStack(halign=Gtk.Align.START, can_target=False, visible=False)
+        self.info.append(self.info_stack)
 
-        controls = Gtk.Box(spacing=12, margin_top=12)
+        controls = self.controls = Gtk.Box(spacing=12, margin_top=12)
         self.play_btn = Gtk.Button(icon_name="media-playback-pause-symbolic", valign=Gtk.Align.CENTER)
         self.play_btn.add_css_class("round")
         self.play_btn.add_css_class("play-button")
@@ -5656,6 +5805,29 @@ class Window(Adw.ApplicationWindow):
         if self.info.get_margin_end() != end:
             self.info.set_margin_end(end)
         self._place_clock()  # beside the cover as it is now
+        self._place_info()
+        return False
+
+    def _place_info(self) -> bool:
+        """In a wide window the song info as fitted lines (InfoStack) between the screen's left edge and the
+        cover's, below the logo, above the buttons; otherwise the labels as ever."""
+        labels = (self.song, self.artist, self.album, self.facts)
+        cover, W = self.cover_rect(), self.get_width()
+        ok_h, hb = self.header.compute_bounds(self)
+        ok_c, cb = self.controls.compute_bounds(self)
+        ok_i, ib = self.info.compute_bounds(self)
+        room_w = int(cover[0] - self.INFO_GAP - (ib.get_x() if ok_i else 22)) if cover else 0
+        room_h = int(cb.get_y() - self.controls.get_margin_top() - (hb.get_y() + hb.get_height()) - 16) \
+            if ok_h and ok_c else 0
+        on = self._wide and self.info.get_margin_end() > 0 and room_w >= 120 and room_h >= 60
+        if on:
+            texts = tuple(l.get_text() if l.get_visible() else "" for l in labels)
+            beat = self.app.settings.get("font", "beat") == "beat" and self.app.fonts_ok
+            self.info_stack.set_room(room_w, room_h, texts, beat)
+        for l in labels:
+            l.set_child_visible(not on)
+            l.set_size_request(-1, 0 if on else -1)
+        self.info_stack.set_visible(on)
         return False
 
     def _make_puddle(self, overlay, scrim) -> None:
@@ -6402,6 +6574,7 @@ class Window(Adw.ApplicationWindow):
         self.album.set_visible(bool(info.get("album")))
         self.facts.set_text(a.cz(a.facts))
         self.facts.set_visible(bool(a.facts))
+        self._place_info()
         if a.logo_tex is not None and self.logo.get_paintable() is not a.logo_tex:
             self.logo.set_from_paintable(a.logo_tex)
         pic = a.cover_tex or a.logo_tex
@@ -6479,6 +6652,7 @@ def _track_refresh(self) -> None:
     self.album.set_visible(bool(tv.get("album")))
     self.facts.set_text(a.cz(tv.get("facts") or ""))
     self.facts.set_visible(bool(tv.get("facts")))
+    self._place_info()
     small = a.show_pics.get(small_cover(tv["cover"])) if tv.get("cover") else None
     pic = tv.get("tex") or small or a.logo_tex
     redraw = small is not None and self.cover.pic is small and pic is not small  # the big one over the small
