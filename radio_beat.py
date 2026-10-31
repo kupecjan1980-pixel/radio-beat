@@ -2343,9 +2343,9 @@ class GpuWatch:
 # in Czech.
 CZ_STEPS = (("quick AI redraw", "rychlé AI překreslení"), ("AI redraw for detail", "AI překreslení pro detail"),
             ("AI redrawn and upscaled", "AI překreslení a zvětšení"), ("AI redrawn", "AI překreslení"),
-            ("AI upscaled", "AI zvětšení"), ("upscaled (smooth", "zvětšeno (hladce"), ("sharpened", "zostřeno"),
-            ("denoised", "odšuměno a zostřeno"), ("final ", "výsledek "), (" on CPU", " na CPU"),
-            (" on GPU", " na GPU"), (" on NPU", " na NPU"), (" busy at ", " % při "), (" of ", " z "),
+            ("AI upscaled", "AI zvětšení"), ("upscaled (smooth", "zvětšeno (hladce"), ("sharpened", "zaostřeno"),
+            ("denoised", "odšuměno a zaostřeno"), ("final ", "výsledek "), (" on CPU", " na CPU"),
+            (" on GPU", " na GPU"), (" on NPU", " na NPU"), (" busy at ", " při "), (" of ", " z "),
             (" threads", " vláken"), ("enhanced", "vylepšeno"), ("quick AI pass", "rychlý AI průchod"),
             ("AI-upscaled", "AI zvětšeno"), ("AI-redrawn and upscaled", "AI překresleno a zvětšeno"),
             ("AI-redrawn", "AI překresleno"), ("on the CPU", "na CPU"), ("on the GPU", "na GPU"), (" on ", " na "),
@@ -2358,6 +2358,8 @@ def cz_steps(text: str) -> str:
     text = re.sub(r"(\d)\.(\d+) (s|MB|GB)\b", r"\1,\2 \3", text)  # Czech decimal commas
     # the first Czech wording of what a step waited for, as it reads now
     text = re.sub(r"GPU vytížená (\d+) %", r"vytížení GPU \1 %", text)
+    text = re.sub(r"(?<!GPU )(\d+) % (?:% )?při ", r"vytížení GPU \1 % při ", text)  # ("45 % % při": a slip)
+    text = text.replace(" for detail", " pro detail").replace("zostřen", "zaostřen").replace("zostřov", "zaostřov")
     text = re.sub(r"(?<!CPU )čekal na: ", "CPU čekal na: ", text)
     text = text.replace("na GPU (procesor ji jen zásobuje daty)", "GPU (CPU ji jen zásobuje daty)")
     text = text.replace("GPU (procesor ji jen zásobuje daty)", "GPU (CPU ji jen zásobuje daty)")
@@ -2366,12 +2368,14 @@ def cz_steps(text: str) -> str:
     for old, new in (("rezervu pro plynulý obraz", "rezervu pro plynulý obraz"), ("animace", "dokončení animace"),
                      ("otevřený panel", "zavření panelu")):
         text = re.sub(rf"(?<!dokončení ){old} (\d+(?:,\d+)? s)", rf"{new} (\1)", text)
+    if re.search(r"\d s|za \d", text) and "vláken CPU" not in text and "starší záznam" not in text:
+        text += " · starší záznam: vlákna CPU, příkon a na co se čekalo se tehdy neměřily"
     return text
 
 
 def recaption_cache() -> None:
     """Once: the notes kept with the cached pictures (and the last picture's, in the settings) in today's words."""
-    mark = os.path.join(UPSCALED_DIR, ".notes-cz2")
+    mark = os.path.join(UPSCALED_DIR, ".notes-cz3")
     if os.path.exists(mark) or not os.path.isdir(UPSCALED_DIR):
         return
     for name in os.listdir(UPSCALED_DIR):
@@ -2620,11 +2624,11 @@ class Enhancer:
         else:
             parts = [f"Vůbec žádný Vulkan (ani softwarový), takže hladké zvětšování (Lanczos): CPU {cpu}"]
         if self.ffmpeg:
-            parts.append(f"zostřování: CPU {cpu}")
+            parts.append(f"zaostřování: CPU {cpu}")
             parts.append(f"odšumování: {gpu}" if self.vk_denoise else
                          "odšumování: zkouší se GPU…" if self.vk_denoise is None else f"odšumování: CPU {cpu}")
         else:
-            parts.append("zostřování a odšumování čekají na ffmpeg (stahuje se)")
+            parts.append("zaostřování a odšumování čekají na ffmpeg (stahuje se)")
         self._say("Zapnuto. " + "; ".join(parts) + ".")
 
     def notes(self) -> str:
@@ -2644,7 +2648,7 @@ class Enhancer:
         else:
             lines.append(f"• Zvětšování: žádný Vulkan, takže Lanczos (ffmpeg, ne AI) na {cpu}")
         if self.ffmpeg:
-            lines.append(f"• Zostřování: ffmpeg unsharp (jemné + široké) a CAS na {cpu}")
+            lines.append(f"• Zaostřování: ffmpeg unsharp (jemné + široké) a CAS na {cpu}")
             if self.vk_denoise:
                 big = (f"; obrázky od {self.vk_fail_px / 1e6:.1f} MP na {cpu} (tahle GPU je vrací "
                        f"černé)" if self.vk_fail_px < 1 << 62 else "")
@@ -2656,7 +2660,7 @@ class Enhancer:
                              f"čeká na paměť; Vulkan odšumovač ffmpegu tu neběží)")
             lines.append(f"• Velikosti ikony aplikace: Lanczos zmenšený z AI předlohy (ffmpeg) na {cpu}")
         else:
-            lines.append("• Zostřování a odšumování: čeká se na ffmpeg")
+            lines.append("• Zaostřování a odšumování: čeká se na ffmpeg")
         lines.append("• Plynulý přechod mezi kroky: GTK (GSK) na GPU")
         lines.append("• U každého kroku: jak dlouho trval, kde běžel, vytížení a takt GPU, příkon čipu (čidlo amdgpu: na APU "
                      "celý čip), kolik vláken CPU v průměru vytížil a na co čekal")
@@ -3057,7 +3061,7 @@ class Enhancer:
                      else label)
         emit(open(up, "rb").read())
         if not self.ffmpeg:
-            show(" (zostření a odšumění: zatím chybí ffmpeg)")
+            show(" (zaostření a odšumění: zatím chybí ffmpeg)")
             return
         if self._sharpen(up, work, steps, show, live, emit):
             self._final(up, steps, show, live, emit, cached, work)
@@ -3066,7 +3070,7 @@ class Enhancer:
         """1. sharpened as it is, shown at once; 2. AI-redrawn for detail
         (when there's a GPU); 3. denoised and sharpened: the final one."""
         if not self.ffmpeg:
-            show(" (zostření a odšumění: zatím chybí ffmpeg)")
+            show(" (zaostření a odšumění: zatím chybí ffmpeg)")
             return
         orig = os.path.join(work, "orig.png")
         if not self._ff(["-i", src], "format=rgb24", orig):
@@ -3132,14 +3136,14 @@ class Enhancer:
         return how
 
     def _sharpen(self, pic, work, steps, show, live, emit) -> bool:
-        show(", zostřování…")
+        show(", zaostřování…")
         t, watch = time.monotonic(), self._watch()
         sharp = os.path.join(work, "sharp.png")
         if not self._ff(["-i", pic], SHARPEN, sharp, threads=os.cpu_count() or 1) or not live():
             if live():
-                show(" (zostření selhalo)")
+                show(" (zaostření selhalo)")
             return False
-        steps.append(f"zostřeno {_secs(time.monotonic() - t)} na CPU{', ' + SIMD if SIMD else ''}, {watch.stop(False)}")
+        steps.append(f"zaostřeno {_secs(time.monotonic() - t)} na CPU{', ' + SIMD if SIMD else ''}, {watch.stop(False)}")
         emit(open(sharp, "rb").read())
         return True
 
@@ -3195,7 +3199,7 @@ class Enhancer:
             if live():
                 show(" (odšumění selhalo)")
             return
-        steps.append(f"odšuměno a zostřeno {_secs(time.monotonic() - t)} na {where}")
+        steps.append(f"odšuměno a zaostřeno {_secs(time.monotonic() - t)} na {where}")
         with open(final, "rb") as f:
             pic = f.read()
         emit(pic, True)
@@ -4927,6 +4931,18 @@ class InfoStack(Gtk.Widget):
         self.key = None
         self.lines = []  # [(layout, ink, y, alpha)]
         self.beat = True
+        self.flash = 0.0  # a new or updated song: a bright glow fading out (like the labels' flash)
+        self.flash_anim = None
+
+    def blink(self) -> None:
+        if self.flash_anim:
+            self.flash_anim.pause()
+        target = Adw.CallbackAnimationTarget.new(lambda v: (setattr(self, "flash", v), self.queue_draw()))
+        self.flash_anim = Adw.TimedAnimation.new(self, 1.0, 0.0, 900, target)
+        self.flash_anim.set_easing(Adw.Easing.EASE_OUT_CUBIC)
+        anim_hold(True)
+        GLib.timeout_add(950, lambda: (anim_hold(False), False)[1])
+        self.flash_anim.play()
 
     def _lay(self, text: str, part: int, pt: float):
         family, weight = self.PARTS[part][:2]
@@ -4985,6 +5001,8 @@ class InfoStack(Gtk.Widget):
         key = (w, h, texts, beat)
         if key == self.key:
             return
+        if self.key and self.key[2] != texts and any(texts):
+            self.blink()  # the song changed, or its lines did: they flash
         self.key, self.beat = key, beat
         texts = [t.upper() if i == 1 and beat else t for i, t in enumerate(texts)]
         gin, gout = w * self.GAP_IN, w * self.GAP_OUT
@@ -5026,7 +5044,13 @@ class InfoStack(Gtk.Widget):
     def do_snapshot(self, snap) -> None:
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
-        snap.push_shadow([shadow])
+        shadows = [shadow]
+        if self.flash > 0.01:  # the glow, as the labels' flash: 14 and 34 px of white
+            for radius, a in ((14, 1.0), (34, 0.8)):
+                glow = Gsk.Shadow()
+                glow.color, glow.dx, glow.dy, glow.radius = _rgba(255, 255, 255, a * self.flash), 0, 0, radius
+                shadows.append(glow)
+        snap.push_shadow(shadows)
         for lay, ink, y, alpha in self.lines:
             snap.save()
             snap.translate(Graphene.Point().init(-ink.x, y - ink.y))
