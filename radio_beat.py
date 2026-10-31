@@ -378,16 +378,98 @@ def lookup(artist: str, song: str) -> dict | None:
         pass
     if best_score >= 3:
         return best
-    # the song not found anywhere: at least the artist's photo (always a picture)
+    # not on Deezer or iTunes: a YouTube video of the song itself, else at least the artist's photo
+    video = youtube_song(artist, song)
+    if video:
+        return video
     try:
         for x in _json(f"https://api.deezer.com/search/artist?q={urllib.parse.quote(first_artist(artist))}&limit=5"
                        ).get("data", []):
             if _key(x.get("name") or "") == _key(first_artist(artist)) and x.get("picture_xl") \
-                    and "/artist//" not in x["picture_xl"]:  # (an empty placeholder has no picture id)
+                    and not re.search(r"/artist/(d41d8cd98f00b204e9800998ecf8427e)?/", x["picture_xl"]):
+                # (no photo: Deezer's grey placeholder, an empty name's hash)
                 return {"artist": x["name"], "title": song, "album": None, "cover": x["picture_xl"],
                         "artist_photo": True}
     except (OSError, ValueError, KeyError):
         pass
+    return youtube_artist(artist, song)
+
+
+def _youtube(query: str) -> list[dict]:
+    """YouTube's search results (its page's data): [{kind: video / channel, id, title, owner, thumb}]."""
+    try:
+        req = urllib.request.Request("https://www.youtube.com/results?search_query=" + urllib.parse.quote(query),
+                                     headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "cs,en"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            page = r.read().decode("utf-8", "ignore")
+        data = json.loads(re.search(r"var ytInitialData = (\{.*?\});</script>", page).group(1))
+    except (OSError, ValueError, AttributeError):
+        return []
+    out = []
+    text = lambda t: "".join(x.get("text", "") for x in (t or {}).get("runs", [])) or (t or {}).get("simpleText", "")
+
+    def walk(o):
+        if isinstance(o, dict):
+            if "videoRenderer" in o:
+                v = o["videoRenderer"]
+                out.append({"kind": "video", "id": v.get("videoId"), "title": text(v.get("title")),
+                            "owner": text(v.get("ownerText"))})
+            elif "channelRenderer" in o:
+                c = o["channelRenderer"]
+                thumbs = (c.get("thumbnail") or {}).get("thumbnails") or [{}]
+                out.append({"kind": "channel", "title": text(c.get("title")), "owner": text(c.get("title")),
+                            "thumb": thumbs[-1].get("url", "")})
+            for x in o.values():
+                walk(x)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x)
+    walk(data)
+    return out
+
+
+def _video_thumb(vid: str) -> str:
+    """A video's biggest still: maxres (no black bars) when it has one, else the 480 px one."""
+    url = f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=8):
+            return url
+    except OSError:
+        return f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+
+
+def youtube_song(artist: str, song: str) -> dict | None:
+    """A song neither Deezer nor iTunes has (Czech bands as Špinaví lůzři): its video on YouTube, the still."""
+    import difflib
+    a, t = _key(first_artist(artist)), _key(song)
+    if not a:
+        return None
+    for v in _youtube(f"{first_artist(artist)} {song}"):
+        if v["kind"] != "video" or not v["id"]:
+            continue
+        both = _key(v["title"] + " " + v["owner"])
+        name = _key(re.split(r"\s[-–|]\s", v["title"])[-1]) if re.search(r"\s[-–|]\s", v["title"]) else _key(v["title"])
+        if a in both and t and (t in _key(v["title"]) or difflib.SequenceMatcher(None, t, name).ratio() >= 0.85):
+            return {"artist": first_artist(artist), "title": song, "album": None, "cover": _video_thumb(v["id"]),
+                    "youtube": True}
+    return None
+
+
+def youtube_artist(artist: str, song: str) -> dict | None:
+    """The last resort: the artist's YouTube channel picture, else a still of one of their videos."""
+    a = _key(first_artist(artist))
+    if not a:
+        return None
+    found = _youtube(first_artist(artist))
+    for c in found:
+        if c["kind"] == "channel" and _key(c["title"]) == a and c.get("thumb"):
+            thumb = re.sub(r"=s\d+-", "=s800-", c["thumb"])
+            return {"artist": c["title"], "title": song, "album": None,
+                    "cover": ("https:" + thumb) if thumb.startswith("//") else thumb, "artist_photo": True}
+    for v in found:
+        if v["kind"] == "video" and v["id"] and (_key(v["owner"]) == a or _key(v["title"]).startswith(a)):
+            return {"artist": first_artist(artist), "title": song, "album": None, "cover": _video_thumb(v["id"]),
+                    "artist_photo": True}
     return None
 
 
@@ -876,9 +958,9 @@ class History:
                         kept[song] = at
                 self.db.executemany("DELETE FROM plays WHERE rowid = ?", gone)
                 self.db.execute("PRAGMA user_version = 1")
-            if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:  # once: songs not found before looked up
-                self.db.execute("UPDATE plays SET cover = NULL WHERE cover = ''")  # again (a better match now)
-                self.db.execute("PRAGMA user_version = 2")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:  # once: songs not found before looked up
+                self.db.execute("UPDATE plays SET cover = NULL WHERE cover = ''")  # again (a better match, YouTube)
+                self.db.execute("PRAGMA user_version = 3")
 
     def play(self, artist: str, title: str, show: str | None, host: str | None) -> None:
         now = time.time()
