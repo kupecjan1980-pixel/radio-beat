@@ -1092,7 +1092,7 @@ class History:
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 4:
                 self.db.execute("PRAGMA user_version = 4")
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 5:  # once: track info looked up again where
-                stale = re.compile(r"Poprvé vydáno [^(·]*? (%s) \\(" % "|".join(map(re.escape, COUNTRY_IN.values())))
+                stale = re.compile(r"Poprvé vydáno [^(·]*? (%s) \(" % "|".join(map(re.escape, COUNTRY_IN.values())))
                 redo = [(rowid,) for rowid, facts in self.db.execute(  # it said where the release came out
                     "SELECT rowid, facts FROM plays WHERE facts IS NOT NULL") if stale.search(facts)]
                 self.db.executemany("UPDATE plays SET facts = NULL WHERE rowid = ?", redo)
