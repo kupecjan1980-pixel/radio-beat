@@ -662,7 +662,7 @@ def _places(rels: list) -> list[str]:
 def song_facts(artist: str, song: str) -> str:
     """'First released 8 November 1971 · Recorded at Olympic Studios, London', what MusicBrainz knows (may be
     ''), remembered per song."""
-    key = f"{norm(first_artist(artist))}|{norm(song)}"
+    key = f"2|{norm(first_artist(artist))}|{norm(song)}"  # (2: without the release's country)
     try:
         with open(FACTS_CACHE) as f:
             cache = json.load(f)
@@ -704,15 +704,8 @@ def song_facts(artist: str, song: str) -> str:
             support[r["first-release-date"]] = support.get(r["first-release-date"], 0) + len(r.get("releases", []))
     dates = sorted(support)
     first = next((d for d in dates if support[d] >= 2), dates[0] if dates else "")
-    # Where that first release came out (the release carrying the earliest date).
-    country = ""
-    for r in recs:
-        for rel in r.get("releases", []):
-            if first and rel.get("date") == first and rel.get("country") in COUNTRY_IN:
-                country = COUNTRY_IN[rel["country"]]
-                break
-        if country:
-            break
+    # (where the first release came out misleads: the Beatles' "in Canada", Škwor's "worldwide"; where it
+    # was recorded is what counts, below)
     # Where: the oldest plain recordings first (not a demo or a live one).
     places = []
     for r in sorted(recs, key=lambda r: (bool(r.get("disambiguation")), -len(r.get("releases", [])),
@@ -729,9 +722,16 @@ def song_facts(artist: str, song: str) -> str:
             places = _places((got or {}).get("relations"))
             if places:
                 break
-    bits = ([f"Poprvé vydáno {_date(first)}" + (f" {country}" if country else "") + f" ({{ago:{first[:4]}}})"]
-            if first else []) + \
-           ([f"Nahráno v {' a '.join(places[:2])}"] if places else [])
+    where = f"v {' a '.join(places[:2])}" if places else ""
+    if not where:  # no studio known: the artist's country (a band records at home, as a rule)
+        ids = [c["artist"]["id"] for r in recs for c in r.get("artist-credit", [])
+               if isinstance(c, dict) and c.get("artist", {}).get("id")
+               and (a in norm(c.get("name", "")) or norm(c.get("name", "")) in a)]
+        if ids:
+            home = (_mb(f"/artist/{max(set(ids), key=ids.count)}?fmt=json") or {}).get("country")
+            where = COUNTRY_IN.get(home, "") if home not in ("XW", "XE") else ""
+    bits = ([f"Poprvé vydáno {_date(first)} ({{ago:{first[:4]}}})"] if first else []) + \
+           ([f"Nahráno {where}"] if where else [])
     text = " · ".join(bits)
     cache[key] = text
     try:
