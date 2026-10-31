@@ -1117,6 +1117,9 @@ class History:
             self.db.execute("CREATE INDEX IF NOT EXISTS plays_at ON plays (at DESC)")
             self.db.execute("CREATE TABLE IF NOT EXISTS hosts (name TEXT PRIMARY KEY, shows TEXT, first REAL, "
                             "last REAL)")
+            # when this computer looked a song's picture or track info up (the other computers get it then)
+            self.db.execute("CREATE TABLE IF NOT EXISTS found (artist TEXT, title TEXT, at REAL, "
+                            "PRIMARY KEY (artist, title))")
             cols = [r[1] for r in self.db.execute("PRAGMA table_info(plays)")]
             if "cover" not in cols:
                 self.db.execute("ALTER TABLE plays ADD COLUMN cover TEXT")  # its picture ("": none found)
@@ -1163,6 +1166,11 @@ class History:
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 6:  # once: all track info looked up again
                 self.db.execute("UPDATE plays SET facts = NULL")  # (the full date; studio, city, state, country)
                 self.db.execute("PRAGMA user_version = 6")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 7:  # once: what was looked up before sharing
+                self.db.execute("INSERT OR IGNORE INTO found SELECT lower(artist), lower(title), ? FROM plays "  # it
+                                "WHERE cover IS NOT NULL OR facts IS NOT NULL GROUP BY lower(artist), lower(title)",
+                                (time.time(),))
+                self.db.execute("PRAGMA user_version = 7")
 
     def play(self, artist: str, title: str, show: str | None, host: str | None) -> None:
         import sqlite3
@@ -1203,6 +1211,7 @@ class History:
         with self.lock, self.db:
             self.db.execute("UPDATE plays SET facts = ? WHERE lower(artist) = lower(?) AND lower(title) = lower(?) "
                             "AND (facts IS NULL OR (facts = '' AND ? != ''))", (facts, artist, title, facts))
+            self._found(artist, title)
 
     def song_art(self, artist: str, title: str, album: str | None, cover: str) -> None:
         """A song's album and picture, looked up later ("" when none was found): every play of it lacking them."""
@@ -1212,6 +1221,63 @@ class History:
             if album:
                 self.db.execute("UPDATE plays SET album = ? WHERE lower(artist) = lower(?) AND lower(title) = "
                                 "lower(?) AND album IS NULL", (album, artist, title))
+            self._found(artist, title)
+
+    def _found(self, artist: str, title: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO found VALUES (lower(?), lower(?), ?)", (artist, title, time.time()))
+
+    def lacks(self, artist: str, title: str) -> tuple[bool, bool]:
+        """Whether some play of the song still lacks its picture, its track info (another computer may have
+        sent them meanwhile)."""
+        with self.lock:
+            got = self.db.execute("SELECT max(cover IS NULL), max(facts IS NULL) FROM plays WHERE lower(artist) = "
+                                  "lower(?) AND lower(title) = lower(?)", (artist, title)).fetchone()
+        return bool(got and got[0]), bool(got and got[1])
+
+    def info_export(self, since: float, n: int = 2000) -> list[list]:
+        """Songs this computer looked up after `since`, oldest first: [artist, title, album, cover, facts, at]."""
+        with self.lock:
+            rows = self.db.execute("SELECT artist, title, at FROM found WHERE at > ? ORDER BY at LIMIT ?",
+                                   (since, n)).fetchall()
+            out = []
+            for artist, title, at in rows:
+                got = self.db.execute("SELECT album, cover, facts FROM plays WHERE lower(artist) = ? AND "
+                                      "lower(title) = ? ORDER BY (cover IS NULL) + (facts IS NULL), at DESC LIMIT 1",
+                                      (artist, title)).fetchone()
+                if got:
+                    out.append([artist, title, *got, at])
+            return out
+
+    def info_merge(self, rows) -> int:
+        """Pictures and track info another computer looked up: every play here lacking them takes them (not
+        noted as found here: not sent back). Returns how many songs got something."""
+        import sqlite3
+        n = 0
+        try:
+            with self.lock, self.db:
+                for r in rows:
+                    if not (isinstance(r, list) and len(r) == 6 and all(isinstance(x, str) and len(x) <= 300
+                                                                        for x in r[:2])
+                            and all(x is None or (isinstance(x, str) and len(x) <= 500) for x in r[2:5])):
+                        continue
+                    artist, title, album, cover, facts, _ = r
+                    if cover and not cover.startswith("https://"):
+                        cover = None
+                    song = "lower(artist) = ? AND lower(title) = ?"
+                    c = self.db.total_changes
+                    if cover is not None:
+                        self.db.execute(f"UPDATE plays SET cover = ? WHERE {song} AND cover IS NULL",
+                                        (cover, artist, title))
+                    if album:
+                        self.db.execute(f"UPDATE plays SET album = ? WHERE {song} AND album IS NULL",
+                                        (album, artist, title))
+                    if facts is not None:
+                        self.db.execute(f"UPDATE plays SET facts = ? WHERE {song} AND (facts IS NULL OR "
+                                        "(facts = '' AND ? != ''))", (facts, artist, title, facts))
+                    n += self.db.total_changes != c
+        except sqlite3.Error as e:
+            print(f"radio-beat: track info not merged: {e}", file=sys.stderr)
+        return n
 
     def count(self) -> int:
         with self.lock:
@@ -3144,6 +3210,7 @@ class CacheShare:
         self.enh = enhancer
         self.history = history  # the plays (History): shared too
         self.plays_in = self.plays_out = 0
+        self.info_in = 0  # songs whose picture or track info came from another computer
         self.marks_path = os.path.join(DATA_DIR, "share-plays.json")  # per computer: plays fetched / sent up to
         try:
             with open(self.marks_path) as f:
@@ -3289,6 +3356,14 @@ class CacheShare:
                     rows = share.history.export(since)
                     return self._reply(json.dumps({"plays": rows, "more": len(rows) == 2000}).encode(),
                                        "application/json")
+                if self.path.startswith("/radio-beat/v1/songinfo?since=") and share.history:
+                    try:
+                        since = float(self.path.split("=", 1)[1])
+                    except ValueError:
+                        return self.send_error(400)
+                    rows = share.history.info_export(since)
+                    return self._reply(json.dumps({"songs": rows, "more": len(rows) == 2000}).encode(),
+                                       "application/json")
                 if self.path == "/radio-beat/v1/list":
                     return self._reply(json.dumps({"id": share.id, "files": sorted(share._names())}).encode(),
                                        "application/json")
@@ -3314,6 +3389,16 @@ class CacheShare:
                         return self.send_error(400)
                     got = share.history.merge(rows if isinstance(rows, list) else [])
                     share.plays_in += got
+                    return self._reply(json.dumps({"new": got}).encode(), "application/json")
+                if self.path == "/radio-beat/v1/songinfo" and share.history:
+                    if not 0 < n <= 4 << 20:
+                        return self.send_error(400)
+                    try:
+                        rows = json.loads(self.rfile.read(n))
+                    except ValueError:
+                        return self.send_error(400)
+                    got = share.history.info_merge(rows if isinstance(rows, list) else [])
+                    share.info_in += got
                     return self._reply(json.dumps({"new": got}).encode(), "application/json")
                 name = self.path.rsplit("/", 1)[-1]
                 if not self.path.startswith("/radio-beat/v1/file/") or not SHARE_NAME.match(name) \
@@ -3478,6 +3563,26 @@ class CacheShare:
                 mark["out"] = rows[-1][0]
         except (OSError, ValueError, TypeError, KeyError):
             pass  # an older Rádio Beat there (no plays yet), or gone: next round
+        # the pictures and track info each looked up (each song once, on either computer: the work shared)
+        info_got = info_sent = 0
+        mark.setdefault("info_in", 0.0)
+        mark.setdefault("info_out", 0.0)
+        try:
+            while True:
+                reply = json.loads(self._ask(ip, f"/radio-beat/v1/songinfo?since={mark['info_in']}", timeout=30))
+                rows = reply.get("songs") or []
+                info_got += self.history.info_merge(rows)
+                if rows:
+                    mark["info_in"] = max(mark["info_in"], max(r[5] for r in rows if isinstance(r, list) and len(r) == 6))
+                if not reply.get("more") or not rows:
+                    break
+            while rows := self.history.info_export(mark["info_out"]):
+                self._ask(ip, "/radio-beat/v1/songinfo", json.dumps(rows).encode(), timeout=60)
+                info_sent += len(rows)
+                mark["info_out"] = rows[-1][5]
+        except (OSError, ValueError, TypeError, KeyError):
+            pass  # an older Rádio Beat there, or gone: next round
+        self.info_in += info_got
         try:
             with open(self.marks_path + ".part", "w") as f:
                 json.dump(self.marks, f)
@@ -3486,7 +3591,8 @@ class CacheShare:
             pass
         self.plays_in += got
         self.plays_out += sent
-        return f"; played songs: {got} new from there, {sent} sent ({self.history.count()} in all here)"
+        return (f"; played songs: {got} new from there, {sent} sent ({self.history.count()} in all here); "
+                f"track info: {info_got} songs filled in from there, {info_sent} sent")
 
     def fetch(self, name: str) -> str | None:
         """A picture about to be made: fetched from a computer that has it already (with its notes).
@@ -6513,10 +6619,16 @@ class App(Adw.Application):
         import sqlite3
         try:
             queued = {(a.lower(), t.lower()) for a, t, *_ in self._art_queue}
-            for artist, title, cover, facts in self.db.missing():
+            songs = self.db.missing()
+            # Two computers on: each from its own end of the history (newest first on the one whose id comes
+            # first), sharing what they find: each song looked up once.
+            peers = list(self.share.peers.values()) if self.share.on else []
+            if peers and self.share.id > min(peers):
+                songs.reverse()
+            for artist, title, cover, facts in songs:
                 if (artist.lower(), title.lower()) not in queued:  # (asked before: plays come in later too)
                     self._art_asked.discard((artist.lower(), title.lower()))
-                self.want_song_art(artist, title, bool(cover), bool(facts))
+                self.want_song_art(artist, title, bool(cover), bool(facts), soon=False)
         except sqlite3.Error:
             pass
         return GLib.SOURCE_CONTINUE
@@ -7133,14 +7245,18 @@ class App(Adw.Application):
                 threading.Thread(target=work, daemon=True).start()
         self._enhance_show()
 
-    def want_song_art(self, artist: str, title: str, cover: bool = True, facts: bool = True) -> None:
+    def want_song_art(self, artist: str, title: str, cover: bool = True, facts: bool = True,
+                      soon: bool = True) -> None:
         """A played song lacking its picture (cover) or its track info (facts: first release…): looked up (one
         at a time, a little apart: the services' limits), remembered in the history, shown in HRÁLO."""
         key = (artist.lower(), title.lower())
         if key in self._art_asked:
             return
         self._art_asked.add(key)
-        self._art_queue.append((artist, title, cover, facts))
+        if soon:  # one HRÁLO shows: before the background's
+            self._art_queue.insert(0, (artist, title, cover, facts))
+        else:
+            self._art_queue.append((artist, title, cover, facts))
         if not self._art_busy:
             self._art_busy = True
             threading.Thread(target=self._art_worker, daemon=True).start()
@@ -7148,6 +7264,10 @@ class App(Adw.Application):
     def _art_worker(self) -> None:
         while self._art_queue:
             artist, title, want_cover, want_facts = self._art_queue.pop(0)
+            lacks = self.db.lacks(artist, title)  # (the other computer may have sent them meanwhile)
+            want_cover, want_facts = want_cover and lacks[0], want_facts and lacks[1]
+            if not want_cover and not want_facts:
+                continue
             info = lookup(artist, title)
             cover = (info or {}).get("cover") or ""
             album = None if (info or {}).get("artist_photo") else (info or {}).get("album")
