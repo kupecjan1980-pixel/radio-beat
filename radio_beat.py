@@ -5744,6 +5744,7 @@ class Window(Adw.ApplicationWindow):
             row["play"] = self._glass_button("media-playback-start-symbolic", 40,
                                              "Přehrát z YouTube (studiová verze, nejlepší kvalita)",
                                              lambda a=artist, ti=title: self.app.play_song(a, ti))
+            row["play"].pad = True  # room to pump in: the list's edge would cut it
             self._last_top.append(row["play"])
             self._played_rows.append(row)
             self._track_row(row)
@@ -5804,6 +5805,9 @@ class Window(Adw.ApplicationWindow):
         px = disc.size * self._scale
         disc.radius = px / 2
         disc.set_size_request(int(px), int(px))
+        if getattr(disc, "pad", False):  # it pumps 12 % bigger: half of that on each side, and a little more
+            m = math.ceil(px * 0.08)
+            disc.set_margin_start(m), disc.set_margin_end(m), disc.set_margin_top(m), disc.set_margin_bottom(m)
         disc.btn.get_first_child() and disc.btn.get_first_child().set_pixel_size(int(px * 0.42))
         disc.queue_draw()
 
@@ -5828,7 +5832,7 @@ class Window(Adw.ApplicationWindow):
                                else "media-playback-start-symbolic")
         self._size_glass_button(play)
         play.btn.set_tooltip_text(t["note"] if mine else "Přehrát z YouTube (studiová verze, nejlepší kvalita)")
-        play.color = (227, 5, 26, 0.55) if mine and state in ("playing", "paused") else None  # red like pause
+        play.color = (227, 5, 26, 0.55)  # red like the radio's pause
         play.queue_draw()
 
     def track_changed(self) -> None:
