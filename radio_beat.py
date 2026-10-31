@@ -4886,8 +4886,10 @@ class ClockView(Gtk.Widget):
         if tall + gaps > h:  # too tall for the room: all smaller, as much
             k = max(0.05, (h - gaps) / max(1, tall))
             lays = [self._fit(i, w * k, 10000) for i in self.ORDER]
+        total = sum(ink.height for _, ink in lays) + gaps
+        self.sy = min(InfoStack.STRETCH, h / total) if 0 < total < h else 1.0  # taller to fill the room
         self.lays = (lays, gap)
-        self.set_size_request(w, int(sum(ink.height for _, ink in lays) + gaps) + 1)
+        self.set_size_request(w, int(total * self.sy) + 1)
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
@@ -4906,10 +4908,12 @@ class ClockView(Gtk.Widget):
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
         snap.push_shadow([shadow])
-        y = 0.0
+        y, sy = 0.0, getattr(self, "sy", 1.0)
         for (lay, ink), color in zip(lays, day_colors(len(lays))):
             snap.save()
-            snap.translate(Graphene.Point().init((w - ink.width) / 2 - ink.x, y - ink.y))
+            snap.translate(Graphene.Point().init(0, y * sy))
+            snap.scale(1.0, sy)
+            snap.translate(Graphene.Point().init((w - ink.width) / 2 - ink.x, -ink.y))
             snap.append_layout(lay, color)
             snap.restore()
             y += ink.height + gap
@@ -4925,12 +4929,14 @@ class InfoStack(Gtk.Widget):
     PARTS = (("Anton", Pango.Weight.NORMAL, 24, 1.0), ("Oswald", Pango.Weight.SEMIBOLD, 16.5, 1.0),
              ("Oswald", Pango.Weight.NORMAL, 13, 0.8), ("Oswald", Pango.Weight.NORMAL, 10.5, 1.0))
     GAP_IN, GAP_OUT = 0.04, 0.07  # between a part's lines, between the parts (of the width)
+    STRETCH = 2.0  # at most this much taller than their font makes them, to fill the room's height
 
     def __init__(self, **kw):
         super().__init__(**kw)
         self.key = None
         self.lines = []  # [(layout, ink, y, alpha)]
         self.beat = True
+        self.sy = 1.0  # the lines' vertical stretch (filling the room's height)
         self.flash = 0.0  # a new or updated song: a bright glow fading out (like the labels' flash)
         self.flash_anim = None
 
@@ -5037,8 +5043,10 @@ class InfoStack(Gtk.Widget):
                 hi = mid
         if tall > h:  # even the smallest too tall: all smaller together, as much
             lines, tall = build(lo, max(0.1, h / max(1, tall)))
+        # shorter than the room: the lines stretched taller (as wide as before) until they fill it
+        self.sy = min(self.STRETCH, h / tall) if 0 < tall < h else 1.0
         self.lines = lines
-        self.set_size_request(w, int(tall) + 1)
+        self.set_size_request(w, int(tall * self.sy) + 1)
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
@@ -5053,7 +5061,9 @@ class InfoStack(Gtk.Widget):
         snap.push_shadow(shadows)
         for lay, ink, y, alpha in self.lines:
             snap.save()
-            snap.translate(Graphene.Point().init(-ink.x, y - ink.y))
+            snap.translate(Graphene.Point().init(0, y * self.sy))
+            snap.scale(1.0, self.sy)
+            snap.translate(Graphene.Point().init(-ink.x, -ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, alpha))
             snap.restore()
         snap.pop()
