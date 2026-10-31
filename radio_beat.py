@@ -8,8 +8,9 @@ iTunes) for the album, proper spelling and the cover.
 
 It starts playing right away. Closing the window keeps it playing, with an
 icon in the bar's tray (StatusNotifierItem) that shows the window again;
-Stop quits. Started at login (--autostart) it opens in full screen; --hidden (a restart after an update while
-the window was closed) plays with only the tray icon.
+Stop quits. Started at login (--autostart) it plays with only the tray icon, or opens in full screen when set
+so (autostart_full); --hidden (a restart after an update while the window was closed) plays with only the tray
+icon.
 """
 
 import collections
@@ -5589,10 +5590,18 @@ class Window(Adw.ApplicationWindow):
         self.quality.connect("activated", lambda *_: self.quality_pop.popup())
         self.fill_quality()
         group.add(self.quality)
-        auto = Adw.SwitchRow(title="Spustit po přihlášení", subtitle="Hraje jen jako ikona v oznamovací oblasti")
+        auto = Adw.SwitchRow(title="Automatické spuštění",
+                             subtitle="Po přihlášení hraje jako ikona v oznamovací oblasti", subtitle_lines=0)
         auto.set_active(autostart_on())
-        auto.connect("notify::active", lambda r, _: set_autostart(r.get_active()))
         group.add(auto)
+        auto_full = Adw.SwitchRow(title="Spustit v celoobrazovkovém režimu",
+                                  subtitle="Po přihlášení otevře rovnou okno přes celou obrazovku, ne jen ikonu",
+                                  subtitle_lines=0, sensitive=autostart_on())
+        auto_full.set_active(self.app.settings.get("autostart_full", False))
+        auto_full.connect("notify::active", lambda r, _: self.app.set_look(autostart_full=r.get_active()))
+        auto.connect("notify::active", lambda r, _: (set_autostart(r.get_active()),
+                                                      auto_full.set_sensitive(r.get_active())))
+        group.add(auto_full)
         self.card_row = Adw.SwitchRow(title="Ovládat hlasitost zvukové karty", subtitle=self.app.card_text(),
                                       subtitle_lines=0, sensitive=self.app.card.ok)
         self.card_row.set_active(self.app.card_on())
@@ -6991,7 +7000,11 @@ class App(Adw.Application):
         self._started = True
         if first:
             self.play()
-        if "--hidden" in args and first:
+        if first and ("--hidden" in args or ("--autostart" in args and not self.settings.get("autostart_full", False))):
+            return 0  # (started at login: as the tray icon only, unless set to open in full screen)
+        if "--autostart" in args and first:
+            self.show_window()
+            self.win.fullscreen()
             return 0
         self.show_window()
         return 0
