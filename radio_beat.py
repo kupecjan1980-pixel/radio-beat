@@ -2256,8 +2256,10 @@ class GpuWatch:
     amdgpu sensor: the whole chip on an APU), and how many CPU threads the step's programs kept busy on
     average (their CPU time over the step's time)."""
 
-    def __init__(self):
+    def __init__(self, enh=None):
         import resource
+        self.enh = enh
+        self.paused0 = dict(enh.paused) if enh else {}
         self.busy: list[int] = []
         self.mhz: list[int] = []
         self.watts: list[float] = []
@@ -2309,7 +2311,7 @@ class GpuWatch:
         self.run = False
         parts = []
         if gpu and len(self.busy) >= 2:
-            text = f"GPU vytížená {round(sum(self.busy) / len(self.busy))} %"
+            text = f"vytížení GPU {round(sum(self.busy) / len(self.busy))} %"
             if self.mhz and self.top:
                 text += f" při {round(sum(self.mhz) / len(self.mhz))} z {self.top} MHz"
             parts.append(text)
@@ -2320,6 +2322,19 @@ class GpuWatch:
         if took > 0.2:
             used = (ru.ru_utime + ru.ru_stime - self.cpu0) / took
             parts.append(f"{used:.1f}".replace(".", ",") + f" z {os.cpu_count() or 1} vláken CPU")
+            # what it waited for meanwhile: stopped (and why), the GPU (a GPU step's CPU just feeds it), or
+            # reading and writing the picture (one thread, whatever the CPU has)
+            waits = []
+            if self.enh:
+                for why, t in self.enh.paused.items():
+                    if t - self.paused0.get(why, 0.0) >= 0.1:
+                        waits.append(f"{why} {_secs(t - self.paused0.get(why, 0.0))}")
+            if gpu and len(self.busy) >= 2:
+                waits.append("GPU (procesor ji jen zásobuje daty)")
+            elif used < 1.5:
+                waits.append("načítání a ukládání obrázku, to jde jen jedním vláknem")
+            if waits:
+                parts.append("čekal na: " + ", ".join(waits))
         return ", ".join(parts)
 
 
@@ -2329,7 +2344,7 @@ CZ_STEPS = (("quick AI redraw", "rychlé AI překreslení"), ("AI redraw for det
             ("AI redrawn and upscaled", "AI překreslení a zvětšení"), ("AI redrawn", "AI překreslení"),
             ("AI upscaled", "AI zvětšení"), ("upscaled (smooth", "zvětšeno (hladce"), ("sharpened", "zostřeno"),
             ("denoised", "odšuměno a zostřeno"), ("final ", "výsledek "), (" on CPU", " na CPU"),
-            (" on GPU", " na GPU"), (" on NPU", " na NPU"), (" busy at ", " vytížená při "), (" of ", " z "),
+            (" on GPU", " na GPU"), (" on NPU", " na NPU"), (" busy at ", " % při "), (" of ", " z "),
             (" threads", " vláken"), ("enhanced", "vylepšeno"))
 
 
@@ -2489,7 +2504,20 @@ class Enhancer:
             self._signal(signal.SIGSTOP if self._stopped() else signal.SIGCONT)
         self.wake.set()
 
+    # How long the steps' programs were stopped, and why (shown with each step: a step that waited isn't one
+    # that left the CPU or GPU idle for nothing).
+    paused: dict = {}
+    _stopped_at: tuple | None = None  # (when, why)
+
     def _signal(self, sig) -> None:
+        now = time.monotonic()
+        if sig == signal.SIGSTOP and self.procs and self._stopped_at is None:
+            why = "animace" if self.held else "otevřený panel" if self.quiet else "rezervu pro plynulý obraz"
+            self._stopped_at = (now, why)
+        elif sig in (signal.SIGCONT, signal.SIGKILL) and self._stopped_at is not None:
+            at, why = self._stopped_at
+            self.paused[why] = self.paused.get(why, 0.0) + now - at
+            self._stopped_at = None
         for p in list(self.procs):
             try:
                 os.kill(p.pid, sig)
@@ -2563,7 +2591,7 @@ class Enhancer:
         """For the gear menu's notes: every picture step, its tool / AI model, and where it runs."""
         cpu = f"CPU {_cpu_name()}" + (f" ({SIMD}: nejširší instrukce, které na něm ffmpeg použije)" if SIMD else "")
         on = (self.gpu if self.soft else f"GPU {self.gpu} (Vulkan)") if self.ai else None
-        lines = ["Jak se obrázky vylepšují:"]
+        lines = ["Jak se vylepšují obrázky:"]
         if self.ai is None:
             lines.append("• AI: čeká se na test GPU (do té doby se bez AI nic nezvětšuje)")
         elif self.ai:
@@ -2589,10 +2617,10 @@ class Enhancer:
             lines.append(f"• Velikosti ikony aplikace: Lanczos zmenšený z AI předlohy (ffmpeg) na {cpu}")
         else:
             lines.append("• Zostřování a odšumování: čeká se na ffmpeg")
-        lines.append("• Prolínání mezi kroky: GTK (GSK) na GPU")
-        lines.append("• U každého kroku: čas, kde běžel, vytížení a takt GPU, watty čipu (čidlo amdgpu: na APU "
-                     "celý čip) a kolik vláken CPU v průměru zaměstnal")
-        lines.append(f"• NPU (zkušebně): {self.npu_text}")
+        lines.append("• Plynulý přechod mezi kroky: GTK (GSK) na GPU")
+        lines.append("• U každého kroku: jak dlouho trval, kde běžel, vytížení a takt GPU, příkon čipu (čidlo amdgpu: na APU "
+                     "celý čip), kolik vláken CPU v průměru vytížil a na co čekal")
+        lines.append(f"• NPU (testování): {self.npu_text}")
         return "\n".join(lines)
 
     def _picture(self, text: str) -> None:
@@ -3082,7 +3110,7 @@ class Enhancer:
         return f"{where}, {load}" if load else where
 
     def _watch(self) -> GpuWatch:
-        watch = GpuWatch()
+        watch = GpuWatch(self)
         self.watches.append(watch)
         return watch
 
@@ -5558,18 +5586,18 @@ class Window(Adw.ApplicationWindow):
         self.quality.connect("activated", lambda *_: self.quality_pop.popup())
         self.fill_quality()
         group.add(self.quality)
-        auto = Adw.SwitchRow(title="Spustit po přihlášení", subtitle="Hraje jen s ikonou v oznamovací oblasti")
+        auto = Adw.SwitchRow(title="Spustit po přihlášení", subtitle="Hraje jen jako ikona v oznamovací oblasti")
         auto.set_active(autostart_on())
         auto.connect("notify::active", lambda r, _: set_autostart(r.get_active()))
         group.add(auto)
-        self.card_row = Adw.SwitchRow(title="Hlasitost na zvukové kartě", subtitle=self.app.card_text(),
+        self.card_row = Adw.SwitchRow(title="Ovládat hlasitost zvukové karty", subtitle=self.app.card_text(),
                                       subtitle_lines=0, sensitive=self.app.card.ok)
         self.card_row.set_active(self.app.card_on())
         self.card_row.connect("notify::active", lambda r, _: self.app.set_card_volume(r.get_active()))
         group.add(self.card_row)
-        self.picture_row = Adw.ActionRow(title="Obrázek teď", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
+        self.picture_row = Adw.ActionRow(title="Aktuální obrázek", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
         group.add(self.picture_row)
-        self.recognise_row = Adw.SwitchRow(title="Rozpoznávat skladby (zkušebně)", subtitle_lines=0)
+        self.recognise_row = Adw.SwitchRow(title="Rozpoznávat skladby (testování)", subtitle_lines=0)
         self.recognise_row.set_active(self.app.settings.get("recognise", False))
         self.recognise_row.connect("notify::active", lambda r, _: self.app.set_recognise(r.get_active()))
         group.add(self.recognise_row)
@@ -5588,7 +5616,7 @@ class Window(Adw.ApplicationWindow):
         self.share_row.set_active(self.app.settings.get("share", True))
         self.share_row.connect("notify::active", lambda r, _: self.app.set_share(r.get_active()))
         group.add(self.share_row)
-        self.npu_row = Adw.SwitchRow(title="Použít NPU (zkušebně)", subtitle=self.app.enhancer.npu_text,
+        self.npu_row = Adw.SwitchRow(title="Použít NPU (testování)", subtitle=self.app.enhancer.npu_text,
                                      subtitle_lines=0)
         self.npu_row.set_active(self.app.settings.get("npu", False))
         self.npu_row.connect("notify::active", lambda r, _: self.app.set_npu(r.get_active()))
@@ -5599,7 +5627,7 @@ class Window(Adw.ApplicationWindow):
         dialect.set_active(self.app.settings.get("ostrava", True))
         dialect.connect("notify::active", lambda r, _: (self.app.set_look(ostrava=r.get_active()), self.app.update()))
         group.add(dialect)
-        style = Adw.SwitchRow(title="Písmo Beat Radio",
+        style = Adw.SwitchRow(title="Písmo jako Beat Radio",
                               subtitle="Písma jako v logu stanice (Anton, Oswald); vypnuto: běžná"
                               if self.app.fonts_ok else "Vypnuto: chybí jeho písma (složka fonts/)",
                               subtitle_lines=0, sensitive=self.app.fonts_ok)
@@ -5607,7 +5635,7 @@ class Window(Adw.ApplicationWindow):
         style.connect("notify::active", lambda r, _: self.app.set_look(font="beat" if r.get_active() else "default"))
         group.add(style)
         shade = Adw.ActionRow(title="Ztmavení pozadí",
-                              subtitle="Jak moc plochy za textem ztmaví obal", subtitle_lines=0)
+                              subtitle="Jak moc tmavé plochy za textem překryjí obal", subtitle_lines=0)
         self.shade_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
         self.shade_scale.set_value(self.app.settings.get("shade", 100))
         self.shade_scale.set_size_request(220, -1)  # the menu is wide now: room for a slider you can see
@@ -5619,14 +5647,14 @@ class Window(Adw.ApplicationWindow):
         self.shade_scale.connect("value-changed", lambda sc: self.app.set_look(shade=round(sc.get_value())))
         shade.add_suffix(self.shade_scale)
         group.add(shade)
-        start_full = Adw.SwitchRow(title="Spouštět přes celou obrazovku",
-                                   subtitle="Otevře se přes celou obrazovku; dvojklik z něj udělá okno"
+        start_full = Adw.SwitchRow(title="Spouštět na celou obrazovku",
+                                   subtitle="Otevře se na celou obrazovku; dvojklikem se změní v okno"
                                    + (" v pravém dolním rohu" if is_kde() else ""), subtitle_lines=0)
         start_full.set_active(self.app.settings.get("start_full", True))
         start_full.connect("notify::active", lambda r, _: self.app.set_look(start_full=r.get_active()))
         group.add(start_full)
-        auto_up = Adw.SwitchRow(title="Aktualizovat se samo",
-                                subtitle="Každých 5 minut hledá novou verzi, nainstaluje ji a restartuje se",
+        auto_up = Adw.SwitchRow(title="Automatické aktualizace",
+                                subtitle="Každých 5 minut zkontroluje novou verzi, nainstaluje ji a spustí se znovu",
                                 subtitle_lines=0)
         auto_up.set_active(self.app.settings.get("auto_update", True))
         auto_up.connect("notify::active", lambda r, _: self.app.set_look(auto_update=r.get_active()))
@@ -7692,7 +7720,7 @@ class App(Adw.Application):
         text = self.enhancer.notes()
         text += f"\n• Animace: {self.frames_text()}"
         if self.settings.get("recognise", False):
-            text += f"\n• Rozpoznávání skladeb (zkušebně): {self.recognise_text}"
+            text += f"\n• Rozpoznávání skladeb (testování): {self.recognise_text}"
         return text
 
     def _recognise_tick(self) -> bool:
