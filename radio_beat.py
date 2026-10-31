@@ -1740,7 +1740,7 @@ class Mpv:
             pass
         cmd = mpv_command(sock_dir)
         if not cmd:
-            raise RuntimeError("mpv isn't installed (system package, or Flathub: flatpak install flathub io.mpv.Mpv)")
+            raise RuntimeError("Chybí mpv (balíček systému, nebo z Flathubu: flatpak install flathub io.mpv.Mpv)")
         self.proc = subprocess.Popen(
             # --load-scripts=no: no MPRIS plugin, the app shows itself as the player (Mpris)
             [*cmd, "--idle=yes", "--no-video", "--load-scripts=no", "--no-terminal", "--force-window=no",
@@ -7086,7 +7086,7 @@ class App(Adw.Application):
             GLib.idle_add(self._add_flac, url)
 
     def _add_flac(self, url):
-        self.streams.insert(0, ("flac", "FLAC (lossless)", url))
+        self.streams.insert(0, ("flac", "FLAC (bezeztrátově)", url))
         if self.win:
             self.win.fill_quality()
 
