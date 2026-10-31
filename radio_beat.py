@@ -6106,9 +6106,9 @@ class ClockView(Gtk.Widget):
         self.colon = True  # the time's colon blinks: a second on, a second off
         self._decor = (None, [])  # ((day, sizes), [render node per line]): the season's motifs, built once a day
 
-    def _layout(self, which: int, pt: float):
+    def _layout(self, which: int, pt: float, text: str = None):
         family, weight = self.FONTS[which]
-        lay = self.create_pango_layout(self.texts[which])
+        lay = self.create_pango_layout(self.texts[which] if text is None else text)
         attrs = Pango.AttrList()
         attrs.insert(Pango.attr_family_new(family))
         attrs.insert(Pango.attr_weight_new(weight))
@@ -6118,7 +6118,10 @@ class ClockView(Gtk.Widget):
 
     def _fit(self, which: int, w: float, h: float):
         _, ink = self._layout(which, 100)  # measured at 100 pt, then scaled to fit
-        return self._layout(which, 100 * min(w / max(1, ink.width), h / max(1, ink.height)) * 0.97)
+        width = ink.width
+        if which == 2:  # the day: a one-digit day (1, 2…) as big as a two-digit one, not stretched to a giant
+            width = max(width, self._layout(which, 100, "28")[1].width)
+        return self._layout(which, 100 * min(w / max(1, width), h / max(1, ink.height)) * 0.97)
 
     def set_room(self, w: int, h: int, texts: tuple) -> None:
         if (w, h) == self.room and texts == self.texts and self.lays:
