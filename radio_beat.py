@@ -944,8 +944,11 @@ class History:
             self.db.execute("CREATE INDEX IF NOT EXISTS plays_at ON plays (at DESC)")
             self.db.execute("CREATE TABLE IF NOT EXISTS hosts (name TEXT PRIMARY KEY, shows TEXT, first REAL, "
                             "last REAL)")
-            if "cover" not in [r[1] for r in self.db.execute("PRAGMA table_info(plays)")]:
+            cols = [r[1] for r in self.db.execute("PRAGMA table_info(plays)")]
+            if "cover" not in cols:
                 self.db.execute("ALTER TABLE plays ADD COLUMN cover TEXT")  # its picture ("": none found)
+            if "facts" not in cols:
+                self.db.execute("ALTER TABLE plays ADD COLUMN facts TEXT")  # first release, where ("": none)
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:  # once: a song logged twice (the app
                 kept: dict = {}                                             # restarted during it) kept once
                 gone = []
@@ -968,17 +971,23 @@ class History:
             if self.db.execute("SELECT 1 FROM plays WHERE at > ? AND lower(artist) = lower(?) AND lower(title) = "
                                "lower(?)", (now - self.SAME, artist, title)).fetchone():
                 return  # logged already (the app restarted during the song)
-            self.db.execute("INSERT INTO plays VALUES (?, ?, ?, NULL, ?, ?, NULL)", (now, artist, title, show, host))
+            self.db.execute("INSERT INTO plays VALUES (?, ?, ?, NULL, ?, ?, NULL, NULL)", (now, artist, title, show, host))
         if self.on_play:
             self.on_play()
 
     on_play = None  # called after a play is logged (the HRÁLO view shows it)
 
     def page(self, before: float, n: int = 60) -> list[tuple]:
-        """(at, artist, title, album, show, cover) of the plays before `before`, newest first."""
+        """(at, artist, title, album, show, cover, facts) of the plays before `before`, newest first."""
         with self.lock:
-            return self.db.execute("SELECT at, artist, title, album, show, cover FROM plays WHERE at < ? ORDER BY at "
-                                   "DESC LIMIT ?", (before, n)).fetchall()
+            return self.db.execute("SELECT at, artist, title, album, show, cover, facts FROM plays WHERE at < ? "
+                                   "ORDER BY at DESC LIMIT ?", (before, n)).fetchall()
+
+    def set_facts(self, artist: str, title: str, facts: str) -> None:
+        """A song's first release and such ("" when nothing's known): every play of it lacking them."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE plays SET facts = ? WHERE lower(artist) = lower(?) AND lower(title) = lower(?) "
+                            "AND (facts IS NULL OR (facts = '' AND ? != ''))", (facts, artist, title, facts))
 
     def song_art(self, artist: str, title: str, album: str | None, cover: str) -> None:
         """A song's album and picture, looked up later ("" when none was found): every play of it lacking them."""
@@ -997,8 +1006,8 @@ class History:
         """Plays after `since`, oldest first: [at, artist, title, album, show, host, cover] (for the other
         computers)."""
         with self.lock:
-            return [list(r) for r in self.db.execute("SELECT at, artist, title, album, show, host, cover FROM plays "
-                                                     "WHERE at > ? ORDER BY at LIMIT ?", (since, n)).fetchall()]
+            return [list(r) for r in self.db.execute("SELECT at, artist, title, album, show, host, cover, facts FROM "
+                                                     "plays WHERE at > ? ORDER BY at LIMIT ?", (since, n)).fetchall()]
 
     def merge(self, rows) -> int:
         """Plays from another computer: each kept unless this one logged it too (the same song within SAME s;
@@ -1006,17 +1015,17 @@ class History:
         new = 0
         with self.lock, self.db:
             for r in rows:
-                if isinstance(r, list) and len(r) == 6:
-                    r = r + [None]  # an older Rádio Beat: no picture
-                if not (isinstance(r, list) and len(r) == 7 and isinstance(r[0], (int, float))
+                if isinstance(r, list) and 6 <= len(r) < 8:
+                    r = r + [None] * (8 - len(r))  # an older Rádio Beat: no picture, no facts
+                if not (isinstance(r, list) and len(r) == 8 and isinstance(r[0], (int, float))
                         and all(isinstance(x, str) and len(x) <= 300 for x in r[1:3])
-                        and all(x is None or (isinstance(x, str) and len(x) <= 300) for x in r[3:])
+                        and all(x is None or (isinstance(x, str) and len(x) <= 500) for x in r[3:])
                         and 1e9 < r[0] < time.time() + 86400):
                     continue
-                at, artist, title, album, show, host, cover = r
+                at, artist, title, album, show, host, cover, facts = r
                 if cover and not cover.startswith("https://"):
                     cover = None
-                same = self.db.execute("SELECT rowid, album, cover FROM plays WHERE at BETWEEN ? AND ? AND "
+                same = self.db.execute("SELECT rowid, album, cover, facts FROM plays WHERE at BETWEEN ? AND ? AND "
                                        "lower(artist) = lower(?) AND lower(title) = lower(?) LIMIT 1",
                                        (at - self.SAME, at + self.SAME, artist, title)).fetchone()
                 if same:
@@ -1024,9 +1033,11 @@ class History:
                         self.db.execute("UPDATE plays SET album = ? WHERE rowid = ?", (album, same[0]))
                     if cover and not same[2]:
                         self.db.execute("UPDATE plays SET cover = ? WHERE rowid = ?", (cover, same[0]))
+                    if facts and not same[3]:
+                        self.db.execute("UPDATE plays SET facts = ? WHERE rowid = ?", (facts, same[0]))
                     continue
-                self.db.execute("INSERT INTO plays VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (at, artist, title, album, show, host, cover))
+                self.db.execute("INSERT INTO plays VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                (at, artist, title, album, show, host, cover, facts))
                 new += 1
         return new
 
@@ -1163,6 +1174,23 @@ def earliest_release(artist: str, song: str) -> str:
     year = min(d[:4] for d in dates)
     _EARLIEST[(a, t)] = min((d for d in dates if d[:4] == year), key=lambda d: (-len(d), d))
     return _EARLIEST[(a, t)]
+
+
+def track_facts(artist: str, song: str, info: dict | None) -> str:
+    """The song's line under the album: its first release and where it was recorded ('Poprvé vydáno 24. září
+    1991 …'), else when its album came out; "" when nothing's known."""
+    # asked with the names the lookup found (the stream's may be misspelt: "PAVLOVS ´DOG")
+    facts = song_facts(info["artist"], info["title"]) if info and not info.get("artist_photo") else ""
+    if not facts:
+        facts = song_facts(artist, song)
+    if not facts:  # MusicBrainz not reached / no answer: the earliest release Wikidata, iTunes and Deezer know
+        day = earliest_release(info["artist"], info["title"]) if info and not info.get("artist_photo") else ""
+        day = day or earliest_release(artist, song)
+        if day:
+            facts = f"Poprvé vydáno {_date(day)} ({{ago:{day[:4]}}})"
+        elif info and (day := album_released(info)):
+            facts = f"Album vydáno {_date(day)} ({{ago:{day[:4]}}})"
+    return facts
 
 
 def album_released(info: dict) -> str:
@@ -5439,6 +5467,7 @@ class Window(Adw.ApplicationWindow):
             body = Gtk.Label(label=text, xalign=0, wrap=True)
             body.add_css_class("show-sub")
             box.append(body)
+            self._last_body = body
         if now:
             outer.add_css_class("puddle-now")
         if past:
@@ -5522,40 +5551,53 @@ class Window(Adw.ApplicationWindow):
                 self._puddle_block("", "", self.app.cz("Zatím nic nehrálo."))
             self._played_before = 0.0  # all shown
             return
-        for at, artist, title, album, show, cover in rows:
+        for at, artist, title, album, show, cover, facts in rows:
             t = time.localtime(at)
             day = (t.tm_year, t.tm_yday)
             if day != self._played_day:
                 self._played_day = day
                 self._puddle_block("", f"{DAYS[t.tm_wday].upper()} {t.tm_mday}. {MONTHS[t.tm_mon - 1].upper()} "
                                        f"{t.tm_year}", "")
-            # with its album's picture like the shows' (looked up when it has none yet: the logo meanwhile)
+            # with its album's picture like the shows' and its track info (looked up when missing: the logo meanwhile)
+            row = {"at": at, "artist": artist, "title": title, "album": album, "show": show, "cover": cover,
+                   "facts": facts}
+            self._last_body = None
             self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{artist} – {plain_title(title)}",
-                               " · ".join(x for x in (plain_title(album or ""), show) if x),
-                               img=small_cover(cover) if cover else "")
-            self._played_rows.append({"at": at, "artist": artist, "title": title, "album": album, "show": show,
-                                      "cover": cover})
+                               self._played_line(row) or " ", img=small_cover(cover) if cover else "")
+            row["label"] = self._last_body
+            self._played_rows.append(row)
             click = Gtk.GestureClick()  # the picture full screen
             click.connect("released", lambda *_, i=len(self._played_rows) - 1: self.view_played(i))
             self._last_pic.add_controller(click)
             self._last_pic.set_cursor_from_name("pointer")
-            if cover is None:
-                self._art_wait.setdefault((artist.lower(), title.lower()), []).append(self._last_pic)
-                self.app.want_song_art(artist, title)
+            if cover is None or facts is None:
+                if cover is None:
+                    self._art_wait.setdefault((artist.lower(), title.lower()), []).append(self._last_pic)
+                self.app.want_song_art(artist, title, cover is None, facts is None)
         self._played_before = rows[-1][0]
 
-    def song_art_got(self, artist: str, title: str, cover: str, album: str | None) -> None:
-        """A played song's picture looked up: its rows in HRÁLO show it (once it's fetched)."""
-        url = small_cover(cover)
+    def song_art_got(self, artist: str, title: str, cover: str, album: str | None, facts: str | None) -> None:
+        """A played song's picture and track info looked up: its rows in HRÁLO show them (the picture once it's
+        fetched)."""
+        url = small_cover(cover) if cover else ""
         for pic in self._art_wait.pop((artist.lower(), title.lower()), []):
-            pic.img_url = url
-            if self.app.show_pics.get(url):
-                pic.set_from_paintable(self.app.show_pics[url])
-        for row in self._played_rows:  # the viewer: the big one
+            if url:
+                pic.img_url = url
+                if self.app.show_pics.get(url):
+                    pic.set_from_paintable(self.app.show_pics[url])
+        for row in self._played_rows:
             if (row["artist"].lower(), row["title"].lower()) == (artist.lower(), title.lower()):
-                row["cover"] = cover
+                row["cover"] = cover or row["cover"]
                 row["album"] = row["album"] or album
-        self.app.want_show_pic(url)
+                row["facts"] = row["facts"] or facts
+                if row.get("label"):
+                    row["label"].set_text(self._played_line(row))
+        if url:
+            self.app.want_show_pic(url)
+
+    def _played_line(self, row: dict) -> str:
+        """A played song's line under it: the album, its first release, the show."""
+        return " · ".join(x for x in (plain_title(row["album"] or ""), self.app.cz(row["facts"] or ""), row["show"]) if x)
 
     def _make_viewer(self, overlay) -> None:
         """HRÁLO's pictures full screen: a click on one opens it, the wheel goes to the newer / older song, a click
@@ -5590,9 +5632,9 @@ class Window(Adw.ApplicationWindow):
         row = self._played_rows[i]
         t = time.localtime(row["at"])
         self.viewer_title.set_text(f"{row['artist']} – {plain_title(row['title'])}")
-        self.viewer_sub.set_text(" · ".join(x for x in (
-            f"{DAYS[t.tm_wday]} {t.tm_mday}. {MONTHS[t.tm_mon - 1]} {t.tm_year} {t.tm_hour}:{t.tm_min:02d}",
-            plain_title(row["album"] or ""), row["show"]) if x))
+        self.viewer_sub.set_text(f"{DAYS[t.tm_wday]} {t.tm_mday}. {MONTHS[t.tm_mon - 1]} {t.tm_year} "
+                                 f"{t.tm_hour}:{t.tm_min:02d}" + (f"\n{self._played_line(row)}" if self._played_line(row)
+                                                                  else ""))
         cover = row["cover"]
         small = self.app.show_pics.get(small_cover(cover)) if cover else None
         self.viewer_pic.set_paintable(self._big_pics.get(cover) or small or self.app.logo_tex)
@@ -6478,28 +6520,32 @@ class App(Adw.Application):
                 threading.Thread(target=work, daemon=True).start()
         self._enhance_show()
 
-    def want_song_art(self, artist: str, title: str) -> None:
-        """A played song with no picture yet: looked up (one at a time, a little apart: the services' limits),
-        remembered in the history, shown in HRÁLO."""
+    def want_song_art(self, artist: str, title: str, cover: bool = True, facts: bool = True) -> None:
+        """A played song lacking its picture (cover) or its track info (facts: first release…): looked up (one
+        at a time, a little apart: the services' limits), remembered in the history, shown in HRÁLO."""
         key = (artist.lower(), title.lower())
         if key in self._art_asked:
             return
         self._art_asked.add(key)
-        self._art_queue.append((artist, title))
+        self._art_queue.append((artist, title, cover, facts))
         if not self._art_busy:
             self._art_busy = True
             threading.Thread(target=self._art_worker, daemon=True).start()
 
     def _art_worker(self) -> None:
         while self._art_queue:
-            artist, title = self._art_queue.pop(0)
+            artist, title, want_cover, want_facts = self._art_queue.pop(0)
             info = lookup(artist, title)
             cover = (info or {}).get("cover") or ""
-            self.db.song_art(artist, title, (info or {}).get("album"), cover)
-            if cover:
-                album = None if (info or {}).get("artist_photo") else (info or {}).get("album")
-                GLib.idle_add(lambda a=artist, t=title, c=cover, al=album:
-                              (self.win and self.win.song_art_got(a, t, c, al), False)[1])
+            album = None if (info or {}).get("artist_photo") else (info or {}).get("album")
+            if want_cover:
+                self.db.song_art(artist, title, album, cover)
+            facts = None
+            if want_facts:
+                facts = track_facts(artist, title, info)
+                self.db.set_facts(artist, title, facts)
+            GLib.idle_add(lambda a=artist, t=title, c=cover if want_cover else "", al=album, f=facts:
+                          (self.win and self.win.song_art_got(a, t, c, al, f), False)[1])
             time.sleep(0.4)
         self._art_busy = False
 
@@ -6730,18 +6776,8 @@ class App(Adw.Application):
         info = lookup(artist, song)
         data = fetch(info["cover"]) if info and info.get("cover") else None
         GLib.idle_add(self._looked_up, lid, info, data)
-        # first release and where: asked with the names the lookup found (the stream's may be misspelt:
-        # "PAVLOVS ´DOG"), else at least when its album came out
-        facts = song_facts(info["artist"], info["title"]) if info else ""
-        if not facts:
-            facts = song_facts(artist, song)
-        if not facts:  # MusicBrainz not reached / no answer: the earliest release iTunes and Deezer know
-            day = earliest_release(info["artist"], info["title"]) if info else ""
-            day = day or earliest_release(artist, song)
-            if day:
-                facts = f"Poprvé vydáno {_date(day)} ({{ago:{day[:4]}}})"
-            elif info and (day := album_released(info)):
-                facts = f"Album vydáno {_date(day)} ({{ago:{day[:4]}}})"
+        facts = track_facts(artist, song, info)
+        self.db.set_facts(first_artist(artist), song, facts)  # HRÁLO shows it too
         GLib.idle_add(self._got_facts, lid, facts)
 
     def _facts(self, lid, artist, song):
