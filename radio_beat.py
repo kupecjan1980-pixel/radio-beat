@@ -639,6 +639,49 @@ COUNTRY_IN = {"GB": "ve Velké Británii", "US": "v USA", "XC": "v Českoslovens
               "ES": "ve Španělsku", "BE": "v Belgii", "CH": "ve Švýcarsku", "SU": "v Sovětském svazu"}
 
 
+# A country by name, after the studio and the city: "Nahráno v Sound City Studios, Van Nuys, California, USA".
+COUNTRY_NAME = {"GB": "Velká Británie", "US": "USA", "CZ": "Česko", "SK": "Slovensko", "DE": "Německo",
+                "FR": "Francie", "IT": "Itálie", "NL": "Nizozemsko", "SE": "Švédsko", "AU": "Austrálie",
+                "CA": "Kanada", "JP": "Japonsko", "IE": "Irsko", "PL": "Polsko", "HU": "Maďarsko", "AT": "Rakousko",
+                "DK": "Dánsko", "NO": "Norsko", "FI": "Finsko", "ES": "Španělsko", "BE": "Belgie",
+                "CH": "Švýcarsko", "JM": "Jamajka", "BS": "Bahamy", "MX": "Mexiko", "BR": "Brazílie",
+                "RU": "Rusko", "PT": "Portugalsko", "GR": "Řecko", "IS": "Island", "NZ": "Nový Zéland"}
+_AREAS: dict = {}  # MusicBrainz area id -> (name, type, iso code, parent id)
+
+
+def _area(aid: str):
+    if aid not in _AREAS:
+        got = _mb(f"/area/{aid}?inc=area-rels&fmt=json") or {}
+        parent = next((x["area"]["id"] for x in got.get("relations", [])
+                       if x.get("type") == "part of" and x.get("direction") == "backward" and x.get("area")), None)
+        _AREAS[aid] = (got.get("name"), got.get("type"), (got.get("iso-3166-1-codes") or [None])[0], parent)
+    return _AREAS[aid]
+
+
+def _where(area: dict | None) -> list[str]:
+    """An area and what it's in: the city (a district's too), the state (the top one below the country:
+    California, England, Bavaria) and the country — ["Van Nuys", "California", "USA"]."""
+    if not area or not area.get("id"):
+        return [area["name"]] if area and area.get("name") else []
+    out, state, aid = [], None, area["id"]
+    for _ in range(8):
+        name, kind, iso, parent = _area(aid)
+        if not name:
+            break
+        if kind == "Country":
+            out += ([state] if state else []) + [COUNTRY_NAME.get(iso, name)]
+            break
+        if not out or kind == "City" and name not in out:
+            out.append(name)  # the place's own area (Praha 9), and the city a district is in (Praha)
+        elif kind == "Subdivision":
+            state = name  # the last one before the country wins
+        if not parent:
+            out += [state] if state else []
+            break
+        aid = parent
+    return list(dict.fromkeys(out))
+
+
 def years_ago(text: str) -> str:
     """'{ago:1971}' → 'před 55 lety' (worked out when shown, so it stays right)."""
     def ago(m):
@@ -652,17 +695,30 @@ def _places(rels: list) -> list[str]:
     for r in rels or []:
         if r.get("type") == "recorded at" and r.get("place"):
             pl = r["place"]
-            area = (pl.get("area") or {}).get("name")
-            out.append(pl["name"] + (f", {area}" if area and area not in pl["name"] else ""))
+            out.append([pl["name"]] + [x for x in _where(pl.get("area")) if x not in pl["name"]])
         elif r.get("type") == "recorded in" and r.get("area"):
-            out.append(r["area"]["name"])
-    return list(dict.fromkeys(out))
+            out.append(_where(r["area"]))
+    return [list(x) for x in dict.fromkeys(tuple(x) for x in out if x)]
+
+
+def _join_places(places: list) -> str:
+    """Two places at most, what they share said once: "Apple Studios a Abbey Road Studios, London, England,
+    Velká Británie"."""
+    places = places[:2]
+    if len(places) < 2:
+        return ", ".join(places[0]) if places else ""
+    a, b = places
+    n = 0
+    while n < min(len(a), len(b)) - 1 and a[-1 - n] == b[-1 - n]:
+        n += 1
+    shared = a[len(a) - n:] if n else []
+    return ", ".join([", ".join(a[:len(a) - n]) + " a " + ", ".join(b[:len(b) - n])] + shared)
 
 
 def song_facts(artist: str, song: str) -> str:
     """'First released 8 November 1971 · Recorded at Olympic Studios, London', what MusicBrainz knows (may be
     ''), remembered per song."""
-    key = f"2|{norm(first_artist(artist))}|{norm(song)}"  # (2: without the release's country)
+    key = f"3|{norm(first_artist(artist))}|{norm(song)}"  # (3: no release country; city, state, country)
     try:
         with open(FACTS_CACHE) as f:
             cache = json.load(f)
@@ -704,6 +760,10 @@ def song_facts(artist: str, song: str) -> str:
             support[r["first-release-date"]] = support.get(r["first-release-date"], 0) + len(r.get("releases", []))
     dates = sorted(support)
     first = next((d for d in dates if support[d] >= 2), dates[0] if dates else "")
+    if first and len(first) < 10:  # only the year or month: the day from Wikidata, iTunes or Deezer (that year)
+        other = earliest_release(artist, song)
+        if other[:4] == first[:4] and len(other) > len(first) and other.startswith(first):
+            first = other
     # (where the first release came out misleads: the Beatles' "in Canada", Škwor's "worldwide"; where it
     # was recorded is what counts, below)
     # Where: the oldest plain recordings first (not a demo or a live one).
@@ -722,7 +782,7 @@ def song_facts(artist: str, song: str) -> str:
             places = _places((got or {}).get("relations"))
             if places:
                 break
-    where = f"v {' a '.join(places[:2])}" if places else ""
+    where = f"v {_join_places(places)}" if places else ""
     if not where:  # no studio known: the artist's country (a band records at home, as a rule)
         ids = [c["artist"]["id"] for r in recs for c in r.get("artist-credit", [])
                if isinstance(c, dict) and c.get("artist", {}).get("id")
@@ -1100,6 +1160,9 @@ class History:
                 self.db.execute("UPDATE plays SET cover = NULL, album = NULL, facts = NULL WHERE title GLOB "
                                 "'*[12][90][0-9][0-9]' OR title GLOB '*([12][90][0-9][0-9])'")
                 self.db.execute("PRAGMA user_version = 5")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 6:  # once: all track info looked up again
+                self.db.execute("UPDATE plays SET facts = NULL")  # (the full date; studio, city, state, country)
+                self.db.execute("PRAGMA user_version = 6")
 
     def play(self, artist: str, title: str, show: str | None, host: str | None) -> None:
         import sqlite3
@@ -4447,8 +4510,9 @@ class MenuGlass(GlassCard):
 
 
 class ClockView(Gtk.Widget):
-    """The time as tall as the room it's given, at its right; left of it the weekday at the top, as wide as
-    the room there, under it the day and month, then the year, each as big as fits (not touching). Their letters' outlines (not the fonts' line boxes) fill the room, in
+    """The time as tall as the room it's given, at its right; left of it the weekday at the top and the year
+    at the bottom, each as big as fits its half (not touching); the day and month are above the volume slider
+    (DateView). Their letters' outlines (not the fonts' line boxes) fill the room, in
     the Beat Radio fonts, white with a shadow like the song info's."""
 
     FONTS = (("Anton", Pango.Weight.NORMAL),) + (("Oswald", Pango.Weight.SEMIBOLD),) * 3
@@ -4483,9 +4547,8 @@ class ClockView(Gtk.Widget):
         self.room, self.texts = (w, h), texts
         tm = self._fit(0, w * self.TIME_MAX, h)
         rest = w - tm[1].width - w * self.GAP
-        day = self._fit(1, rest, h * self.DAY_MAX)  # as wide as its room
-        each = (h - day[1].height - 2 * h * self.GAP) / 2
-        self.lays = (tm, day, self._fit(2, rest, each), self._fit(3, rest, each), rest)
+        each = (h - h * self.GAP) / 2
+        self.lays = (tm, self._fit(1, rest, each), self._fit(3, rest, each), rest)
         self.set_size_request(w, h)
         self.queue_draw()
 
@@ -4493,8 +4556,7 @@ class ClockView(Gtk.Widget):
         if not self.lays:
             return
         w, h = self.room
-        (tl, ti), (yl, yi), (dl, di), (ql, qi), rest = self.lays
-        mid = (yi.height + h - qi.height - di.height) / 2  # the day and month between the weekday and the year
+        (tl, ti), (yl, yi), (ql, qi), rest = self.lays
         i = self.texts[0].find(":")
         if i >= 0:  # off: drawn see-through (the time keeps its place)
             attrs = tl.get_attributes().copy()
@@ -4505,14 +4567,43 @@ class ClockView(Gtk.Widget):
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
         snap.push_shadow([shadow])
-        for lay, ink, x, y in ((tl, ti, w - ti.width, (h - ti.height) / 2),  # right, the room's full height
-                               (yl, yi, (rest - yi.width) / 2, 0),  # the weekday: top, centred
-                               (dl, di, (rest - di.width) / 2, mid),  # the day and month
-                               (ql, qi, (rest - qi.width) / 2, h - qi.height)):  # the year at the bottom
+        # the weekday and the year as wide as their room, stretched up to fill their half of the height
+        each = (h - h * self.GAP) / 2
+        for lay, ink, x, y, sy in ((tl, ti, w - ti.width, (h - ti.height) / 2, 1.0),  # right, full height
+                                   (yl, yi, (rest - yi.width) / 2, 0, each / max(1, yi.height)),  # top
+                                   (ql, qi, (rest - qi.width) / 2, h - each, each / max(1, qi.height))):  # bottom
             snap.save()
-            snap.translate(Graphene.Point().init(x - ink.x, y - ink.y))
+            snap.translate(Graphene.Point().init(x, y))
+            snap.scale(1.0, sy)
+            snap.translate(Graphene.Point().init(-ink.x, -ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, 1))
             snap.restore()
+        snap.pop()
+
+
+class DateView(ClockView):
+    """The day and month ("31. ŘÍJNA") above the volume slider: as wide as the room right of the cover (as tall
+    as that makes it, up to the room's height), in the clock's font."""
+
+    FONTS = (("Oswald", Pango.Weight.SEMIBOLD),)
+
+    def set_room(self, w: int, h: int, texts: tuple) -> None:
+        if (w, h) == self.room and texts == self.texts and self.lays:
+            return
+        self.room, self.texts = (w, h), texts
+        self.lays = self._fit(0, w, h)
+        self.set_size_request(w, max(1, self.lays[1].height))
+        self.queue_draw()
+
+    def do_snapshot(self, snap) -> None:
+        if not self.lays:
+            return
+        lay, ink = self.lays
+        shadow = Gsk.Shadow()
+        shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
+        snap.push_shadow([shadow])
+        snap.translate(Graphene.Point().init((self.room[0] - ink.width) / 2 - ink.x, -ink.y))
+        snap.append_layout(lay, _rgba(255, 255, 255, 1))
         snap.pop()
 
 
@@ -5047,6 +5138,9 @@ class Window(Adw.ApplicationWindow):
         self.clock = ClockView(halign=Gtk.Align.END, valign=Gtk.Align.END, can_target=False)
         self.clock.set_visible(False)
         overlay.add_overlay(self.clock)
+        self.date = DateView(halign=Gtk.Align.END, valign=Gtk.Align.END, can_target=False)
+        self.date.set_visible(False)
+        overlay.add_overlay(self.date)
         GLib.timeout_add_seconds(1, self._tick_clock)
         self._tick_clock()
         self._make_puddle(overlay, scrim)
@@ -5283,16 +5377,26 @@ class Window(Adw.ApplicationWindow):
         ok, vol = self.vol.compute_bounds(self)
         if not cover or not ok or not getattr(self, "_clock_texts", None):
             self.clock.set_visible(False)
+            self.date.set_visible(False)
             return False
         # just below the slider's knob (the slider widget itself is taller than what's drawn of it)
         top = vol.get_y() + vol.get_height()
-        stack = [self.vol]
+        knob_top = vol.get_y()
+        # the knob measured as it rests: while the mouse is on the slider it pumps (bigger), and the date and
+        # clock would pump with it
+        hovered = bool(self.vol.get_state_flags() & Gtk.StateFlags.PRELIGHT)
+        stack = [] if hovered and getattr(self, "_knob_rest", None) else [self.vol]
+        if hovered and getattr(self, "_knob_rest", None):
+            top, knob_top = self._knob_rest
         while stack:
             w = stack.pop()
             if w.get_css_name() == "slider":
                 ok2, knob = w.compute_bounds(self)
                 if ok2:
                     top = knob.get_y() + knob.get_height()
+                    knob_top = knob.get_y()
+                    if not hovered:
+                        self._knob_rest = (top, knob_top)
                 break
             c = w.get_first_child()
             while c is not None:
@@ -5302,7 +5406,14 @@ class Window(Adw.ApplicationWindow):
         room_h = int(H - top - 2 * self.CLOCK_PAD)  # (a little off the slider and the screen's bottom)
         if room_w < 60 or room_h < 16:
             self.clock.set_visible(False)
+            self.date.set_visible(False)
             return False
+        # the day and month above the slider, as wide as the room (below the top buttons at most)
+        date_h = int(knob_top - 2 * self.CLOCK_PAD - H * 0.1)
+        self.date.set_room(room_w, max(16, date_h), (self._clock_texts[2],))
+        self.date.set_margin_end(self.CLOCK_GAP)
+        self.date.set_margin_bottom(int(H - knob_top + self.CLOCK_PAD))
+        self.date.set_visible(True)
         self.clock.set_room(room_w, room_h, self._clock_texts)
         self.clock.set_margin_end(self.CLOCK_GAP)
         self.clock.set_margin_bottom(self.CLOCK_PAD)
