@@ -3290,11 +3290,11 @@ class Enhancer:
             here = sum(1 for f in os.listdir(UPSCALED_DIR) if f.endswith(".jpg"))
         except OSError:
             here = 0
-        pics = f"{obrazku(here)} tady"
+        pics = f"{obrazku(here)} na tomto počítači"
         for who, (there, total) in self.shared_counts.items():
-            pics += f", {there} na {who.rsplit('-', 1)[0]}, {total} celkem"
-        return (f"Mezipaměť: {pics}; zabráno {_size(self.cache_used)} z vyhrazených "
-                f"{self.cache_allowed / 2**30:.1f} GB (80 % volného místa na tomto počítači)".replace(".", ","))
+            pics += f", {obrazku(there)} na počítači {who.rsplit('-', 1)[0]}, dohromady {obrazku(total)}"
+        return (f"Mezipaměť: {pics}; zabírají {_size(self.cache_used)} z vyhrazených "
+                f"{self.cache_allowed / 2**30:.1f} GB (80 % volného místa na disku)".replace(".", ","))
 
     def _trim(self) -> None:
         """When the cache is full: the least used pictures go first (shown the fewest times), and of those the
