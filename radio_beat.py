@@ -4623,15 +4623,14 @@ class MenuGlass(GlassCard):
 
 
 class ClockView(Gtk.Widget):
-    """The time as tall as the room it's given, at its right; left of it the weekday at the top and the year
-    at the bottom, each as big as fits its half (not touching); the day and month are above the volume slider
-    (DateView). Their letters' outlines (not the fonts' line boxes) fill the room, in
-    the Beat Radio fonts, white with a shadow like the song info's."""
+    """Above the volume slider, right of the cover, one under another: the weekday, the day and month, the
+    year and the time (lowest, just above the slider). Each as wide as the room (their letters' outlines, not
+    the fonts' line boxes), all made smaller together when they wouldn't fit its height; never touching.
+    In the Beat Radio fonts, white with a shadow like the song info's."""
 
     FONTS = (("Anton", Pango.Weight.NORMAL),) + (("Oswald", Pango.Weight.SEMIBOLD),) * 3
-    TIME_MAX = 0.75  # of the width at most: the weekday and date keep the rest
-    DAY_MAX = 0.4  # the weekday's share of the height at most
-    GAP = 0.06  # between the time and the rest (of the width), and the lines on the left (of the height)
+    ORDER = (1, 2, 3, 0)  # top to bottom: weekday, day and month, year, time
+    GAP = 0.05  # between the lines, of the width
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -4658,18 +4657,22 @@ class ClockView(Gtk.Widget):
         if (w, h) == self.room and texts == self.texts and self.lays:
             return
         self.room, self.texts = (w, h), texts
-        tm = self._fit(0, w * self.TIME_MAX, h)
-        rest = w - tm[1].width - w * self.GAP
-        each = (h - h * self.GAP) / 2
-        self.lays = (tm, self._fit(1, rest, each), self._fit(3, rest, each), rest)
-        self.set_size_request(w, h)
+        gap = max(4.0, w * self.GAP)
+        lays = [self._fit(i, w, 10000) for i in self.ORDER]
+        tall = sum(ink.height for _, ink in lays)
+        if tall + 3 * gap > h:  # too tall for the room: all smaller, as much
+            k = max(0.05, (h - 3 * gap) / max(1, tall))
+            lays = [self._fit(i, w * k, 10000) for i in self.ORDER]
+        self.lays = (lays, gap)
+        self.set_size_request(w, int(sum(ink.height for _, ink in lays) + 3 * gap) + 1)
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
         if not self.lays:
             return
-        w, h = self.room
-        (tl, ti), (yl, yi), (ql, qi), rest = self.lays
+        lays, gap = self.lays
+        w = self.room[0]
+        tl = lays[-1][0]
         i = self.texts[0].find(":")
         if i >= 0:  # off: drawn see-through (the time keeps its place)
             attrs = tl.get_attributes().copy()
@@ -4680,43 +4683,13 @@ class ClockView(Gtk.Widget):
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
         snap.push_shadow([shadow])
-        # the weekday and the year as wide as their room, stretched up to fill their half of the height
-        each = (h - h * self.GAP) / 2
-        for lay, ink, x, y, sy in ((tl, ti, w - ti.width, (h - ti.height) / 2, 1.0),  # right, full height
-                                   (yl, yi, (rest - yi.width) / 2, 0, each / max(1, yi.height)),  # top
-                                   (ql, qi, (rest - qi.width) / 2, h - each, each / max(1, qi.height))):  # bottom
+        y = 0.0
+        for lay, ink in lays:
             snap.save()
-            snap.translate(Graphene.Point().init(x, y))
-            snap.scale(1.0, sy)
-            snap.translate(Graphene.Point().init(-ink.x, -ink.y))
+            snap.translate(Graphene.Point().init((w - ink.width) / 2 - ink.x, y - ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, 1))
             snap.restore()
-        snap.pop()
-
-
-class DateView(ClockView):
-    """The day and month ("31. ŘÍJNA") above the volume slider: as wide as the room right of the cover (as tall
-    as that makes it, up to the room's height), in the clock's font."""
-
-    FONTS = (("Oswald", Pango.Weight.SEMIBOLD),)
-
-    def set_room(self, w: int, h: int, texts: tuple) -> None:
-        if (w, h) == self.room and texts == self.texts and self.lays:
-            return
-        self.room, self.texts = (w, h), texts
-        self.lays = self._fit(0, w, h)
-        self.set_size_request(w, max(1, self.lays[1].height))
-        self.queue_draw()
-
-    def do_snapshot(self, snap) -> None:
-        if not self.lays:
-            return
-        lay, ink = self.lays
-        shadow = Gsk.Shadow()
-        shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
-        snap.push_shadow([shadow])
-        snap.translate(Graphene.Point().init((self.room[0] - ink.width) / 2 - ink.x, -ink.y))
-        snap.append_layout(lay, _rgba(255, 255, 255, 1))
+            y += ink.height + gap
         snap.pop()
 
 
@@ -5251,9 +5224,6 @@ class Window(Adw.ApplicationWindow):
         self.clock = ClockView(halign=Gtk.Align.END, valign=Gtk.Align.END, can_target=False)
         self.clock.set_visible(False)
         overlay.add_overlay(self.clock)
-        self.date = DateView(halign=Gtk.Align.END, valign=Gtk.Align.END, can_target=False)
-        self.date.set_visible(False)
-        overlay.add_overlay(self.date)
         GLib.timeout_add_seconds(1, self._tick_clock)
         self._tick_clock()
         self._make_puddle(overlay, scrim)
@@ -5490,7 +5460,6 @@ class Window(Adw.ApplicationWindow):
         ok, vol = self.vol.compute_bounds(self)
         if not cover or not ok or not getattr(self, "_clock_texts", None):
             self.clock.set_visible(False)
-            self.date.set_visible(False)
             return False
         # just below the slider's knob (the slider widget itself is taller than what's drawn of it)
         top = vol.get_y() + vol.get_height()
@@ -5516,20 +5485,14 @@ class Window(Adw.ApplicationWindow):
                 stack.append(c)
                 c = c.get_next_sibling()
         room_w = int(W - self.CLOCK_GAP - (cover[2] + self.CLOCK_GAP))
-        room_h = int(H - top - 2 * self.CLOCK_PAD)  # (a little off the slider and the screen's bottom)
-        if room_w < 60 or room_h < 16:
+        # above the slider's knob, below the top buttons (a little off both)
+        room_h = int(knob_top - 2 * self.CLOCK_PAD - H * 0.1)
+        if room_w < 60 or room_h < 40:
             self.clock.set_visible(False)
-            self.date.set_visible(False)
             return False
-        # the day and month above the slider, as wide as the room (below the top buttons at most)
-        date_h = int(knob_top - 2 * self.CLOCK_PAD - H * 0.1)
-        self.date.set_room(room_w, max(16, date_h), (self._clock_texts[2],))
-        self.date.set_margin_end(self.CLOCK_GAP)
-        self.date.set_margin_bottom(int(H - knob_top + self.CLOCK_PAD))
-        self.date.set_visible(True)
         self.clock.set_room(room_w, room_h, self._clock_texts)
         self.clock.set_margin_end(self.CLOCK_GAP)
-        self.clock.set_margin_bottom(self.CLOCK_PAD)
+        self.clock.set_margin_bottom(int(H - knob_top + self.CLOCK_PAD))
         self.clock.set_visible(True)
         return False
 
