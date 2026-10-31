@@ -4417,10 +4417,22 @@ class GlassCard(Gtk.Box):
                 st = Gtk.Snapshot()
                 st.scale(k, k)
                 st.translate(Graphene.Point().init(-x0, -y0))
-                st.push_clip(Graphene.Rect().init(x0, y0, sw, b))
+                rect = Graphene.Rect().init(x0, y0, sw, b)
+                st.push_clip(rect)
+                # fading out towards the glass's edge side, where the rim turns from mirror to see-through: no
+                # hard line between the two
+                far_y, near_y = (y0, y0 + b) if y0 < 0 else (y0 + b, y0)
+                st.push_mask(Gsk.MaskMode.ALPHA)
+                st.append_linear_gradient(rect, Graphene.Point().init(0, far_y), Graphene.Point().init(0, near_y),
+                                          [_stop(0.0, 255, 255, 255, 1.0), _stop(0.45, 255, 255, 255, 1.0),
+                                           _stop(1.0, 255, 255, 255, 0.0)])
+                st.pop()
+                st.save()
                 st.translate(Graphene.Point().init(0, 2 * y0 + b))  # y -> 2*y0 + b - y: flipped within it
                 st.scale(1, -1)
                 self._behind_pictures(st, w, h)
+                st.restore()
+                st.pop()
                 st.pop()
                 node = st.to_node()
                 if node is not None:
@@ -4703,7 +4715,26 @@ class GlassCard(Gtk.Box):
             bend = 1 - k / steps  # 1 at the edge, 0 inside
             d = depth * (1 - bend ** (1 / self.curve))  # where the curve falls to `bend`
             rings.append((d, self.mag + (rx - self.mag) * bend, self.mag + (ry - self.mag) * bend))
+        rings = self._thin_rings(rings, w, h)
         return {"rx": rx, "ry": ry, "rings": rings}
+
+    def _thin_rings(self, rings: list, w: float, h: float) -> list:
+        """Only rings that move the picture at least half a screen pixel from the last one kept: in the
+        flat middle thousands of near-identical hairline rings, each blended in at its antialiased edge, left
+        concentric stripes (8-bit rounding piling up) over the picture; fewer is also faster."""
+        native = self.get_native()
+        surf = native.get_surface() if native else None
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+        least = 0.5 / max(1.0, k)
+        kept = rings[:1]
+        for r in rings[1:-1]:
+            d, sx, sy = r
+            _, px, py = kept[-1]
+            if max((w / 2 - d) * abs(1 / px - 1 / sx), (h / 2 - d) * abs(1 / py - 1 / sy)) >= least:
+                kept.append(r)
+        if len(rings) > 1:
+            kept.append(rings[-1])
+        return kept
 
     def _lens(self, snap, w: float, h: float) -> None:
         """The whole lens drawn at once (live glass: the gear menu's)."""
