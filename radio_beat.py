@@ -2345,13 +2345,16 @@ CZ_STEPS = (("quick AI redraw", "rychlé AI překreslení"), ("AI redraw for det
             ("AI upscaled", "AI zvětšení"), ("upscaled (smooth", "zvětšeno (hladce"), ("sharpened", "zostřeno"),
             ("denoised", "odšuměno a zostřeno"), ("final ", "výsledek "), (" on CPU", " na CPU"),
             (" on GPU", " na GPU"), (" on NPU", " na NPU"), (" busy at ", " % při "), (" of ", " z "),
-            (" threads", " vláken"), ("enhanced", "vylepšeno"))
+            (" threads", " vláken"), ("enhanced", "vylepšeno"), ("quick AI pass", "rychlý AI průchod"),
+            ("AI-upscaled", "AI zvětšeno"), ("AI-redrawn and upscaled", "AI překresleno a zvětšeno"),
+            ("AI-redrawn", "AI překresleno"), ("on the CPU", "na CPU"), ("on the GPU", "na GPU"), (" on ", " na "),
+            (" in ", " za "), (" busy", " vytížení"), ("upscaled", "zvětšeno"))
 
 
 def cz_steps(text: str) -> str:
     for en, cz in CZ_STEPS:
         text = text.replace(en, cz)
-    return text
+    return re.sub(r"(\d)\.(\d+) (s|MB|GB)\b", r"\1,\2 \3", text)  # Czech decimal commas
 
 
 def _secs(t: float) -> str:
@@ -5595,7 +5598,7 @@ class Window(Adw.ApplicationWindow):
         self.card_row.set_active(self.app.card_on())
         self.card_row.connect("notify::active", lambda r, _: self.app.set_card_volume(r.get_active()))
         group.add(self.card_row)
-        self.picture_row = Adw.ActionRow(title="Aktuální obrázek", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
+        self.picture_row = Adw.ActionRow(title="Poslední vylepšený obrázek", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
         group.add(self.picture_row)
         self.recognise_row = Adw.SwitchRow(title="Rozpoznávat skladby (testování)", subtitle_lines=0)
         self.recognise_row.set_active(self.app.settings.get("recognise", False))
@@ -6883,7 +6886,10 @@ class App(Adw.Application):
         self._vol_glide = self._vol_save = 0  # timers
         self.upscale_src: dict[str, tuple[str, bytes]] = {}  # kind -> (key, picture bytes), for after the install
         self.orig_tex: dict[str, object] = {}  # kind -> the picture as it came
-        self.picture_text = "No picture yet"
+        # the last picture enhanced and its sizes (kept over restarts: shown until the next one is done)
+        last = self.settings.get("last_picture") or ["Zatím žádný obrázek nebyl vylepšen", ""]
+        self.picture_text, self.picture_size = last[0], last[1]
+        self.picture_doing = ""  # the one being enhanced now
         self.icon_text = ""
         self._lookup_id = 0
         self._started = False
@@ -8068,15 +8074,22 @@ class App(Adw.Application):
     def _picture_changed(self, text: str, kind: str = "cover") -> None:
         if kind in ("show", "icon") or kind.startswith("pic:") or (kind == "logo" and self.orig_tex.get("cover")):
             return  # the cover is what's shown
-        self.picture_text = text
-        self.picture_kind = kind
+        if re.search(r"výsledek|z mezipaměti|staženo z|ukázáno, jak|jak přijde", text):  # done
+            self.picture_text, self.picture_doing = text, ""
+            self.picture_size = self.enhancer.size_text(kind)
+            if self.settings.get("last_picture") != [self.picture_text, self.picture_size]:
+                self.settings["last_picture"] = [self.picture_text, self.picture_size]
+                save_settings(self.settings)
+        else:
+            self.picture_doing = text
         if self.win:
             self.win.picture_row.set_subtitle(self.picture_subtitle())
 
     def picture_subtitle(self) -> str:
-        """Picture now: what was done, the sizes (original / enhanced), the cache."""
-        size = self.enhancer.size_text(getattr(self, "picture_kind", "cover"))
-        return "\n".join(x for x in (self.picture_text, size, self.enhancer.cache_text()) if x)
+        """The last picture enhanced: what was done, the sizes (original / enhanced); the one being enhanced now;
+        the cache."""
+        doing = f"Teď se vylepšuje: {self.picture_doing}" if self.picture_doing else ""
+        return "\n".join(x for x in (self.picture_text, self.picture_size, doing, self.enhancer.cache_text()) if x)
 
     def set_share(self, on: bool) -> None:
         self.settings["share"] = on
@@ -8155,15 +8168,15 @@ class App(Adw.Application):
         if not tex or not src or not size:
             return
         w, h = tex.get_width(), tex.get_height()
-        what = "Cover" if kind in ("cover", "track") else "Logo"
+        what = "Obal" if kind in ("cover", "track") else "Logo"
         f = min(size[0] / w, size[1] / h)
         if not self.settings.get("enhance", True):
-            self._picture_changed(f"{what}: {w}×{h} px, shown as it comes (enhancing is off)", kind)
+            self._picture_changed(f"{what}: {w}×{h} px, ukázáno, jak přišel (vylepšování je vypnuté)", kind)
             return
         upscale = f >= UPSCALE_FROM  # else only sharpened and denoised, at its own size
         if not self.enhancer.ffmpeg and (not upscale or self.enhancer.ai is None):
-            self._picture_changed(f"{what}: {w}×{h} px, shown as it comes until the enhancing tools "
-                                  "are downloaded", kind)
+            self._picture_changed(f"{what}: {w}×{h} px, ukázáno, jak přišel, dokud se nestáhnou nástroje "
+                                  "na vylepšování", kind)
             return
         lid = self._lookup_id
         track = self.track_view
