@@ -344,6 +344,85 @@ def _score(artist: str, song: str, cand_artist: str, cand_title: str) -> int:
     return score
 
 
+YTDLP = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat", "yt-dlp")
+YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
+NOT_STUDIO = re.compile(r"\blive\b|unplugged|concert|koncert|en vivo|cover|karaoke|instrumental|reaction|slowed|"
+                        r"sped up|\b8d\b|remix|tutorial|lesson|drum cam|bass cover|guitar cover|acoustic", re.I)
+
+
+def ytdlp() -> list[str] | None:
+    """yt-dlp: the system's, else the official release fetched into ~/.local/share/radio-beat (checked against
+    its checksums, fetched again weekly: YouTube changes and old ones stop working)."""
+    if shutil.which("yt-dlp"):
+        return ["yt-dlp"]
+    try:
+        fresh = time.time() - os.path.getmtime(YTDLP) < 7 * 86400
+    except OSError:
+        fresh = False
+    if not fresh:
+        import hashlib
+        blob, sums = fetch(YTDLP_URL + "yt-dlp"), fetch(YTDLP_URL + "SHA2-256SUMS")
+        want = re.search(r"^([0-9a-f]{64})\s+yt-dlp$", sums.decode(errors="ignore"), re.M) if sums else None
+        if blob and want and hashlib.sha256(blob).hexdigest() == want.group(1):
+            os.makedirs(os.path.dirname(YTDLP), exist_ok=True)
+            with open(YTDLP + ".part", "wb") as f:
+                f.write(blob)
+            os.replace(YTDLP + ".part", YTDLP)
+    return ["python3", YTDLP] if os.path.exists(YTDLP) else None
+
+
+def find_track(artist: str, song: str) -> tuple[str, str] | None:
+    """The song to play from YouTube: (its best audio stream, what it is: "opus 128 kbps"). The studio version
+    (YouTube Music's album audio, 'Artist - Topic', or official audio; never live, unplugged, cover, remix…),
+    FLAC when there is one, else the best audio there is. None when nothing fits."""
+    cmd = ytdlp()
+    if not cmd:
+        return None
+    a, t = _key(first_artist(artist)), _key(re.sub(r"\s*[(\[].*?[)\]]", "", song) or song)
+    best, best_score = None, 0
+    for query in (f"{first_artist(artist)} {song}", f"{first_artist(artist)} {song} official audio"):
+        try:
+            out = subprocess.run([*cmd, "-J", "--flat-playlist", "--no-warnings", f"ytsearch10:{query}"],
+                                 capture_output=True, text=True, timeout=40).stdout
+            entries = json.loads(out).get("entries") or []
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+        for rank, e in enumerate(entries):
+            title, channel = e.get("title") or "", e.get("channel") or e.get("uploader") or ""
+            dur = e.get("duration") or 0
+            if t not in _key(title) or NOT_STUDIO.search(title) or not 60 <= dur <= 1500 \
+                    or a not in _key(title + " " + channel):  # (another artist's song of that name: not it)
+                continue
+            score = 10 - rank * 0.3
+            if channel.endswith(" - Topic") and a in _key(channel):
+                score += 6  # YouTube Music's album audio: the record itself
+            elif a in _key(channel):
+                score += 3  # the artist's own channel
+            if re.search(r"official audio|\baudio\b|visuali[sz]er", title, re.I):
+                score += 2
+            if score > best_score:
+                best, best_score = e, score
+        if best is not None and best_score >= 13:
+            break
+    if best is None:
+        return None
+    try:
+        out = subprocess.run([*cmd, "-f", "bestaudio[acodec=flac]/bestaudio", "--no-warnings", "--print",
+                              "%(acodec)s %(abr)s", "--print", "urls",
+                              f"https://www.youtube.com/watch?v={best['id']}"],
+                             capture_output=True, text=True, timeout=40).stdout.split("\n")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if len(out) < 2 or not out[1].startswith("http"):
+        return None
+    codec, _, abr = out[0].partition(" ")
+    try:
+        what = f"{codec} {round(float(abr))} kbps"
+    except ValueError:
+        what = codec
+    return out[1], f"{what} · YouTube: {best.get('title')}"
+
+
 def small_cover(url: str) -> str:
     """A cover's small version (Deezer 250 px, iTunes 300 px): enough for a list's picture."""
     return re.sub(r"/\d+x\d+-", "/250x250-", url) if "dzcdn" in url else re.sub(r"\d+x\d+bb", "300x300bb", url)
@@ -931,7 +1010,8 @@ class History:
     panel's HRÁLO lists them all) and shared with the other computers (CacheShare). Feeds the show card's mix
     too: artists played earlier, all the station's hosts."""
 
-    SAME = 600  # s: the same song this close in time is the same play (each computer logs the stream itself)
+    SAME = 1800  # s: the same song this close in time is the same play (each computer logs the stream itself;
+    # a long song may be named again after 10 minutes)
 
     def __init__(self, path: str):
         import sqlite3
@@ -961,17 +1041,40 @@ class History:
                         kept[song] = at
                 self.db.executemany("DELETE FROM plays WHERE rowid = ?", gone)
                 self.db.execute("PRAGMA user_version = 1")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 4:  # once more: the wider SAME, and a song
+                kept4: dict = {}                                            # right after itself is one play
+                prev, gone4 = None, []
+                for rowid, at, artist, title in self.db.execute("SELECT rowid, at, artist, title FROM plays "
+                                                                "ORDER BY at").fetchall():
+                    song = ((artist or "").lower(), (title or "").lower())
+                    if (song == prev and at - kept4[song] < 3 * 3600) or (song in kept4 and at - kept4[song] < self.SAME):
+                        gone4.append((rowid,))
+                    else:
+                        kept4[song] = at
+                    prev = song
+                self.db.executemany("DELETE FROM plays WHERE rowid = ?", gone4)
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:  # once: songs not found before looked up
                 self.db.execute("UPDATE plays SET cover = NULL WHERE cover = ''")  # again (a better match, YouTube)
                 self.db.execute("PRAGMA user_version = 3")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 4:
+                self.db.execute("PRAGMA user_version = 4")
 
     def play(self, artist: str, title: str, show: str | None, host: str | None) -> None:
+        import sqlite3
         now = time.time()
-        with self.lock, self.db:
-            if self.db.execute("SELECT 1 FROM plays WHERE at > ? AND lower(artist) = lower(?) AND lower(title) = "
-                               "lower(?)", (now - self.SAME, artist, title)).fetchone():
-                return  # logged already (the app restarted during the song)
-            self.db.execute("INSERT INTO plays VALUES (?, ?, ?, NULL, ?, ?, NULL, NULL)", (now, artist, title, show, host))
+        try:
+            with self.lock, self.db:
+                last = self.db.execute("SELECT lower(artist), lower(title), at FROM plays ORDER BY at DESC LIMIT 1").fetchone()
+                if last and (last[0], last[1]) == (artist.lower(), title.lower()) and now - last[2] < 3 * 3600:
+                    return  # the same song as the last one: named again (a long song) or the app restarted
+                if self.db.execute("SELECT 1 FROM plays WHERE at > ? AND lower(artist) = lower(?) AND lower(title) = "
+                                   "lower(?)", (now - self.SAME, artist, title)).fetchone():
+                    return  # logged already
+                self.db.execute("INSERT INTO plays VALUES (?, ?, ?, NULL, ?, ?, NULL, NULL)",
+                                (now, artist, title, show, host))
+        except sqlite3.Error as e:  # a full disk: nothing is deleted, this play just isn't kept here (the
+            print(f"radio-beat: play not logged: {e}", file=sys.stderr)  # other computer has it)
+            return
         if self.on_play:
             self.on_play()
 
@@ -1012,6 +1115,15 @@ class History:
     def merge(self, rows) -> int:
         """Plays from another computer: each kept unless this one logged it too (the same song within SAME s;
         its album taken if this one hasn't one). Returns how many were new."""
+        import sqlite3
+        new = 0
+        try:
+            return self._merge(rows)
+        except sqlite3.Error as e:  # a full disk: nothing deleted, the rest is fetched another time
+            print(f"radio-beat: plays not merged: {e}", file=sys.stderr)
+            return 0
+
+    def _merge(self, rows) -> int:
         new = 0
         with self.lock, self.db:
             for r in rows:
@@ -1331,12 +1443,12 @@ class Mpv:
 
     PROPS = ("metadata", "audio-codec-name", "audio-bitrate", "idle-active", "playback-time", "paused-for-cache")
 
-    def __init__(self, on_prop):
+    def __init__(self, on_prop, name: str = ""):
         self.on_prop = on_prop
         run = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
         sock_dir = os.path.join(run, "radio-beat")
         os.makedirs(sock_dir, mode=0o700, exist_ok=True)
-        self.sock_path = os.path.join(sock_dir, f"mpv-{os.getpid()}.sock")
+        self.sock_path = os.path.join(sock_dir, f"mpv-{os.getpid()}{'-' + name if name else ''}.sock")
         try:
             os.remove(self.sock_path)
         except FileNotFoundError:
@@ -3206,8 +3318,9 @@ class CacheShare:
     def fetch(self, name: str) -> str | None:
         """A picture about to be made: fetched from a computer that has it already (with its notes).
         Returns that computer's name, None when none has it."""
-        if not self.on or name in self.gone:
+        if not self.on:
             return None
+        self.gone.discard(name)  # trimmed here for room once: wanted again now, the other computer still has it
         for ip, who in list(self.peers.items()):
             try:
                 if not self._store(name, self._ask(ip, f"/radio-beat/v1/file/{name}", timeout=15)):
@@ -3331,6 +3444,11 @@ CSS = b"""
 .puddle .puddle-now { background: rgba(227,5,26,0.25); border-radius: 10px; padding: 6px; }
 .puddle .puddle-past { opacity: 0.55; }
 .viewer { background: rgba(0,0,0,0.93); }
+button.track-btn { min-width: 0; min-height: 0; padding: 6px; border-radius: 999px; color: white;
+                   background: rgba(255,255,255,0.12); }
+button.track-btn:hover { background: rgba(255,255,255,0.25); }
+button.track-btn.playing { background: #E3051A; }
+button.viewer-btn { padding: 14px; }
 .viewer label { color: white; }
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
 popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
@@ -5480,6 +5598,7 @@ class Window(Adw.ApplicationWindow):
             top.append(t)
         if badge or title:
             box.append(top)
+        self._last_top = top
         if text:
             body = Gtk.Label(label=text, xalign=0, wrap=True)
             body.add_css_class("show-sub")
@@ -5571,6 +5690,10 @@ class Window(Adw.ApplicationWindow):
             self._played_before = 0.0  # all shown
             return
         for at, artist, title, album, show, cover, facts in rows:
+            last = self._played_rows[-1] if self._played_rows else None
+            if last and (last["artist"].lower(), last["title"].lower()) == (artist.lower(), title.lower()) \
+                    and last["at"] - at < 3 * 3600:
+                continue  # the same song right after itself: one play
             t = time.localtime(at)
             day = (t.tm_year, t.tm_yday)
             if day != self._played_day:
@@ -5584,7 +5707,18 @@ class Window(Adw.ApplicationWindow):
             self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{artist} – {plain_title(title)}",
                                self._played_line(row) or " ", img=small_cover(cover) if cover else "")
             row["label"] = self._last_body
+            # play / pause and stop: the song itself from YouTube (the radio waits)
+            row["play"] = Gtk.Button(icon_name="media-playback-start-symbolic", valign=Gtk.Align.CENTER,
+                                     tooltip_text="Přehrát z YouTube (studiová verze, nejlepší kvalita)")
+            row["stop"] = Gtk.Button(icon_name="media-playback-stop-symbolic", valign=Gtk.Align.CENTER,
+                                     visible=False, tooltip_text="Zastavit (zpět na rádio)")
+            for b in (row["play"], row["stop"]):
+                b.add_css_class("track-btn")
+                self._last_top.append(b)
+            row["play"].connect("clicked", lambda _b, a=artist, ti=title: self.app.play_song(a, ti))
+            row["stop"].connect("clicked", lambda _b: self.app.stop_song())
             self._played_rows.append(row)
+            self._track_row(row)
             click = Gtk.GestureClick()  # the picture full screen
             click.connect("released", lambda *_, i=len(self._played_rows) - 1: self.view_played(i))
             self._last_pic.add_controller(click)
@@ -5618,6 +5752,37 @@ class Window(Adw.ApplicationWindow):
         """A played song's line under it: the album, its first release, the show."""
         return " · ".join(x for x in (plain_title(row["album"] or ""), self.app.cz(row["facts"] or ""), row["show"]) if x)
 
+    def _track_row(self, row: dict) -> None:
+        """A row's play / pause and stop buttons as the song stands (playing, paused, being looked for)."""
+        t = self.app.song_track
+        mine = bool(t and (t["artist"], t["title"]) == (row["artist"], row["title"]))
+        state = t["state"] if mine else ""
+        row["play"].set_icon_name("media-playback-pause-symbolic" if state == "playing"
+                                  else "content-loading-symbolic" if state == "finding"
+                                  else "dialog-warning-symbolic" if state == "failed"
+                                  else "media-playback-start-symbolic")
+        row["play"].set_tooltip_text(t["note"] if mine else "Přehrát z YouTube (studiová verze, nejlepší kvalita)")
+        row["stop"].set_visible(mine and state in ("playing", "paused", "finding"))
+        (row["play"].add_css_class if mine and state in ("playing", "paused") else row["play"].remove_css_class)("playing")
+
+    def track_changed(self) -> None:
+        """The HRÁLO song playing changed: the rows' buttons and the full-screen view show it."""
+        for row in self._played_rows:
+            if "play" in row:
+                self._track_row(row)
+        if self._viewing is not None:
+            self._view_buttons()
+
+    def _view_buttons(self) -> None:
+        row = self._played_rows[self._viewing]
+        t = self.app.song_track
+        mine = bool(t and (t["artist"], t["title"]) == (row["artist"], row["title"]))
+        state = t["state"] if mine else ""
+        self.viewer_play.set_icon_name("media-playback-pause-symbolic" if state == "playing"
+                                       else "media-playback-start-symbolic")
+        self.viewer_stop.set_visible(mine and state in ("playing", "paused", "finding"))
+        self.viewer_note.set_text(t["note"] if mine else "")
+
     def _make_viewer(self, overlay) -> None:
         """HRÁLO's pictures full screen: a click on one opens it, the wheel goes to the newer / older song, a click
         or Esc closes it."""
@@ -5630,16 +5795,41 @@ class Window(Adw.ApplicationWindow):
         self.viewer_sub = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, margin_start=24, margin_end=24,
                                     margin_bottom=24)
         self.viewer_sub.add_css_class("show-sub")
-        for w in (self.viewer_pic, self.viewer_title, self.viewer_sub):
+        # play / pause and stop for the song shown, and what's playing (the quality, which video)
+        self.viewer_play = Gtk.Button(icon_name="media-playback-start-symbolic", tooltip_text="Přehrát z YouTube")
+        self.viewer_stop = Gtk.Button(icon_name="media-playback-stop-symbolic", tooltip_text="Zastavit", visible=False)
+        for b in (self.viewer_play, self.viewer_stop):
+            b.add_css_class("track-btn")
+            b.add_css_class("viewer-btn")
+        self.viewer_play.connect("clicked", lambda *_: self._viewing is not None and self.app.play_song(
+            self._played_rows[self._viewing]["artist"], self._played_rows[self._viewing]["title"]))
+        self.viewer_stop.connect("clicked", lambda *_: self.app.stop_song())
+        bar = Gtk.Box(spacing=16, halign=Gtk.Align.CENTER)
+        bar.append(self.viewer_play)
+        bar.append(self.viewer_stop)
+        self.viewer_note = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, margin_start=24, margin_end=24)
+        self.viewer_note.add_css_class("show-sub")
+        self.viewer_sub.set_margin_bottom(4)
+        for w in (self.viewer_pic, self.viewer_title, self.viewer_sub, bar, self.viewer_note):
             v.append(w)
+        self.viewer_note.set_margin_bottom(24)
         click = Gtk.GestureClick()
-        click.connect("released", lambda *_: self.view_played(None))
+        click.connect("released", lambda _g, _n, x, y: self._viewer_click(x, y))
         v.add_controller(click)
         wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL
                                           | Gtk.EventControllerScrollFlags.DISCRETE)
         wheel.connect("scroll", lambda _c, _dx, dy: (self._view_step(1 if dy > 0 else -1), True)[1])
         v.add_controller(wheel)
         overlay.add_overlay(v)
+
+    def _viewer_click(self, x: float, y: float) -> None:
+        """A click on the full-screen view closes it, not one on its buttons."""
+        w = self.viewer.pick(x, y, Gtk.PickFlags.DEFAULT)
+        while w is not None and w is not self.viewer:
+            if isinstance(w, Gtk.Button):
+                return
+            w = w.get_parent()
+        self.view_played(None)
 
     def view_played(self, i: int | None) -> None:
         """The i-th song of HRÁLO full screen (None: closed)."""
@@ -5658,6 +5848,7 @@ class Window(Adw.ApplicationWindow):
         small = self.app.show_pics.get(small_cover(cover)) if cover else None
         self.viewer_pic.set_paintable(self._big_pics.get(cover) or small or self.app.logo_tex)
         self.viewer.set_visible(True)
+        self._view_buttons()
         if cover and cover not in self._big_pics:
             def got(data, cover=cover, i=i):
                 try:
@@ -5802,7 +5993,12 @@ class Window(Adw.ApplicationWindow):
                 # the gear menu's text grows too (on a Full HD TV the standard sizes were too small to read)
                 f".gear-menu label {{ font-size: {8.5 * f:.1f}pt; }}\n"
                 f".gear-menu row .title {{ font-size: {9.5 * f:.1f}pt; }}\n"
-                f".gear-menu row .subtitle, .gear-menu label.caption {{ font-size: {8 * f:.1f}pt; }}\n")
+                f".gear-menu row .subtitle, .gear-menu label.caption {{ font-size: {8 * f:.1f}pt; }}\n"
+                # HRÁLO's play / stop: as big as the text around them
+                f"button.track-btn {{ min-width: {30 * f:.0f}px; min-height: {30 * f:.0f}px; }}\n"
+                f"button.track-btn image {{ -gtk-icon-size: {14 * f:.0f}px; }}\n"
+                f"button.viewer-btn {{ min-width: {56 * f:.0f}px; min-height: {56 * f:.0f}px; }}\n"
+                f"button.viewer-btn image {{ -gtk-icon-size: {24 * f:.0f}px; }}\n")
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
         self.logo.set_pixel_size(int(34 * f))
@@ -6002,6 +6198,9 @@ class App(Adw.Application):
         self._feed = threading.Event()
         threading.Thread(target=self._feeder, daemon=True).start()
         self.db = History(os.path.join(DATA_DIR, "history.db"))
+        self.song_track = None  # a song from HRÁLO playing (from YouTube): {artist, title, state, note}
+        self.tmpv = None  # its own mpv
+        self._radio_was_on = False
         self._art_asked: set = set()  # played songs whose picture was looked up this run (HRÁLO)
         self._art_queue: list = []
         self._art_busy = False
@@ -6264,7 +6463,87 @@ class App(Adw.Application):
             self.reconnect("no audio for a while")
         return True
 
+    # --- a song from HRÁLO, played from YouTube (the radio pauses meanwhile) -------------------------
+    def play_song(self, artist: str, title: str) -> None:
+        if self.song_track and (self.song_track["artist"], self.song_track["title"]) == (artist, title):
+            self.pause_song()
+            return
+        self.stop_song(resume=False)
+        self.song_track = {"artist": artist, "title": title, "state": "finding", "note": "Hledám na YouTube…"}
+        self._track_changed()
+        track = self.song_track
+
+        def find():
+            found = find_track(artist, title)
+            GLib.idle_add(self._song_found, track, found)
+        threading.Thread(target=find, daemon=True).start()
+
+    def _song_found(self, track, found) -> bool:
+        if track is not self.song_track:
+            return False  # another song chosen (or stopped) meanwhile
+        if not found:
+            track.update(state="failed", note="Na YouTube se nenašla (jen živé verze nebo nic)")
+            self._track_changed()
+            return False
+        url, what = found
+        if not self.tmpv:
+            try:
+                self.tmpv = Mpv(self._track_prop, "track")
+            except (RuntimeError, OSError) as e:
+                track.update(state="failed", note=str(e))
+                self._track_changed()
+                return False
+        self._radio_was_on = self.mpv is not None and not self.paused
+        if self._radio_was_on:  # the radio waits
+            self.paused, self.paused_at = True, time.monotonic()
+            self.mpv.pause(True)
+        self.tmpv.volume(self._vol_cur)
+        self.tmpv.pause(False)
+        self.tmpv.play(url)
+        track.update(state="playing", note=what, started=False)
+        self._track_changed()
+        self.update()
+        return False
+
+    def pause_song(self) -> None:
+        t = self.song_track
+        if not t or t["state"] not in ("playing", "paused") or not self.tmpv:
+            return
+        t["state"] = "paused" if t["state"] == "playing" else "playing"
+        self.tmpv.pause(t["state"] == "paused")
+        self._track_changed()
+
+    def stop_song(self, resume: bool = True) -> None:
+        if not self.song_track:
+            return
+        self.song_track = None
+        if self.tmpv:
+            self.tmpv.stop()
+        if resume and self._radio_was_on:
+            self.play()  # the radio again, live
+        self._radio_was_on = False
+        self._track_changed()
+
+    def _track_prop(self, name, value) -> bool:
+        t = self.song_track
+        if name == "mpv-exit":
+            self.tmpv = None
+            if t:
+                self.stop_song()
+        elif t and name == "idle-active":
+            if not value:
+                t["started"] = True
+            elif t.get("started") and t["state"] in ("playing", "paused"):
+                self.stop_song()  # it played to its end
+        return False
+
+    def _track_changed(self) -> None:
+        if self.win:
+            self.win.track_changed()
+
     def toggle_pause(self):
+        if self.song_track:  # the radio's own button: the song gives way
+            self.stop_song(resume=False)
         if not self.mpv:
             return
         if not self.paused:
@@ -6369,6 +6648,8 @@ class App(Adw.Application):
         self._vol_cur = cur
         if self.mpv:
             self.mpv.volume(cur)
+        if self.tmpv:
+            self.tmpv.volume(cur)
         if cur == self._vol_target:
             self._vol_glide = 0
             return False
@@ -6416,6 +6697,8 @@ class App(Adw.Application):
         if self._vol_save:  # a volume change not saved yet
             self._save_volume()
         self.enhancer.stop_all()
+        if self.tmpv:
+            self.tmpv.quit()
         if self.mpv:
             self.mpv.quit()
         self.release()
