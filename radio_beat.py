@@ -1076,6 +1076,95 @@ class History:
         return [(r[0], [x for x in (r[1] or "").split("|") if x]) for r in rows]
 
 
+_EARLIEST: dict = {}  # song -> its earliest release date found (this run)
+COMPILATION = re.compile(r"greatest|best of|hits|collection|anthology|essential|gold\b|ultimate|cross road|"
+                         r"the very|definitive|platinum|story|years|antologie|výběr|to nej", re.I)
+
+
+def wikidata_release(artist: str, song: str) -> str:
+    """The song's original release from Wikidata (the database behind Wikipedia): "1992-05-12", "1992-05" or
+    "1992" as precise as it's known, the earliest of the song's items by that performer (the song, its single);
+    "" when it isn't there."""
+    a, t = _key(first_artist(artist)), _key(song)
+    api = "https://www.wikidata.org/w/api.php?format=json&"
+
+    def get(q):
+        req = urllib.request.Request(api + q, headers={"User-Agent": MB_UA})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.load(r)
+    try:
+        found = get("action=query&list=search&srlimit=8&srsearch=" + urllib.parse.quote(f"{song} {first_artist(artist)}"))
+        ids = [x["title"] for x in found["query"]["search"] if x["title"].startswith("Q")]
+        if not ids:
+            return ""
+        items = get("action=wbgetentities&props=labels|claims&languages=en|cs&ids=" + "|".join(ids))["entities"]
+        val = lambda c, p: [v["mainsnak"].get("datavalue", {}).get("value") for v in c.get(p, [])]
+        named = {}
+        for qid, it in items.items():
+            labels = [l["value"] for l in it.get("labels", {}).values()]
+            if any(_key(part) == t for l in labels for part in re.split(r"\s+/\s+", l)):  # "Bed of Roses / ..."
+                named[qid] = it
+        perf_ids = {v["id"] for it in named.values() for v in val(it.get("claims", {}), "P175") if v}
+        if not perf_ids:
+            return ""
+        perfs = get("action=wbgetentities&props=labels&languages=en|cs&ids=" + "|".join(sorted(perf_ids)[:40]))["entities"]
+        by = {pid for pid, p in perfs.items()
+              if any(a in _key(l["value"]) or _key(l["value"]) in a for l in p.get("labels", {}).values())}
+        dates = []
+        for it in named.values():
+            c = it.get("claims", {})
+            if any(v and v["id"] in by for v in val(c, "P175")):
+                for v in val(c, "P577"):
+                    m = re.match(r"\+(\d{4})-(\d\d)-(\d\d)", (v or {}).get("time", ""))
+                    if m:
+                        dates.append("-".join(x for x in m.groups() if x != "00"))
+        return min(dates, key=lambda d: (d + "-00-00")[:10]) if dates else ""
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def earliest_release(artist: str, song: str) -> str:
+    """The song's first release (YYYY-MM-DD) when MusicBrainz can't be asked: the earliest date among iTunes's
+    and Deezer's releases of it (the original album, singles, reissues, compilations: the oldest counts; live
+    versions don't). The album the lookup matched is often a later reissue (Nirvana "13 years ago").
+    Wikidata first: it has the original date of well-known songs."""
+    song = re.sub(r"\s*[(\[].*?[)\]]", "", song).strip() or song
+    a, t = _key(first_artist(artist)), _key(song)
+    if (a, t) in _EARLIEST:
+        return _EARLIEST[(a, t)]
+    known = wikidata_release(artist, song)  # what Wikipedia's data says (its song, or only its single)
+    q = urllib.parse.quote(f"{first_artist(artist)} {song}")
+    same = lambda ca, ct: a and (a in _key(ca) or _key(ca) in a) and _key(ct) == t and "live" not in ct.lower()
+    dates = []
+    try:
+        for x in _json(f"https://itunes.apple.com/search?term={q}&entity=song&limit=50").get("results", []):
+            album = x.get("collectionName") or ""
+            if same(x.get("artistName", ""), x.get("trackName", "")) and "live" not in album.lower() \
+                    and not COMPILATION.search(album):  # (iTunes dates compilations wrong: Bon Jovi's "1983")
+                dates.append((x.get("releaseDate") or "")[:10])
+    except (OSError, ValueError):
+        pass
+    try:
+        albums = []
+        for x in _json(f"https://api.deezer.com/search?q={q}&limit=25").get("data", []):
+            if same(x["artist"]["name"], x["title"]) and "live" not in x["album"]["title"].lower() \
+                    and not COMPILATION.search(x["album"]["title"]) and x["album"]["id"] not in albums:
+                albums.append(x["album"]["id"])
+        for aid in albums[:8]:
+            dates.append((_json(f"https://api.deezer.com/album/{aid}").get("release_date") or "")[:10])
+    except (OSError, ValueError, KeyError):
+        pass
+    dates = [d for d in dates if re.match(r"(19|20)\d\d-\d\d-\d\d$", d)] + ([known] if known else [])
+    if not dates:
+        _EARLIEST[(a, t)] = ""
+        return ""
+    # the earliest year of all (Wikidata may know only the single: Lithium's 1992, the album 1991); in it, the
+    # exact day when one source has it (Wikidata may know only the year)
+    year = min(d[:4] for d in dates)
+    _EARLIEST[(a, t)] = min((d for d in dates if d[:4] == year), key=lambda d: (-len(d), d))
+    return _EARLIEST[(a, t)]
+
+
 def album_released(info: dict) -> str:
     """The album's release date (YYYY-MM-DD) from the lookup: iTunes has it, Deezer's album page does."""
     if info.get("released"):
@@ -5150,6 +5239,7 @@ class Window(Adw.ApplicationWindow):
         self._show_seen = None
         self._half_seen = None
         self._tour = None
+        self._tour_pages: dict[str, tuple] = {}  # view -> (where the next tour shows it from, where the last did)
         GLib.timeout_add_seconds(15, self._watch_show)
 
     @property
@@ -5175,7 +5265,7 @@ class Window(Adw.ApplicationWindow):
             GLib.idle_add(lambda: (self.menu_content.get_vadjustment().set_value(0), False)[1])
 
     # the tabs it goes through by itself, and for how long (s)
-    TOUR = (("DNES", 20), ("ZAJÍMAVOSTI", 10), ("AKTUALITY", 10), ("ZÍTRA", 10), ("POZÍTŘÍ", 10))
+    TOUR = (("DNES", 10), ("ZAJÍMAVOSTI", 10), ("AKTUALITY", 10), ("ZÍTRA", 10), ("POZÍTŘÍ", 10), ("HRÁLO", 10))
 
     def _watch_show(self) -> bool:
         now = time.localtime()
@@ -5198,6 +5288,26 @@ class Window(Adw.ApplicationWindow):
         self._tour = object()
         self._tour_step(self._tour, 0)
 
+    def _tour_page(self, token, name: str, tries: int) -> bool:
+        """The tour shows each view a page further than the last tour did (back at the top past its end), not
+        the same top every time; DNES stays at the show on air."""
+        if self._tour is not token or self.PUDDLE_MODES[self.puddle_mode] != name:
+            return False
+        adj = self.puddle_scroll.get_vadjustment()
+        page, end = adj.get_page_size(), adj.get_upper() - adj.get_page_size()
+        if page <= 0 or (end <= 0 and tries > 0):  # not laid out yet
+            if tries > 0:
+                GLib.timeout_add(60, self._tour_page, token, name, tries - 1)
+            return False
+        at, last = self._tour_pages.get(name, (0.0, -1.0))
+        if at > end + 1:  # past the end: its last part first (if the last tour stopped short of it), then the top
+            at = max(0.0, end) if last < end - 1 else 0.0
+        at = min(at, max(0.0, end))
+        adj.set_value(at)
+        self._tour_touched = self._puddle_touched  # (a scroll it made itself, not a touch)
+        self._tour_pages[name] = (at + page * 0.9, at)  # (a line of overlap with the last time)
+        return False
+
     def _tour_step(self, token, i: int) -> bool:
         if self._tour is not token:
             return False
@@ -5213,6 +5323,7 @@ class Window(Adw.ApplicationWindow):
         name, secs = self.TOUR[i]
         if i:
             self._puddle_go(self.PUDDLE_MODES.index(name))
+            GLib.timeout_add(60, self._tour_page, token, name, 20)
         self._tour_touched = self._puddle_touched
         GLib.timeout_add_seconds(secs, self._tour_step, token, i + 1)
         return False
@@ -6624,9 +6735,12 @@ class App(Adw.Application):
         facts = song_facts(info["artist"], info["title"]) if info else ""
         if not facts:
             facts = song_facts(artist, song)
-        if not facts and info:
-            day = album_released(info)
+        if not facts:  # MusicBrainz not reached / no answer: the earliest release iTunes and Deezer know
+            day = earliest_release(info["artist"], info["title"]) if info else ""
+            day = day or earliest_release(artist, song)
             if day:
+                facts = f"Poprvé vydáno {_date(day)} ({{ago:{day[:4]}}})"
+            elif info and (day := album_released(info)):
                 facts = f"Album vydáno {_date(day)} ({{ago:{day[:4]}}})"
         GLib.idle_add(self._got_facts, lid, facts)
 
