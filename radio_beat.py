@@ -4123,6 +4123,42 @@ BACKDROP_BLUR, BACKDROP_SCALE = 36.0, 1.15  # the backdrop's blur (CoverView sof
 BACKDROP_DIM = 0.55  # its brightness
 
 
+# Where the pictures behind the glass have lettering (a cover's title): the glass edges mirror only that.
+# Window coordinates, cells of TEXT_CELL analysis pixels at TEXT_Q of the window's size; found in a thread.
+TEXT_Q, TEXT_CELL = 0.33, 16
+TEXT_MAP = {"key": None, "cells": frozenset(), "version": 0, "busy": False, "waiting": []}
+
+
+def _text_cells(data: bytes, stride: int, W: int, H: int) -> frozenset:
+    """Cells that look like lettering: many thin strokes (a strong edge and the opposite one within a few
+    pixels) in a row of cells. Faces, skies, foam score near nothing; titles high."""
+    C = TEXT_CELL
+    cols, rows = (W + C - 1) // C, (H + C - 1) // C
+    score = [[0] * cols for _ in range(rows)]
+    maxw = max(3, int(24 * TEXT_Q))
+    for y in range(H):
+        o = y * stride + 1  # the green byte: brightness enough
+        row = data[o:o + W * 3:3]
+        srow = score[y // C]
+        last_x, last_s = -99, 0
+        for x in range(W - 2):
+            d = row[x + 2] - row[x]
+            if d >= 55 or d <= -55:
+                sg = 1 if d > 0 else -1
+                if sg != last_s and 2 <= x - last_x <= maxw:
+                    srow[x // C] += 1
+                    last_s = 0
+                else:
+                    last_x, last_s = x, sg
+    cells = set()
+    for r in range(rows):
+        for c in range(cols):
+            v = score[r][c] / C
+            if v >= 0.25 and ((c and score[r][c - 1] / C >= 0.15) or (c + 1 < cols and score[r][c + 1] / C >= 0.15)):
+                cells.add((r, c))
+    return frozenset(cells)
+
+
 def _opaque(tex):
     """A rendered texture as a plain opaque one: GTK then skips whatever it covers (an alpha texture is
     blended over everything under it). For a finished lens, drawn once a frame; not for stacked rings."""
@@ -4403,6 +4439,70 @@ class GlassCard(Gtk.Box):
         for tex, rect in self._mirror_tex[1]:
             snap.append_texture(tex, rect)
 
+    def _text_spans(self, y0: float, b: float) -> list:
+        """(x from, x to) in the glass's coordinates where the pictures between y0 and y0 + b have lettering;
+        the map found anew (in a thread) when the pictures or the window change, meanwhile nothing."""
+        win = self.get_root()
+        ok, p = win.compute_point(self, Graphene.Point().init(0, 0)) if win else (False, None)
+        if not ok:
+            return []
+        key = tuple((id(v.pic), v.get_width(), v.get_height()) for v, _ in self.behind) + \
+            (win.get_width(), win.get_height())
+        if TEXT_MAP["key"] != key:
+            self._find_text(win, p, key)
+        if TEXT_MAP["key"] != key:
+            return []
+        C = TEXT_CELL / TEXT_Q  # a cell, in window px
+        r0, r1 = int((y0 - p.y) // C), int((y0 + b - p.y) // C)
+        cols = sorted({c for r, c in TEXT_MAP["cells"] if r0 <= r <= r1})
+        spans = []
+        for c in cols:
+            xa, xb = p.x + (c - 1) * C, p.x + (c + 2) * C  # a cell either side: whole letters, soft ends
+            if spans and xa <= spans[-1][1]:
+                spans[-1][1] = xb
+            else:
+                spans.append([xa, xb])
+        return spans
+
+    def _find_text(self, win, p, key) -> None:
+        if TEXT_MAP["busy"] == key:
+            if self not in TEXT_MAP["waiting"]:
+                TEXT_MAP["waiting"].append(self)
+            return
+        native = self.get_native()
+        W, H = int(win.get_width() * TEXT_Q), int(win.get_height() * TEXT_Q)
+        if not native or W < 8 or H < 8:
+            return
+        st = Gtk.Snapshot()
+        st.scale(TEXT_Q, TEXT_Q)
+        st.translate(Graphene.Point().init(-p.x, -p.y))  # the window's corner at the texture's
+        self._mirroring = True
+        try:
+            self._behind_pictures(st, self.get_width(), self.get_height())
+        finally:
+            self._mirroring = False
+        node = st.to_node()
+        if node is None:
+            return
+        d = Gdk.TextureDownloader.new(native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, W, H)))
+        d.set_format(Gdk.MemoryFormat.R8G8B8)
+        data, stride = d.download_bytes()
+        data = data.get_data()
+        TEXT_MAP["busy"], TEXT_MAP["waiting"] = key, [self]
+
+        def work():
+            cells = _text_cells(data, stride, W, H)
+
+            def done():
+                if TEXT_MAP["busy"] == key:
+                    TEXT_MAP.update(key=key, cells=cells, busy=False, version=TEXT_MAP["version"] + 1)
+                    for g in TEXT_MAP["waiting"]:
+                        g.queue_draw()  # its lens built again, with the mirror where the lettering is
+                    TEXT_MAP["waiting"] = []
+                return False
+            GLib.idle_add(done)
+        threading.Thread(target=work, daemon=True).start()
+
     def _render_strips(self, w: float, h: float, b: float) -> list:
         native = self.get_native()
         if not native:
@@ -4414,6 +4514,9 @@ class GlassCard(Gtk.Box):
         self._mirroring = True
         try:
             for y0 in (-b, h):  # the strip above, the strip below
+                spans = self._text_spans(y0, b)
+                if not spans:
+                    continue  # no lettering beyond this edge: plain fisheye there
                 st = Gtk.Snapshot()
                 st.scale(k, k)
                 st.translate(Graphene.Point().init(-x0, -y0))
@@ -4427,11 +4530,22 @@ class GlassCard(Gtk.Box):
                                           [_stop(0.0, 255, 255, 255, 1.0), _stop(0.45, 255, 255, 255, 1.0),
                                            _stop(1.0, 255, 255, 255, 0.0)])
                 st.pop()
+                st.push_mask(Gsk.MaskMode.ALPHA)  # only where the lettering is, its ends soft
+                for xa, xb in spans:
+                    soft = (TEXT_CELL / TEXT_Q) * 0.8
+                    st.append_linear_gradient(Graphene.Rect().init(xa, y0, xb - xa, b),
+                                              Graphene.Point().init(xa, 0), Graphene.Point().init(xb, 0),
+                                              [_stop(0.0, 255, 255, 255, 0.0),
+                                               _stop(min(0.45, soft / (xb - xa)), 255, 255, 255, 1.0),
+                                               _stop(max(0.55, 1 - soft / (xb - xa)), 255, 255, 255, 1.0),
+                                               _stop(1.0, 255, 255, 255, 0.0)])
+                st.pop()
                 st.save()
                 st.translate(Graphene.Point().init(0, 2 * y0 + b))  # y -> 2*y0 + b - y: flipped within it
                 st.scale(1, -1)
                 self._behind_pictures(st, w, h)
                 st.restore()
+                st.pop()
                 st.pop()
                 st.pop()
                 node = st.to_node()
@@ -4614,7 +4728,7 @@ class GlassCard(Gtk.Box):
 
     def _lens_key(self, w: float, h: float):
         """What the lens shows depends on: which pictures, where they lie, the glass's size and shape."""
-        key = [w, h, self.radius, self.mag, self.sharp_bars]
+        key = [w, h, self.radius, self.mag, self.sharp_bars, TEXT_MAP["version"] if self.edge_mirror else 0]
         for view, _ in self.behind:
             for wdg in (view, view.get_parent()):
                 ok, p = self._where(wdg)
@@ -4646,7 +4760,7 @@ class GlassCard(Gtk.Box):
             k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
             plan = self._lens_plan(w, h)
             build = self._build = {"key": key, "k": k, "plan": plan, "next": 0, "per": 64, "tex": None,
-                                   "flat": "later" if len(plan["rings"]) > 9 and not self.echoes else None}
+                                   "flat": "later" if len(plan["rings"]) > 9 else None}
         renderer, k = native.get_renderer(), build["k"]
         area = Graphene.Rect().init(0, 0, w * k, h * k)
         rings = build["plan"]["rings"]
@@ -4749,7 +4863,10 @@ class GlassCard(Gtk.Box):
             d, sx, sy = rings[i]
             if i:
                 snap.push_rounded_clip(self._rounded(d, d, w - 2 * d, h - 2 * d, self._ring_r(d, w, h)))
-            if flat:
+            # Echoes: the rim's rings (squeezing in what's beyond) drawn layer by layer, as the user likes them;
+            # inside, one flattened picture: layer by layer each ring's soft edge let the shade under the cover
+            # through, thin dark rings all over the middle.
+            if flat and not (self.echoes and min(sx, sy) < 1):
                 snap.save()
                 snap.translate(Graphene.Point().init(w / 2, h / 2))
                 snap.scale(sx, sy)
