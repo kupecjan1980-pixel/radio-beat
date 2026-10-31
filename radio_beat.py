@@ -2326,16 +2326,16 @@ class GpuWatch:
             # what it waited for meanwhile: stopped (and why), the GPU (a GPU step's CPU just feeds it), or
             # reading and writing the picture (one thread, whatever the CPU has)
             waits = []
+            if gpu and len(self.busy) >= 2:
+                waits.append("GPU (CPU ji jen zásobuje daty)")
+            elif used < 1.5:
+                waits.append("načtení a uložení obrázku (to jde jen jedním vláknem)")
             if self.enh:
                 for why, t in self.enh.paused.items():
                     if t - self.paused0.get(why, 0.0) >= 0.1:
-                        waits.append(f"{why} {_secs(t - self.paused0.get(why, 0.0))}")
-            if gpu and len(self.busy) >= 2:
-                waits.append("GPU (procesor ji jen zásobuje daty)")
-            elif used < 1.5:
-                waits.append("načítání a ukládání obrázku, to jde jen jedním vláknem")
+                        waits.append(f"{why} ({_secs(t - self.paused0.get(why, 0.0))})")
             if waits:
-                parts.append("čekal na: " + ", ".join(waits))
+                parts.append("CPU čekal na: " + ", ".join(waits))
         return ", ".join(parts)
 
 
@@ -2516,7 +2516,7 @@ class Enhancer:
     def _signal(self, sig) -> None:
         now = time.monotonic()
         if sig == signal.SIGSTOP and self.procs and self._stopped_at is None:
-            why = "animace" if self.held else "otevřený panel" if self.quiet else "rezervu pro plynulý obraz"
+            why = "dokončení animace" if self.held else "zavření panelu" if self.quiet else "rezervu pro plynulý obraz"
             self._stopped_at = (now, why)
         elif sig in (signal.SIGCONT, signal.SIGKILL) and self._stopped_at is not None:
             at, why = self._stopped_at
