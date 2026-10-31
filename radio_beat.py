@@ -5095,6 +5095,304 @@ def day_colors(n: int) -> list:
     return [_rgba(*(int(c[i:i + 2], 16) for i in (1, 3, 5)), 1) for c in (pal * n)[:n]]
 
 
+# The clock's letters dressed for the season, cut to the letters' shapes: autumn leaves, winter snow caps,
+# snowflakes and frost, spring blossoms and grass, summer suns, palms and waves. Laid out anew each day (the
+# date seeds it); in a season's last month more and more of the next one's come in.
+SEASONS = {12: "winter", 1: "winter", 2: "winter", 3: "spring", 4: "spring", 5: "spring",
+           6: "summer", 7: "summer", 8: "summer", 9: "autumn", 10: "autumn", 11: "autumn"}
+NEXT_SEASON = {"winter": "spring", "spring": "summer", "summer": "autumn", "autumn": "winter"}
+SEASON_COLORS = {
+    "autumn": ("#c0392b", "#e67e22", "#f39c12", "#d35400", "#8e4b10", "#b7950b", "#a04000", "#e74c3c"),
+    "winter": ("#ffffff", "#e3f2fd", "#bbdefb", "#90caf9", "#cfd8dc", "#e1f5fe"),
+    "spring": ("#f8bbd0", "#f48fb1", "#ffffff", "#e1bee7", "#fff59d", "#ffccbc", "#c5e1a5"),
+    "summer": ("#ffd54f", "#ffb300", "#ff7043", "#4fc3f7", "#26c6da", "#81c784", "#fff176"),
+}
+SEASON_KINDS = {"autumn": ("maple", "maple", "leaf", "leaf", "leaf"), "winter": ("flake", "flake", "frost"),
+                "spring": ("blossom", "blossom", "blossom", "bud", "sprig"), "summer": ("sun", "palm", "palm", "shell")}
+
+
+def _hex(c: str, a: float = 1.0) -> Gdk.RGBA:
+    return _rgba(int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16), a)
+
+
+def season_today() -> tuple:
+    """(season, next season, share of the next one's motifs): 0 most of the season, rising to 0.5 over its last
+    month."""
+    t = time.localtime()
+    season = SEASONS[t.tm_mon]
+    share = 0.0
+    if SEASONS[t.tm_mon % 12 + 1] != season:
+        share = 0.5 * t.tm_mday / 31
+    return season, NEXT_SEASON[season], share
+
+
+class SeasonDecor:
+    """Motifs for one line of letters (its ink box `w` x `h`), as a render node, cut to the letters by the caller."""
+
+    @staticmethod
+    def build(line: int, w: float, h: float, base: Gdk.RGBA = None):
+        season, nxt, share = season_today()
+        t = time.localtime()
+        rng = random.Random((t.tm_year * 1000 + t.tm_yday) * 7 + line)
+        s = Gtk.Snapshot()
+        D = SeasonDecor
+        if season == "winter":
+            D._snow_cap(s, rng, w, h)
+        elif season == "summer" and rng.random() < 0.6:
+            D._waves(s, rng, w, h)
+        elif season == "spring" and rng.random() < 0.6:
+            D._grass(s, rng, w, h)
+        n = max(5, int(w / h * rng.uniform(4.5, 6.5)))
+
+        def lum(c):
+            return 0.3 * c.red + 0.59 * c.green + 0.11 * c.blue
+
+        def pick(sea):  # colors that stand out on this line's letters
+            cols = [_hex(c) for c in SEASON_COLORS[sea]]
+            far = [c for c in cols if base is None or abs(lum(c) - lum(base)) > 0.22] or cols
+            c = rng.choice(far)
+            return _rgba(int(c.red * 255), int(c.green * 255), int(c.blue * 255), rng.uniform(0.8, 0.97))
+        for _ in range(n):
+            sea = nxt if rng.random() < share else season
+            kind = rng.choice(SEASON_KINDS[sea])
+            x, y = rng.uniform(-0.1 * h, w + 0.1 * h), rng.uniform(-0.1 * h, 1.1 * h)
+            size = h * rng.uniform(0.28, 0.7)
+            color = pick(sea)
+            s.save()
+            s.translate(Graphene.Point().init(x, y))
+            s.rotate(rng.uniform(0, 360) if kind not in ("palm", "sprig") else rng.uniform(-25, 25))
+            getattr(D, "_" + kind)(s, rng, size, color, sea)
+            s.restore()
+        if season == "winter":  # frost: a sprinkle of fine ice
+            for _ in range(int(w * h / (h * h) * 40)):
+                r = h * rng.uniform(0.008, 0.025)
+                D._dot(s, rng.uniform(0, w), rng.uniform(0, h), r, _hex("#ffffff", rng.uniform(0.5, 0.9)))
+        return s.to_node()
+
+    # -- pieces --------------------------------------------------------------------------------------------
+    @staticmethod
+    def _dot(s, x, y, r, color):
+        pb = Gsk.PathBuilder.new()
+        pb.add_circle(Graphene.Point().init(x, y), r)
+        s.append_fill(pb.to_path(), Gsk.FillRule.WINDING, color)
+
+    @staticmethod
+    def _line(s, pts, width, color):
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(*pts[0])
+        for p in pts[1:]:
+            pb.line_to(*p)
+        st = Gsk.Stroke.new(width)
+        st.set_line_cap(Gsk.LineCap.ROUND)
+        s.append_stroke(pb.to_path(), st, color)
+
+    @staticmethod
+    def _darker(c: Gdk.RGBA, k: float = 0.6) -> Gdk.RGBA:
+        return _rgba(int(c.red * 255 * k), int(c.green * 255 * k), int(c.blue * 255 * k), c.alpha)
+
+    @staticmethod
+    def _leaf(s, rng, size, color, _sea):
+        """An almond leaf with its middle vein."""
+        L, W = size, size * rng.uniform(0.32, 0.45)
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(0, -L / 2)
+        pb.quad_to(W, 0, 0, L / 2)
+        pb.quad_to(-W, 0, 0, -L / 2)
+        path = pb.to_path()
+        s.append_fill(path, Gsk.FillRule.WINDING, color)
+        s.append_stroke(path, Gsk.Stroke.new(max(0.8, size * 0.03)), SeasonDecor._darker(color, 0.45))
+        SeasonDecor._line(s, [(0, -L / 2), (0, L / 2 + L * 0.12)], max(1.0, size * 0.035), SeasonDecor._darker(color))
+
+    @staticmethod
+    def _maple(s, rng, size, color, _sea):
+        """A lobed leaf (five points) with veins out from its stem."""
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        steps = 60
+        for i in range(steps + 1):
+            a = -math.pi / 2 + 2 * math.pi * i / steps
+            lobe = abs(math.cos(2.5 * (a + math.pi / 2)))
+            r = R * (0.45 + 0.55 * lobe ** 0.6) * (0.75 if math.sin(a) > 0.6 else 1)
+            x, y = r * math.cos(a), r * math.sin(a)
+            (pb.move_to if i == 0 else pb.line_to)(x, y)
+        pb.close()
+        path = pb.to_path()
+        s.append_fill(path, Gsk.FillRule.WINDING, color)
+        dark = SeasonDecor._darker(color, 0.45)
+        s.append_stroke(path, Gsk.Stroke.new(max(0.8, size * 0.025)), dark)
+        for k in range(5):
+            a = -math.pi / 2 + 2 * math.pi * k / 5
+            SeasonDecor._line(s, [(0, R * 0.25), (R * 0.85 * math.cos(a), R * 0.85 * math.sin(a))],
+                              max(0.8, size * 0.025), dark)
+        SeasonDecor._line(s, [(0, R * 0.25), (0, R * 1.05)], max(1.0, size * 0.04), dark)
+
+    @staticmethod
+    def _flake(s, rng, size, color, _sea):
+        """A six-armed snowflake, branched."""
+        R, wid = size / 2, max(1.0, size * 0.045)
+        for k in range(6):
+            a = math.pi / 3 * k
+            ca, sa = math.cos(a), math.sin(a)
+            SeasonDecor._line(s, [(0, 0), (R * ca, R * sa)], wid, color)
+            for f in (0.45, 0.72):
+                bx, by = R * f * ca, R * f * sa
+                for side in (-1, 1):
+                    b = a + side * math.pi / 4
+                    l = R * 0.28 * (1.2 - f)
+                    SeasonDecor._line(s, [(bx, by), (bx + l * math.cos(b), by + l * math.sin(b))], wid * 0.8, color)
+
+    @staticmethod
+    def _frost(s, rng, size, color, _sea):
+        """Frost crystals: a star of fine needles."""
+        for _ in range(rng.randint(7, 12)):
+            a = rng.uniform(0, 2 * math.pi)
+            l = size * rng.uniform(0.2, 0.55)
+            SeasonDecor._line(s, [(0, 0), (l * math.cos(a), l * math.sin(a))], max(0.7, size * 0.02), color)
+
+    @staticmethod
+    def _blossom(s, rng, size, color, _sea):
+        """Five round petals around a yellow heart."""
+        R = size / 2
+        for k in range(5):
+            a = 2 * math.pi * k / 5
+            pb = Gsk.PathBuilder.new()
+            pb.add_circle(Graphene.Point().init(R * 0.5 * math.cos(a), R * 0.5 * math.sin(a)), R * 0.42)
+            s.append_stroke(pb.to_path(), Gsk.Stroke.new(max(0.8, size * 0.03)), SeasonDecor._darker(color, 0.55))
+        for k in range(5):
+            a = 2 * math.pi * k / 5
+            SeasonDecor._dot(s, R * 0.5 * math.cos(a), R * 0.5 * math.sin(a), R * 0.42, color)
+        SeasonDecor._dot(s, 0, 0, R * 0.22, _hex("#ffd54f", 0.95))
+        for k in range(5):
+            a = 2 * math.pi * (k + 0.5) / 5
+            SeasonDecor._dot(s, R * 0.3 * math.cos(a), R * 0.3 * math.sin(a), R * 0.05, _hex("#e65100", 0.9))
+
+    @staticmethod
+    def _bud(s, rng, size, color, sea):
+        SeasonDecor._dot(s, 0, 0, size * 0.18, color)
+        SeasonDecor._leaf(s, rng, size * 0.5, _hex("#7cb342", 0.9), sea)
+
+    @staticmethod
+    def _sprig(s, rng, size, color, sea):
+        """A young twig with leaves either side."""
+        green = _hex(rng.choice(("#8bc34a", "#7cb342", "#aed581")), 0.9)
+        SeasonDecor._line(s, [(0, size / 2), (0, -size / 2)], max(1.0, size * 0.04), _hex("#558b2f", 0.9))
+        for k in range(4):
+            y = size / 2 - size * (k + 0.6) / 4.5
+            for side in (-1, 1):
+                s.save()
+                s.translate(Graphene.Point().init(side * size * 0.12, y))
+                s.rotate(side * 50)
+                SeasonDecor._leaf(s, rng, size * 0.3, green, sea)
+                s.restore()
+
+    @staticmethod
+    def _sun(s, rng, size, color, _sea):
+        """A sun: a disc with pointed rays."""
+        R = size / 2
+        gold = _hex(rng.choice(("#ffd54f", "#ffca28", "#ffb300")), 0.95)
+        pb = Gsk.PathBuilder.new()
+        rays = rng.randint(9, 14)
+        for i in range(rays * 2 + 1):
+            a = math.pi * i / rays
+            r = R if i % 2 == 0 else R * 0.62
+            (pb.move_to if i == 0 else pb.line_to)(r * math.cos(a), r * math.sin(a))
+        pb.close()
+        s.append_fill(pb.to_path(), Gsk.FillRule.WINDING, _hex("#ff8f00", 0.9))
+        SeasonDecor._dot(s, 0, 0, R * 0.5, gold)
+
+    @staticmethod
+    def _palm(s, rng, size, color, sea):
+        """A palm: a bent trunk, a crown of fronds."""
+        H = size * 1.2
+        bend = size * rng.uniform(-0.25, 0.25)
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(0, H / 2)
+        pb.quad_to(bend, 0, bend * 0.6, -H / 2)
+        st = Gsk.Stroke.new(max(1.5, size * 0.09))
+        st.set_line_cap(Gsk.LineCap.ROUND)
+        s.append_stroke(pb.to_path(), st, _hex("#8d6e63", 0.95))
+        green = _hex(rng.choice(("#43a047", "#2e7d32", "#66bb6a")), 0.95)
+        for k in range(rng.randint(5, 7)):
+            a = math.pi + math.pi * (k + 0.5) / 6.5 + rng.uniform(-0.15, 0.15)
+            s.save()
+            s.translate(Graphene.Point().init(bend * 0.6, -H / 2))
+            s.rotate(math.degrees(a) + 90)
+            s.translate(Graphene.Point().init(0, -size * 0.28))
+            SeasonDecor._leaf(s, rng, size * 0.6, green, sea)
+            s.restore()
+        for k in range(rng.randint(1, 3)):  # coconuts
+            SeasonDecor._dot(s, bend * 0.6 + rng.uniform(-1, 1) * size * 0.06, -H / 2 + size * 0.06, size * 0.06,
+                             _hex("#5d4037", 0.95))
+
+    @staticmethod
+    def _shell(s, rng, size, color, _sea):
+        """A scallop shell: a fan with ribs."""
+        R = size / 2.2
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(0, R * 0.5)
+        for i in range(13):
+            a = math.pi + math.pi * i / 12
+            pb.line_to(R * math.cos(a), R * 0.2 + R * math.sin(a))
+        pb.close()
+        s.append_fill(pb.to_path(), Gsk.FillRule.WINDING, _hex(rng.choice(("#ffccbc", "#ffe0b2", "#f8bbd0")), 0.95))
+        for i in range(1, 8):
+            a = math.pi + math.pi * i / 8
+            SeasonDecor._line(s, [(0, R * 0.5), (R * math.cos(a), R * 0.2 + R * math.sin(a))],
+                              max(0.7, size * 0.02), _hex("#bf8a73", 0.9))
+
+    @staticmethod
+    def _snow_cap(s, rng, w, h):
+        """Snow lying on top of the letters: a white band with a wavy, dripping lower edge."""
+        depth = h * rng.uniform(0.12, 0.2)
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(-2, -h)
+        pb.line_to(w + 2, -h)
+        x = w + 2
+        pb.line_to(x, depth)
+        while x > -2:
+            step = h * rng.uniform(0.12, 0.3)
+            dip = depth * rng.uniform(0.6, 1.5) + (h * 0.12 if rng.random() < 0.15 else 0)  # now and then an icicle
+            pb.quad_to(x - step / 2, dip, x - step, depth * rng.uniform(0.7, 1.1))
+            x -= step
+        pb.close()
+        path = pb.to_path()
+        s.append_fill(path, Gsk.FillRule.WINDING, _hex("#f5fbff", 0.97))
+        s.append_stroke(path, Gsk.Stroke.new(max(1.0, h * 0.012)), _hex("#90caf9", 0.9))
+
+    @staticmethod
+    def _waves(s, rng, w, h):
+        """The sea along the bottom of the letters: two wavy bands of blue."""
+        for k, (col, top) in enumerate((("#4fc3f7", 0.72), ("#0288d1", 0.84))):
+            pb = Gsk.PathBuilder.new()
+            y0 = h * (top + rng.uniform(-0.04, 0.04))
+            pb.move_to(-2, h * 2)
+            pb.line_to(-2, y0)
+            x, amp, wl = -2.0, h * 0.05, h * rng.uniform(0.35, 0.5)
+            while x < w + 2:
+                pb.quad_to(x + wl / 4, y0 - amp, x + wl / 2, y0)
+                pb.quad_to(x + 3 * wl / 4, y0 + amp, x + wl, y0)
+                x += wl
+            pb.line_to(w + 2, h * 2)
+            pb.close()
+            s.append_fill(pb.to_path(), Gsk.FillRule.WINDING, _hex(col, 0.8))
+
+    @staticmethod
+    def _grass(s, rng, w, h):
+        """Fresh grass growing up from the bottom of the letters."""
+        x = 0.0
+        while x < w:
+            tall = h * rng.uniform(0.12, 0.3)
+            lean = rng.uniform(-0.4, 0.4) * tall
+            pb = Gsk.PathBuilder.new()
+            pb.move_to(x - h * 0.015, h * 1.05)
+            pb.quad_to(x, h - tall * 0.5, x + lean, h - tall)
+            pb.quad_to(x + h * 0.01, h - tall * 0.5, x + h * 0.02, h * 1.05)
+            pb.close()
+            s.append_fill(pb.to_path(), Gsk.FillRule.WINDING,
+                          _hex(rng.choice(("#7cb342", "#8bc34a", "#689f38", "#9ccc65")), 0.9))
+            x += h * rng.uniform(0.02, 0.05)
+
+
 class ClockView(Gtk.Widget):
     """Above the volume slider, right of the cover, one under another: the weekday, the day, the month, the
     year and the time (lowest, just above the slider). Each as wide as the room (their letters' outlines, not
@@ -5111,6 +5409,7 @@ class ClockView(Gtk.Widget):
         self.room = (0, 0)
         self.lays = None
         self.colon = True  # the time's colon blinks: a second on, a second off
+        self._decor = (None, [])  # ((day, sizes), [render node per line]): the season's motifs, built once a day
 
     def _layout(self, which: int, pt: float):
         family, weight = self.FONTS[which]
@@ -5169,6 +5468,27 @@ class ClockView(Gtk.Widget):
             snap.restore()
             y += ink.height + gap
         snap.pop()
+        # the season's motifs over the letters, cut to them (no shadow of their own: they lie on the letters)
+        t = time.localtime()
+        key = ((t.tm_year, t.tm_yday), tuple((round(ink.width), round(ink.height)) for _, ink in lays))
+        if self._decor[0] != key:
+            self._decor = (key, [SeasonDecor.build(n, ink.width, ink.height, c)
+                                 for n, ((_, ink), c) in enumerate(zip(lays, day_colors(len(lays))))])
+        y = 0.0
+        for (lay, ink), node in zip(lays, self._decor[1]):
+            snap.save()
+            snap.translate(Graphene.Point().init(0, y * sy))
+            snap.scale(1.0, sy)
+            snap.translate(Graphene.Point().init((w - ink.width) / 2 - ink.x, -ink.y))
+            snap.push_mask(Gsk.MaskMode.ALPHA)
+            snap.append_layout(lay, _rgba(255, 255, 255, 1))
+            snap.pop()
+            if node is not None:
+                snap.translate(Graphene.Point().init(ink.x, ink.y))
+                snap.append_node(node)
+            snap.pop()
+            snap.restore()
+            y += ink.height + gap
 
 
 class InfoStack(Gtk.Widget):
