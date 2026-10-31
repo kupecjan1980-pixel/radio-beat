@@ -5216,6 +5216,142 @@ def season_today() -> tuple:
     return season, NEXT_SEASON[season], share
 
 
+
+# --- special days: the clock's letters dressed for them instead of the season --------------------------------
+def _easter(y: int) -> tuple:
+    """Easter Sunday (Gregorian; anonymous algorithm): (month, day)."""
+    a, b, c = y % 19, y // 100, y % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    return month, (h + l - 7 * m + 114) % 31 + 1
+
+
+def _shift(y: int, md: tuple, days: int) -> tuple:
+    import datetime
+    t = datetime.date(y, *md) + datetime.timedelta(days=days)
+    return t.month, t.day
+
+
+def _nth_weekday(y: int, month: int, weekday: int, n: int) -> tuple:
+    """The n-th `weekday` (0 Monday) of the month; n = -1 the last."""
+    import calendar
+    days = [d for d in range(1, calendar.monthrange(y, month)[1] + 1) if calendar.weekday(y, month, d) == weekday]
+    return month, days[n - 1 if n > 0 else n]
+
+
+# Lunar and lunisolar days, looked up (first day): Chinese New Year, Diwali, Hanukkah (8 days).
+_LUNAR = {
+    "cny": {2026: (2, 17), 2027: (2, 6), 2028: (1, 26), 2029: (2, 13), 2030: (2, 3), 2031: (1, 23), 2032: (2, 11),
+            2033: (1, 31), 2034: (2, 19), 2035: (2, 8)},
+    "diwali": {2026: (11, 8), 2027: (10, 29), 2028: (10, 17), 2029: (11, 5), 2030: (10, 26), 2031: (11, 14),
+               2032: (11, 2), 2033: (10, 22), 2034: (11, 10), 2035: (10, 30)},
+    "hanukkah": {2026: (12, 5), 2027: (12, 25), 2028: (12, 13), 2029: (12, 2), 2030: (12, 21), 2031: (12, 10),
+                 2032: (11, 28), 2033: (12, 17), 2034: (12, 7), 2035: (12, 26)},
+}
+
+# id: (Czech name, what's on the letters, days(year) -> [(month, day)], motifs, colors, base fill)
+HOLIDAYS = {
+    "newyear": ("Nový rok", "ohňostroje a hvězdy", lambda y: [(1, 1)], ("firework", "firework", "star"),
+                ("#ffd54f", "#ff4081", "#40c4ff", "#b2ff59", "#ffffff", "#e040fb"), None),
+    "kings": ("Tři králové", "koruny a hvězdy", lambda y: [(1, 6)], ("crown", "star", "star"),
+              ("#ffd54f", "#ffca28", "#ffffff", "#ce93d8"), None),
+    "radio": ("Světový den rádia", "rádia a noty", lambda y: [(2, 13)], ("radio", "note", "note"),
+              ("#e3051a", "#ffffff", "#ffd54f", "#212121"), None),
+    "valentine": ("Valentýn", "srdce", lambda y: [(2, 14)], ("heart", "heart", "heart", "blossom"),
+                  ("#e91e63", "#ff1744", "#f48fb1", "#ffffff", "#d50000"), None),
+    "carnival": ("Masopust", "masky a konfety", lambda y: [_shift(y, _easter(y), -47), _shift(y, _easter(y), -51)],
+                 ("mask", "mask", "confetti"), ("#e040fb", "#ffd54f", "#00e676", "#ff1744", "#40c4ff"), None),
+    "women": ("Mezinárodní den žen", "mimózy a květy", lambda y: [(3, 8)], ("mimosa", "mimosa", "blossom"),
+              ("#fff176", "#ffeb3b", "#f8bbd0", "#ffffff"), None),
+    "pi": ("Den čísla π", "π", lambda y: [(3, 14)], ("pi", "pi"), ("#40c4ff", "#ffffff", "#ffd54f", "#b388ff"), None),
+    "patrick": ("Den svatého Patrika", "trojlístky", lambda y: [(3, 17)], ("shamrock", "shamrock", "shamrock"),
+                ("#00c853", "#64dd17", "#2e7d32", "#b9f6ca"), None),
+    "easter": ("Velikonoce", "kraslice, květy a pomlázky",
+               lambda y: [_shift(y, _easter(y), d) for d in (-2, -1, 0, 1)], ("egg", "egg", "egg", "blossom", "sprig"),
+               ("#ff7043", "#ffd54f", "#4fc3f7", "#e040fb", "#66bb6a", "#f44336"), None),
+    "earth": ("Den Země", "zeměkoule a listí", lambda y: [(4, 22)], ("globe", "leaf", "sprig"),
+              ("#29b6f6", "#66bb6a", "#2e7d32", "#81d4fa"), None),
+    "witches": ("Pálení čarodějnic", "ohně a košťata", lambda y: [(4, 30)], ("flame", "flame", "broom", "star"),
+                ("#ff6d00", "#ffab00", "#d50000", "#ffd54f"), None),
+    "may": ("1. máj, lásky čas", "srdce a květy", lambda y: [(5, 1)], ("heart", "blossom", "blossom"),
+            ("#f48fb1", "#ffffff", "#e91e63", "#f8bbd0"), None),
+    "starwars": ("Den Star Wars (May the 4th)", "světelné meče a hvězdy", lambda y: [(5, 4)],
+                 ("saber", "saber", "star"), ("#00e5ff", "#ff1744", "#76ff03", "#ffffff", "#d500f9"), None),
+    "victory": ("Den vítězství", "česká vlajka", lambda y: [(5, 8)], ("star",), ("#ffffff",), "cz"),
+    "mothers": ("Den matek", "srdce a květy", lambda y: [_nth_weekday(y, 5, 6, 2)], ("heart", "blossom", "blossom"),
+                ("#f06292", "#ffffff", "#f8bbd0", "#e91e63"), None),
+    "children": ("Den dětí", "balonky a hvězdy", lambda y: [(6, 1)], ("balloon", "balloon", "star"),
+                 ("#ff1744", "#2979ff", "#ffea00", "#00e676", "#e040fb", "#ff9100"), None),
+    "fathers": ("Den otců", "hvězdy a kytary", lambda y: [_nth_weekday(y, 6, 6, 3)], ("star", "guitar"),
+                ("#40c4ff", "#ffd54f", "#ffffff"), None),
+    "cyril": ("Den slovanských věrozvěstů Cyrila a Metoděje", "česká vlajka", lambda y: [(7, 5)], ("star",),
+              ("#ffd54f",), "cz"),
+    "hus": ("Den upálení mistra Jana Husa", "česká vlajka a plameny", lambda y: [(7, 6)], ("flame",),
+            ("#ff6d00", "#ffab00"), "cz"),
+    "july4": ("Den nezávislosti USA", "hvězdy a pruhy, ohňostroje", lambda y: [(7, 4)], ("firework", "star"),
+              ("#ffffff", "#ff1744", "#2979ff", "#ffd54f"), "us"),
+    "rock": ("Světový den rocku", "kytary, blesky a noty", lambda y: [(7, 13)], ("guitar", "bolt", "note"),
+             ("#e3051a", "#ffd54f", "#ffffff", "#212121"), None),
+    "wenceslas": ("Den české státnosti (sv. Václav)", "česká vlajka a koruny", lambda y: [(9, 28)], ("crown",),
+                  ("#ffd54f",), "cz"),
+    "music": ("Mezinárodní den hudby", "noty", lambda y: [(10, 1)], ("note", "note", "note"),
+              ("#ffd54f", "#ffffff", "#e3051a", "#40c4ff"), None),
+    "republic": ("Den vzniku Československa", "česká vlajka", lambda y: [(10, 28)], ("star",), ("#ffffff",), "cz"),
+    "halloween": ("Halloween", "dýně, netopýři, duchové a pavouci", lambda y: [(10, 31)],
+                  ("pumpkin", "pumpkin", "bat", "bat", "ghost", "spider", "web"),
+                  ("#ff6d00", "#212121", "#ffffff", "#7c4dff", "#76ff03"), None),
+    "dead": ("Dušičky a Día de los Muertos", "svíčky, lebky a měsíčky", lambda y: [(11, 1), (11, 2)],
+             ("candle", "skull", "blossom", "blossom"), ("#ff9100", "#ffd54f", "#e040fb", "#ffffff", "#ff1744"), None),
+    "freedom": ("Den boje za svobodu a demokracii", "česká vlajka a svíčky", lambda y: [(11, 17)], ("candle",),
+                ("#ffffff", "#ffd54f"), "cz"),
+    "thanks": ("Den díkůvzdání (USA)", "dýně a listí", lambda y: [_nth_weekday(y, 11, 3, 4)],
+               ("pumpkin", "maple", "leaf"), ("#ff6d00", "#c0392b", "#f39c12", "#8e4b10"), None),
+    "nicholas": ("Mikuláš", "hvězdy, andělé a čerti (plamínky)", lambda y: [(12, 5)], ("star", "flame", "gift"),
+                 ("#ffd54f", "#ffffff", "#ff1744", "#ff6d00"), None),
+    "advent": ("Advent", "baňky, hvězdy a stromky", lambda y: [(12, d) for d in range(1, 24)],
+               ("bauble", "star", "tree", "flake"), ("#e53935", "#ffd54f", "#43a047", "#ffffff", "#1e88e5"), None),
+    "christmas": ("Vánoce", "stromky, dárky, baňky a hvězdy", lambda y: [(12, 24), (12, 25), (12, 26)],
+                  ("tree", "tree", "gift", "bauble", "star", "flake"),
+                  ("#e53935", "#43a047", "#ffd54f", "#ffffff", "#1e88e5", "#c62828"), None),
+    "silvester": ("Silvestr", "ohňostroje", lambda y: [(12, 31)], ("firework", "firework", "star"),
+                  ("#ffd54f", "#ff4081", "#40c4ff", "#b2ff59", "#ffffff", "#e040fb"), None),
+    "cny": ("Čínský nový rok", "lampiony, mince a ohňostroje",
+            lambda y: [_LUNAR["cny"][y]] if y in _LUNAR["cny"] else [], ("lantern", "lantern", "coin", "firework"),
+            ("#d50000", "#ffd54f", "#ff6d00", "#ffab00"), None),
+    "diwali": ("Diwali", "lampičky dija a ohňostroje",
+               lambda y: [_LUNAR["diwali"][y]] if y in _LUNAR["diwali"] else [], ("diya", "diya", "firework", "star"),
+               ("#ffab00", "#ff6d00", "#e040fb", "#ffd54f"), None),
+    "hanukkah": ("Chanuka", "svíce a Davidovy hvězdy",
+                 lambda y: [_shift(y, _LUNAR["hanukkah"][y], d) for d in range(8)] if y in _LUNAR["hanukkah"] else [],
+                 ("candle", "candle", "david"), ("#1e88e5", "#ffffff", "#90caf9", "#ffd54f"), None),
+}
+HOLIDAY_PERIODS = {"advent"}  # whole stretches: mixed with the season, not instead of it
+UPRIGHT = {"palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
+           "skull", "gift", "crown", "broom", "guitar", "mimosa"}
+
+
+def holidays_today() -> list:
+    """Today's special days (ids), from the HOLIDAYS calendar."""
+    t = time.localtime()
+    out = []
+    for hid, h in HOLIDAYS.items():
+        try:
+            if (t.tm_mon, t.tm_mday) in h[2](t.tm_year):
+                out.append(hid)
+        except (KeyError, ValueError, IndexError):
+            pass
+    return out
+
+
+for _hid, _h in HOLIDAYS.items():  # each day's motifs and colors, like a season's
+    SEASON_KINDS[_hid], SEASON_COLORS[_hid] = _h[3], _h[4]
+
 SEASON_CZ = {"autumn": ("podzim", "podzimu", "listí"), "winter": ("zima", "zimy", "sněhové čepice, vločky a jinovatka"),
              "spring": ("jaro", "jara", "květy, větvičky a tráva"), "summer": ("léto", "léta", "slunce, palmy, mušle a vlny")}
 
@@ -5225,8 +5361,14 @@ def season_text(clock_bytes: int = None) -> str:
         return "Vypnuto: datum a čas jen v barvách měsíce"
     season, nxt, share = season_today()
     name, _, motifs = SEASON_CZ[season]
+    days = holidays_today()
+    if days:
+        name = " + ".join(HOLIDAYS[d][0] for d in days)
+        motifs = ", ".join(HOLIDAYS[d][1] for d in days)
+        share = 0.0
     text = (f"Na písmenech dne, měsíce, roku a času, oříznuto do jejich tvaru; klik na datum je vypne a zapne; "
-            f"každý den trochu jinak · dnes: {name} ({motifs})")
+            f"každý den trochu jinak; o svátcích a zvláštních dnech (české, americké i světové: Vánoce, Halloween, "
+            f"4. červenec, Velikonoce, Den rocku…) jejich vlastní · dnes: {name} ({motifs})")
     if share > 0:
         text += f", přidává se {round(share * 100)} % {SEASON_CZ[nxt][1]}"
     if clock_bytes is not None:
@@ -5244,13 +5386,25 @@ class SeasonDecor:
         rng = random.Random((t.tm_year * 1000 + t.tm_yday) * 7 + line)
         s = Gtk.Snapshot()
         D = SeasonDecor
-        if season == "winter":
+        days = holidays_today()
+        special = [d for d in days if d not in HOLIDAY_PERIODS]
+        pool = special or None  # a special day: its motifs instead of the season's
+        if days and not special:  # only a period (Advent): half of it, half the season
+            nxt, share = days[0], 0.5
+        for d in special:
+            if HOLIDAYS[d][5]:
+                getattr(D, "_flag_" + HOLIDAYS[d][5])(s, w, h)
+        if pool:
+            pass
+        elif season == "winter":
             D._snow_cap(s, rng, w, h)
         elif season == "summer" and rng.random() < 0.6:
             D._waves(s, rng, w, h)
         elif season == "spring" and rng.random() < 0.6:
             D._grass(s, rng, w, h)
-        n = max(5, int(w / h * rng.uniform(4.5, 6.5)))
+        # motifs no bigger on the big day number than on the other lines (more of them there instead)
+        ref = min(h, 100.0)
+        n = max(5, min(90, int(1.4 * w * h / (0.5 * ref) ** 2 * rng.uniform(0.85, 1.15))))
 
         def lum(c):
             return 0.3 * c.red + 0.59 * c.green + 0.11 * c.blue
@@ -5261,17 +5415,17 @@ class SeasonDecor:
             c = rng.choice(far)
             return _rgba(int(c.red * 255), int(c.green * 255), int(c.blue * 255), rng.uniform(0.8, 0.97))
         for _ in range(n):
-            sea = nxt if rng.random() < share else season
+            sea = rng.choice(pool) if pool else (nxt if rng.random() < share else season)
             kind = rng.choice(SEASON_KINDS[sea])
             x, y = rng.uniform(-0.1 * h, w + 0.1 * h), rng.uniform(-0.1 * h, 1.1 * h)
-            size = h * rng.uniform(0.28, 0.7)
+            size = ref * rng.uniform(0.28, 0.7)
             color = pick(sea)
             s.save()
             s.translate(Graphene.Point().init(x, y))
-            s.rotate(rng.uniform(0, 360) if kind not in ("palm", "sprig") else rng.uniform(-25, 25))
+            s.rotate(rng.uniform(0, 360) if kind not in UPRIGHT else rng.uniform(-20, 20))
             getattr(D, "_" + kind)(s, rng, size, color, sea)
             s.restore()
-        if season == "winter":  # frost: a sprinkle of fine ice
+        if season == "winter" and not pool:  # frost: a sprinkle of fine ice
             for _ in range(int(w * h / (h * h) * 40)):
                 r = h * rng.uniform(0.008, 0.025)
                 D._dot(s, rng.uniform(0, w), rng.uniform(0, h), r, _hex("#ffffff", rng.uniform(0.5, 0.9)))
@@ -5447,6 +5601,413 @@ class SeasonDecor:
             a = math.pi + math.pi * i / 8
             SeasonDecor._line(s, [(0, R * 0.5), (R * math.cos(a), R * 0.2 + R * math.sin(a))],
                               max(0.7, size * 0.02), _hex("#bf8a73", 0.9))
+
+
+    # -- special days' pieces ------------------------------------------------------------------------------
+    @staticmethod
+    def _fill(s, pb, color):
+        s.append_fill(pb.to_path(), Gsk.FillRule.WINDING, color)
+
+    @staticmethod
+    def _poly(s, pts, color, close=True):
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(*pts[0])
+        for p in pts[1:]:
+            pb.line_to(*p)
+        if close:
+            pb.close()
+        SeasonDecor._fill(s, pb, color)
+
+    @staticmethod
+    def _oval(s, x, y, rx, ry, color):
+        s.save()
+        s.translate(Graphene.Point().init(x, y))
+        s.scale(1, ry / max(rx, 0.01))
+        SeasonDecor._dot(s, 0, 0, rx, color)
+        s.restore()
+
+    @staticmethod
+    def _star(s, rng, size, color, _sea, points=5):
+        R = size / 2
+        pts = [((R if i % 2 == 0 else R * 0.42) * math.cos(-math.pi / 2 + math.pi * i / points),
+                (R if i % 2 == 0 else R * 0.42) * math.sin(-math.pi / 2 + math.pi * i / points))
+               for i in range(points * 2)]
+        SeasonDecor._poly(s, pts, color)
+
+    @staticmethod
+    def _heart(s, rng, size, color, _sea):
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(0, R * 0.95)
+        pb.cubic_to(-R * 1.3, R * 0.1, -R * 0.75, -R * 0.95, 0, -R * 0.35)
+        pb.cubic_to(R * 0.75, -R * 0.95, R * 1.3, R * 0.1, 0, R * 0.95)
+        pb.close()
+        SeasonDecor._fill(s, pb, color)
+        SeasonDecor._dot(s, -R * 0.35, -R * 0.35, R * 0.12, _hex("#ffffff", 0.5))
+
+    @staticmethod
+    def _firework(s, rng, size, color, _sea):
+        R = size / 2
+        rays = rng.randint(10, 16)
+        for i in range(rays):
+            a = 2 * math.pi * i / rays + rng.uniform(-0.1, 0.1)
+            r = R * rng.uniform(0.7, 1.0)
+            c = _hex(rng.choice(("#ffd54f", "#ff4081", "#40c4ff", "#b2ff59", "#ffffff", "#e040fb")), 0.95)
+            SeasonDecor._line(s, [(R * 0.15 * math.cos(a), R * 0.15 * math.sin(a)), (r * math.cos(a), r * math.sin(a))],
+                              max(1.0, size * 0.03), c)
+            SeasonDecor._dot(s, r * 1.08 * math.cos(a), r * 1.08 * math.sin(a), size * 0.035, c)
+        SeasonDecor._dot(s, 0, 0, size * 0.05, _hex("#ffffff"))
+
+    @staticmethod
+    def _crown(s, rng, size, color, _sea):
+        W, H = size * 0.9, size * 0.6
+        SeasonDecor._poly(s, [(-W / 2, H / 2), (-W / 2, -H / 4), (-W / 4, H / 8), (0, -H / 2), (W / 4, H / 8),
+                              (W / 2, -H / 4), (W / 2, H / 2)], _hex("#ffc107", 0.95))
+        for x, c in ((-W / 4, "#e53935"), (0, "#1e88e5"), (W / 4, "#43a047")):
+            SeasonDecor._dot(s, x, H * 0.3, size * 0.06, _hex(c))
+
+    @staticmethod
+    def _note(s, rng, size, color, _sea):
+        SeasonDecor._oval(s, -size * 0.12, size * 0.3, size * 0.16, size * 0.11, color)
+        SeasonDecor._line(s, [(size * 0.03, size * 0.3), (size * 0.03, -size * 0.4)], max(1.0, size * 0.06), color)
+        SeasonDecor._poly(s, [(size * 0.03, -size * 0.4), (size * 0.3, -size * 0.2), (size * 0.28, -size * 0.08),
+                              (size * 0.03, -size * 0.25)], color)
+
+    @staticmethod
+    def _radio(s, rng, size, color, _sea):
+        W, H = size * 0.9, size * 0.55
+        pb = Gsk.PathBuilder.new()
+        rr = Gsk.RoundedRect()
+        rr.init_from_rect(Graphene.Rect().init(-W / 2, -H / 2, W, H), size * 0.08)
+        pb.add_rounded_rect(rr)
+        SeasonDecor._fill(s, pb, _hex("#e3051a", 0.95))
+        SeasonDecor._dot(s, -W * 0.2, 0, H * 0.3, _hex("#212121", 0.95))
+        for k in range(3):
+            SeasonDecor._line(s, [(W * 0.08, -H * 0.2 + k * H * 0.2), (W * 0.4, -H * 0.2 + k * H * 0.2)],
+                              max(1.0, size * 0.03), _hex("#ffffff", 0.9))
+        SeasonDecor._line(s, [(W * 0.3, -H / 2), (W * 0.5, -H * 1.1)], max(1.0, size * 0.03), _hex("#bdbdbd"))
+
+    @staticmethod
+    def _mask(s, rng, size, color, _sea):
+        W, H = size * 0.9, size * 0.4
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(-W / 2, -H * 0.3)
+        pb.quad_to(0, -H * 0.9, W / 2, -H * 0.3)
+        pb.quad_to(W * 0.45, H * 0.7, W * 0.1, H * 0.4)
+        pb.quad_to(0, H * 0.1, -W * 0.1, H * 0.4)
+        pb.quad_to(-W * 0.45, H * 0.7, -W / 2, -H * 0.3)
+        pb.close()
+        for x in (-W * 0.22, W * 0.22):
+            pb.add_circle(Graphene.Point().init(x, 0), H * 0.22)
+        s.append_fill(pb.to_path(), Gsk.FillRule.EVEN_ODD, color)
+
+    @staticmethod
+    def _confetti(s, rng, size, color, _sea):
+        for _ in range(8):
+            c = _hex(rng.choice(("#e040fb", "#ffd54f", "#00e676", "#ff1744", "#40c4ff")), 0.95)
+            x, y = rng.uniform(-1, 1) * size / 2, rng.uniform(-1, 1) * size / 2
+            SeasonDecor._poly(s, [(x, y), (x + size * 0.1, y + size * 0.03), (x + size * 0.08, y + size * 0.1),
+                                  (x - size * 0.02, y + size * 0.07)], c)
+
+    @staticmethod
+    def _mimosa(s, rng, size, color, sea):
+        s.save()
+        s.translate(Graphene.Point().init(0, size * 0.25))
+        SeasonDecor._leaf(s, rng, size * 0.6, _hex("#7cb342", 0.9), sea)
+        s.restore()
+        for _ in range(9):
+            SeasonDecor._dot(s, rng.uniform(-0.3, 0.3) * size, rng.uniform(-0.35, 0.05) * size, size * 0.08,
+                             _hex(rng.choice(("#fff176", "#ffeb3b", "#fdd835")), 0.97))
+
+    @staticmethod
+    def _pi(s, rng, size, color, _sea):
+        w = max(1.5, size * 0.09)
+        SeasonDecor._line(s, [(-size * 0.35, -size * 0.25), (size * 0.38, -size * 0.28)], w, color)
+        SeasonDecor._line(s, [(-size * 0.15, -size * 0.25), (-size * 0.2, size * 0.32)], w, color)
+        SeasonDecor._line(s, [(size * 0.15, -size * 0.26), (size * 0.15, size * 0.28), (size * 0.25, size * 0.32)],
+                          w, color)
+
+    @staticmethod
+    def _shamrock(s, rng, size, color, sea):
+        for a in (0, 120, 240):
+            s.save()
+            s.rotate(a)
+            s.translate(Graphene.Point().init(0, -size * 0.2))
+            SeasonDecor._heart(s, rng, size * 0.45, color, sea)
+            s.restore()
+        SeasonDecor._line(s, [(0, 0), (size * 0.1, size * 0.5)], max(1.0, size * 0.05), _hex("#1b5e20"))
+
+    @staticmethod
+    def _egg(s, rng, size, color, _sea):
+        rx, ry = size * 0.3, size * 0.4
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(0, -ry)
+        pb.cubic_to(rx * 1.1, -ry, rx * 1.3, ry, 0, ry)
+        pb.cubic_to(-rx * 1.3, ry, -rx * 1.1, -ry, 0, -ry)
+        pb.close()
+        path = pb.to_path()
+        s.append_fill(path, Gsk.FillRule.WINDING, color)
+        s.push_fill(path, Gsk.FillRule.WINDING)
+        for k in range(-2, 3):
+            y = k * ry * 0.38
+            c = _hex(rng.choice(("#ffffff", "#ffd54f", "#4fc3f7", "#e040fb", "#43a047", "#f44336")), 0.95)
+            pts = [(-rx * 1.3 + i * rx * 0.26, y + (ry * 0.08 if i % 2 else -ry * 0.08)) for i in range(11)]
+            SeasonDecor._line(s, pts, max(1.0, size * 0.045), c, )
+        s.pop()
+
+    @staticmethod
+    def _globe(s, rng, size, color, _sea):
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.add_circle(Graphene.Point().init(0, 0), R)
+        path = pb.to_path()
+        s.append_fill(path, Gsk.FillRule.WINDING, _hex("#29b6f6", 0.95))
+        s.push_fill(path, Gsk.FillRule.WINDING)
+        for _ in range(5):
+            SeasonDecor._oval(s, rng.uniform(-R, R) * 0.7, rng.uniform(-R, R) * 0.7, R * rng.uniform(0.2, 0.4),
+                              R * rng.uniform(0.15, 0.3), _hex("#43a047", 0.95))
+        s.pop()
+        s.append_stroke(path, Gsk.Stroke.new(max(1.0, size * 0.03)), _hex("#01579b", 0.9))
+
+    @staticmethod
+    def _flame(s, rng, size, color, _sea):
+        for k, c in ((1.0, "#ff3d00"), (0.7, "#ff9100"), (0.42, "#ffea00")):
+            pb = Gsk.PathBuilder.new()
+            pb.move_to(0, -size * 0.5 * k)
+            pb.cubic_to(size * 0.35 * k, -size * 0.1 * k, size * 0.3 * k, size * 0.4 * k, 0, size * 0.4 * k)
+            pb.cubic_to(-size * 0.3 * k, size * 0.4 * k, -size * 0.35 * k, -size * 0.1 * k, 0, -size * 0.5 * k)
+            pb.close()
+            s.save()
+            s.translate(Graphene.Point().init(0, size * 0.1 * (1 - k)))
+            SeasonDecor._fill(s, pb, _hex(c, 0.95))
+            s.restore()
+
+    @staticmethod
+    def _broom(s, rng, size, color, _sea):
+        SeasonDecor._line(s, [(0, -size * 0.55), (0, size * 0.15)], max(1.5, size * 0.06), _hex("#6d4c41"))
+        for k in range(-4, 5):
+            SeasonDecor._line(s, [(k * size * 0.02, size * 0.12), (k * size * 0.05, size * 0.5)],
+                              max(1.0, size * 0.03), _hex("#d7a86e"))
+
+    @staticmethod
+    def _saber(s, rng, size, color, _sea):
+        L = size * 1.1
+        st = Gsk.Stroke.new(max(3.0, size * 0.14))
+        st.set_line_cap(Gsk.LineCap.ROUND)
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(0, -L / 2)
+        pb.line_to(0, L * 0.3)
+        s.append_stroke(pb.to_path(), st, _rgba(int(color.red * 255), int(color.green * 255), int(color.blue * 255), 0.45))
+        SeasonDecor._line(s, [(0, -L / 2), (0, L * 0.3)], max(1.0, size * 0.05), _hex("#ffffff"))
+        SeasonDecor._line(s, [(0, L * 0.3), (0, L / 2)], max(2.0, size * 0.09), _hex("#9e9e9e"))
+
+    @staticmethod
+    def _balloon(s, rng, size, color, _sea):
+        SeasonDecor._oval(s, 0, -size * 0.12, size * 0.26, size * 0.32, color)
+        SeasonDecor._dot(s, -size * 0.09, -size * 0.25, size * 0.05, _hex("#ffffff", 0.6))
+        SeasonDecor._line(s, [(0, size * 0.2), (size * 0.05, size * 0.35), (-size * 0.03, size * 0.55)],
+                          max(0.8, size * 0.02), _hex("#eeeeee"))
+
+    @staticmethod
+    def _guitar(s, rng, size, color, _sea):
+        body = _hex(rng.choice(("#e3051a", "#ffb300", "#212121", "#1e88e5")), 0.97)
+        SeasonDecor._dot(s, 0, size * 0.22, size * 0.24, body)
+        SeasonDecor._dot(s, 0, -size * 0.02, size * 0.17, body)
+        SeasonDecor._dot(s, 0, size * 0.12, size * 0.06, _hex("#000000", 0.9))
+        SeasonDecor._line(s, [(0, size * 0.05), (0, -size * 0.55)], max(1.5, size * 0.07), _hex("#5d4037"))
+        SeasonDecor._poly(s, [(-size * 0.05, -size * 0.5), (size * 0.05, -size * 0.5), (size * 0.06, -size * 0.65),
+                              (-size * 0.06, -size * 0.65)], _hex("#3e2723"))
+
+    @staticmethod
+    def _bolt(s, rng, size, color, _sea):
+        SeasonDecor._poly(s, [(size * 0.1, -size * 0.5), (-size * 0.2, size * 0.05), (0, size * 0.05),
+                              (-size * 0.1, size * 0.5), (size * 0.22, -size * 0.08), (0.02 * size, -size * 0.08)],
+                          _hex("#ffea00", 0.97))
+
+    @staticmethod
+    def _pumpkin(s, rng, size, color, _sea):
+        R = size / 2
+        for dx, k in ((-0.45, 0.7), (0.45, 0.7), (0, 0.8)):
+            SeasonDecor._oval(s, dx * R, 0, R * k, R * 0.8, _hex("#ff6d00" if dx else "#ff9100", 0.97))
+        SeasonDecor._line(s, [(0, -R * 0.75), (R * 0.1, -R * 1.05)], max(1.5, size * 0.07), _hex("#2e7d32"))
+        if rng.random() < 0.7:  # a jack-o'-lantern face
+            dark = _hex("#3e1a00", 0.95)
+            for x in (-R * 0.32, R * 0.32):
+                SeasonDecor._poly(s, [(x - R * 0.13, -R * 0.05), (x + R * 0.13, -R * 0.05), (x, -R * 0.3)], dark)
+            SeasonDecor._poly(s, [(-R * 0.45, R * 0.2), (-R * 0.25, R * 0.35), (-R * 0.1, R * 0.22), (0, R * 0.38),
+                                  (R * 0.1, R * 0.22), (R * 0.25, R * 0.35), (R * 0.45, R * 0.2), (0, R * 0.55)], dark)
+
+    @staticmethod
+    def _bat(s, rng, size, color, _sea):
+        R = size / 2
+        c = _hex("#1a1a1a", 0.95)
+        SeasonDecor._poly(s, [(0, -R * 0.2), (R * 0.3, -R * 0.45), (R * 0.55, -R * 0.2), (R, -R * 0.4),
+                              (R * 0.85, R * 0.05), (R * 0.65, -R * 0.02), (R * 0.5, R * 0.2), (R * 0.3, R * 0.05),
+                              (0, R * 0.3), (-R * 0.3, R * 0.05), (-R * 0.5, R * 0.2), (-R * 0.65, -R * 0.02),
+                              (-R * 0.85, R * 0.05), (-R, -R * 0.4), (-R * 0.55, -R * 0.2), (-R * 0.3, -R * 0.45)], c)
+        for x in (-R * 0.08, R * 0.08):
+            SeasonDecor._dot(s, x, -R * 0.12, R * 0.04, _hex("#ffea00"))
+
+    @staticmethod
+    def _ghost(s, rng, size, color, _sea):
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(-R * 0.6, R * 0.7)
+        pb.line_to(-R * 0.6, -R * 0.2)
+        pb.cubic_to(-R * 0.6, -R * 0.95, R * 0.6, -R * 0.95, R * 0.6, -R * 0.2)
+        pb.line_to(R * 0.6, R * 0.7)
+        for i in range(4):
+            x = R * 0.6 - (i + 0.5) * R * 0.3
+            pb.quad_to(x, R * (0.45 if i % 2 == 0 else 0.95), x - R * 0.15, R * 0.7)
+        pb.close()
+        SeasonDecor._fill(s, pb, _hex("#fafafa", 0.93))
+        for x in (-R * 0.22, R * 0.22):
+            SeasonDecor._oval(s, x, -R * 0.2, R * 0.09, R * 0.14, _hex("#212121"))
+
+    @staticmethod
+    def _spider(s, rng, size, color, _sea):
+        c = _hex("#111111", 0.95)
+        R = size / 2
+        for side in (-1, 1):
+            for k in range(4):
+                a = math.radians(-50 + k * 33)
+                SeasonDecor._line(s, [(0, 0), (side * R * 0.5 * math.cos(a), R * 0.5 * math.sin(a) - R * 0.15),
+                                      (side * R * 0.85 * math.cos(a), R * 0.85 * math.sin(a) + R * 0.1)],
+                                  max(0.8, size * 0.03), c)
+        SeasonDecor._dot(s, 0, 0, R * 0.22, c)
+        SeasonDecor._dot(s, 0, -R * 0.25, R * 0.13, c)
+        SeasonDecor._line(s, [(0, -R * 0.35), (0, -R * 1.6)], max(0.6, size * 0.012), _hex("#e0e0e0", 0.8))
+
+    @staticmethod
+    def _web(s, rng, size, color, _sea):
+        R, c, w = size * 0.6, _hex("#eeeeee", 0.85), max(0.6, size * 0.015)
+        spokes = 8
+        for i in range(spokes):
+            a = 2 * math.pi * i / spokes
+            SeasonDecor._line(s, [(0, 0), (R * math.cos(a), R * math.sin(a))], w, c)
+        for k in (0.3, 0.55, 0.8, 1.0):
+            pts = [(R * k * math.cos(2 * math.pi * i / spokes), R * k * math.sin(2 * math.pi * i / spokes))
+                   for i in range(spokes + 1)]
+            SeasonDecor._line(s, pts, w, c)
+
+    @staticmethod
+    def _candle(s, rng, size, color, _sea):
+        W, H = size * 0.18, size * 0.6
+        SeasonDecor._poly(s, [(-W / 2, -H * 0.3), (W / 2, -H * 0.3), (W / 2, H * 0.7), (-W / 2, H * 0.7)], color)
+        s.save()
+        s.translate(Graphene.Point().init(0, -H * 0.5))
+        SeasonDecor._flame(s, rng, size * 0.35, color, _sea)
+        s.restore()
+
+    @staticmethod
+    def _skull(s, rng, size, color, _sea):
+        R = size / 2
+        white = _hex("#fafafa", 0.95)
+        SeasonDecor._dot(s, 0, -R * 0.1, R * 0.55, white)
+        SeasonDecor._poly(s, [(-R * 0.3, R * 0.3), (R * 0.3, R * 0.3), (R * 0.25, R * 0.62), (-R * 0.25, R * 0.62)], white)
+        for x in (-R * 0.22, R * 0.22):
+            SeasonDecor._dot(s, x, -R * 0.12, R * 0.15, _hex("#212121"))
+            SeasonDecor._dot(s, x, -R * 0.12, R * 0.06, _hex(rng.choice(("#e040fb", "#ff9100", "#40c4ff"))))
+        SeasonDecor._poly(s, [(0, R * 0.05), (-R * 0.07, R * 0.2), (R * 0.07, R * 0.2)], _hex("#212121"))
+        for k in range(-2, 3):
+            SeasonDecor._line(s, [(k * R * 0.1, R * 0.38), (k * R * 0.1, R * 0.58)], max(0.6, size * 0.015), _hex("#424242"))
+
+    @staticmethod
+    def _tree(s, rng, size, color, _sea):
+        green = _hex(rng.choice(("#2e7d32", "#388e3c", "#1b5e20")), 0.97)
+        for k, (y, wd) in enumerate(((-0.3, 0.3), (-0.05, 0.4), (0.2, 0.5))):
+            SeasonDecor._poly(s, [(0, (y - 0.3) * size), (wd * size, y * size + size * 0.08),
+                                  (-wd * size, y * size + size * 0.08)], green)
+        SeasonDecor._poly(s, [(-size * 0.06, size * 0.28), (size * 0.06, size * 0.28), (size * 0.06, size * 0.42),
+                              (-size * 0.06, size * 0.42)], _hex("#5d4037"))
+        s.save()
+        s.translate(Graphene.Point().init(0, -size * 0.6))
+        SeasonDecor._star(s, rng, size * 0.25, _hex("#ffd54f"), _sea)
+        s.restore()
+        for _ in range(5):
+            SeasonDecor._dot(s, rng.uniform(-0.3, 0.3) * size, rng.uniform(-0.3, 0.25) * size, size * 0.04,
+                             _hex(rng.choice(("#e53935", "#ffd54f", "#1e88e5", "#ffffff"))))
+
+    @staticmethod
+    def _gift(s, rng, size, color, _sea):
+        W = size * 0.55
+        box = _hex(rng.choice(("#e53935", "#1e88e5", "#43a047", "#8e24aa")), 0.97)
+        ribbon = _hex(rng.choice(("#ffd54f", "#ffffff")), 0.97)
+        SeasonDecor._poly(s, [(-W / 2, -W / 2), (W / 2, -W / 2), (W / 2, W / 2), (-W / 2, W / 2)], box)
+        SeasonDecor._line(s, [(0, -W / 2), (0, W / 2)], max(1.0, size * 0.07), ribbon)
+        SeasonDecor._line(s, [(-W / 2, 0), (W / 2, 0)], max(1.0, size * 0.07), ribbon)
+        SeasonDecor._oval(s, -W * 0.18, -W * 0.62, W * 0.18, W * 0.1, ribbon)
+        SeasonDecor._oval(s, W * 0.18, -W * 0.62, W * 0.18, W * 0.1, ribbon)
+
+    @staticmethod
+    def _bauble(s, rng, size, color, _sea):
+        R = size * 0.3
+        SeasonDecor._dot(s, 0, 0, R, color)
+        SeasonDecor._dot(s, -R * 0.35, -R * 0.35, R * 0.22, _hex("#ffffff", 0.6))
+        SeasonDecor._poly(s, [(-R * 0.25, -R * 1.2), (R * 0.25, -R * 1.2), (R * 0.25, -R * 0.9), (-R * 0.25, -R * 0.9)],
+                          _hex("#bdbdbd"))
+
+    @staticmethod
+    def _lantern(s, rng, size, color, _sea):
+        SeasonDecor._oval(s, 0, 0, size * 0.3, size * 0.36, _hex("#d50000", 0.97))
+        for y in (-size * 0.36, size * 0.36):
+            SeasonDecor._poly(s, [(-size * 0.14, y - size * 0.04), (size * 0.14, y - size * 0.04),
+                                  (size * 0.14, y + size * 0.04), (-size * 0.14, y + size * 0.04)], _hex("#ffd54f"))
+        for x in (-size * 0.12, 0, size * 0.12):
+            SeasonDecor._line(s, [(x, -size * 0.32), (x * 1.3, 0), (x, size * 0.32)], max(0.6, size * 0.015),
+                              _hex("#ff8a80", 0.8))
+        SeasonDecor._line(s, [(0, size * 0.4), (0, size * 0.62)], max(0.8, size * 0.03), _hex("#ffd54f"))
+
+    @staticmethod
+    def _coin(s, rng, size, color, _sea):
+        R = size * 0.28
+        pb = Gsk.PathBuilder.new()
+        pb.add_circle(Graphene.Point().init(0, 0), R)
+        pb.add_rect(Graphene.Rect().init(-R * 0.25, -R * 0.25, R * 0.5, R * 0.5))
+        s.append_fill(pb.to_path(), Gsk.FillRule.EVEN_ODD, _hex("#ffc107", 0.97))
+
+    @staticmethod
+    def _diya(s, rng, size, color, _sea):
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(-size * 0.35, 0)
+        pb.quad_to(0, size * 0.45, size * 0.35, 0)
+        pb.quad_to(size * 0.42, -size * 0.04, size * 0.45, -size * 0.1)
+        pb.line_to(-size * 0.35, 0)
+        pb.close()
+        SeasonDecor._fill(s, pb, _hex("#e65100", 0.97))
+        s.save()
+        s.translate(Graphene.Point().init(size * 0.3, -size * 0.28))
+        SeasonDecor._flame(s, rng, size * 0.4, color, _sea)
+        s.restore()
+
+    @staticmethod
+    def _david(s, rng, size, color, _sea):
+        R, w = size / 2, max(1.2, size * 0.06)
+        for rot in (0, math.pi):
+            pts = [(R * math.cos(rot - math.pi / 2 + 2 * math.pi * i / 3), R * math.sin(rot - math.pi / 2 + 2 * math.pi * i / 3))
+                   for i in range(4)]
+            SeasonDecor._line(s, pts, w, color)
+
+    @staticmethod
+    def _flag_cz(s, w, h):
+        """The Czech flag across the letters: white over red, a blue wedge from the left."""
+        SeasonDecor._poly(s, [(-2, -2), (w + 2, -2), (w + 2, h / 2), (-2, h / 2)], _hex("#ffffff", 0.95))
+        SeasonDecor._poly(s, [(-2, h / 2), (w + 2, h / 2), (w + 2, h + 2), (-2, h + 2)], _hex("#d7141a", 0.95))
+        SeasonDecor._poly(s, [(-2, -2), (w * 0.45, h / 2), (-2, h + 2)], _hex("#11457e", 0.95))
+
+    @staticmethod
+    def _flag_us(s, w, h):
+        """Stars and stripes across the letters: thirteen stripes, the blue canton with white stars."""
+        for i in range(13):
+            y0 = i * h / 13
+            SeasonDecor._poly(s, [(-2, y0), (w + 2, y0), (w + 2, y0 + h / 13 + 0.5), (-2, y0 + h / 13 + 0.5)],
+                              _hex("#b22234" if i % 2 == 0 else "#ffffff", 0.95))
+        cw, ch = w * 0.4, h * 7 / 13
+        SeasonDecor._poly(s, [(-2, -2), (cw, -2), (cw, ch), (-2, ch)], _hex("#3c3b6e", 0.97))
+        for r in range(5):
+            for c in range(6):
+                SeasonDecor._dot(s, (c + 0.5 + (r % 2) * 0.5) * cw / 6.5, (r + 0.6) * ch / 5.4, h * 0.025,
+                                 _hex("#ffffff"))
 
     @staticmethod
     def _snow_cap(s, rng, w, h):
