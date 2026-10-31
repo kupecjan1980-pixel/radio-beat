@@ -3142,10 +3142,19 @@ class Enhancer:
         parts.append(f"final enhanced {_size(final) if final is not None else '…'}")
         return "Size: " + " / ".join(parts)
 
+    shared_counts: dict = {}  # the other computers' names -> (pictures there, pictures both have together)
+
     def cache_text(self) -> str:
         if self.cache_used < 0:
             return "Cache: counting…"
-        return (f"Cache: {_size(self.cache_used)} used of {self.cache_allowed / 2**30:.1f} GB set aside "
+        try:
+            here = sum(1 for f in os.listdir(UPSCALED_DIR) if f.endswith(".jpg"))
+        except OSError:
+            here = 0
+        pics = f"{here} pictures here"
+        for who, (there, total) in self.shared_counts.items():
+            pics += f", {there} on {who.rsplit('-', 1)[0]}, {total} in all"
+        return (f"Cache: {pics}; {_size(self.cache_used)} used of {self.cache_allowed / 2**30:.1f} GB set aside "
                 f"(80 % of the free space, on this computer)")
 
     def _trim(self) -> None:
@@ -3668,6 +3677,13 @@ class CacheShare:
                     break  # it turns us away (its firewall): it fetches from us itself
             self.got += got
             self.gave += gave
+            jpg = lambda names: {n for n in names if n.endswith(".jpg")}
+            try:  # what each has now, after the exchange
+                theirs = set(json.loads(self._ask(ip, "/radio-beat/v1/list")).get("files", []))
+            except (OSError, ValueError):
+                pass
+            mine = self._names()
+            self.enh.shared_counts[who] = (len(jpg(theirs)), len(jpg(theirs | mine)))
             plays = self._plays(ip, who)
             self._say(f"Shared with {who.rsplit('-', 1)[0]} ({ip}) at {time.strftime('%H:%M')}: "
                       f"{got} pictures fetched, {gave} handed over (since the start: {self.got} in, {self.gave} out)"
@@ -4623,18 +4639,18 @@ class MenuGlass(GlassCard):
 
 
 class ClockView(Gtk.Widget):
-    """Above the volume slider, right of the cover, one under another: the weekday, the day and month, the
+    """Above the volume slider, right of the cover, one under another: the weekday, the day, the month, the
     year and the time (lowest, just above the slider). Each as wide as the room (their letters' outlines, not
     the fonts' line boxes), all made smaller together when they wouldn't fit its height; never touching.
     In the Beat Radio fonts, white with a shadow like the song info's."""
 
-    FONTS = (("Anton", Pango.Weight.NORMAL),) + (("Oswald", Pango.Weight.SEMIBOLD),) * 3
-    ORDER = (1, 2, 3, 0)  # top to bottom: weekday, day and month, year, time
+    FONTS = (("Anton", Pango.Weight.NORMAL),) + (("Oswald", Pango.Weight.SEMIBOLD),) * 4
+    ORDER = (1, 2, 3, 4, 0)  # top to bottom: weekday, day, month, year, time
     GAP = 0.05  # between the lines, of the width
 
     def __init__(self, **kw):
         super().__init__(**kw)
-        self.texts = ("", "", "", "")
+        self.texts = ("", "", "", "", "")
         self.room = (0, 0)
         self.lays = None
         self.colon = True  # the time's colon blinks: a second on, a second off
@@ -4653,18 +4669,19 @@ class ClockView(Gtk.Widget):
         _, ink = self._layout(which, 100)  # measured at 100 pt, then scaled to fit
         return self._layout(which, 100 * min(w / max(1, ink.width), h / max(1, ink.height)) * 0.97)
 
-    def set_room(self, w: int, h: int, texts: tuple[str, str, str, str]) -> None:
+    def set_room(self, w: int, h: int, texts: tuple) -> None:
         if (w, h) == self.room and texts == self.texts and self.lays:
             return
         self.room, self.texts = (w, h), texts
         gap = max(4.0, w * self.GAP)
         lays = [self._fit(i, w, 10000) for i in self.ORDER]
+        gaps = (len(lays) - 1) * gap
         tall = sum(ink.height for _, ink in lays)
-        if tall + 3 * gap > h:  # too tall for the room: all smaller, as much
-            k = max(0.05, (h - 3 * gap) / max(1, tall))
+        if tall + gaps > h:  # too tall for the room: all smaller, as much
+            k = max(0.05, (h - gaps) / max(1, tall))
             lays = [self._fit(i, w * k, 10000) for i in self.ORDER]
         self.lays = (lays, gap)
-        self.set_size_request(w, int(sum(ink.height for _, ink in lays) + 3 * gap) + 1)
+        self.set_size_request(w, int(sum(ink.height for _, ink in lays) + gaps) + 1)
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
@@ -5448,7 +5465,7 @@ class Window(Adw.ApplicationWindow):
     def _tick_clock(self) -> bool:
         now = time.localtime()
         self._clock_texts = (f"{now.tm_hour}:{now.tm_min:02d}", DAYS[now.tm_wday].upper(),
-                             f"{now.tm_mday}. {MONTHS[now.tm_mon - 1]}".upper(), str(now.tm_year))
+                             str(now.tm_mday), MONTHS[now.tm_mon - 1].upper(), str(now.tm_year))
         if self._clock_texts != self.clock.texts:
             self._place_clock()
         self.clock.colon = now.tm_sec % 2 == 0
@@ -5486,7 +5503,9 @@ class Window(Adw.ApplicationWindow):
                 c = c.get_next_sibling()
         room_w = int(W - self.CLOCK_GAP - (cover[2] + self.CLOCK_GAP))
         # above the slider's knob, below the top buttons (a little off both)
-        room_h = int(knob_top - 2 * self.CLOCK_PAD - H * 0.1)
+        ok_h, hb = self.header.compute_bounds(self)
+        below = hb.get_y() + hb.get_height() if ok_h else H * 0.1
+        room_h = int(knob_top - below - 3 * self.CLOCK_PAD)
         if room_w < 60 or room_h < 40:
             self.clock.set_visible(False)
             return False
