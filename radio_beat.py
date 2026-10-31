@@ -320,6 +320,12 @@ def norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
 
+def bare_song(song: str) -> str:
+    """'Green Onions 1962', 'Green Onions (1962)' → 'Green Onions': the stream's year after the name isn't in
+    the song's name ('1999' stays: nothing would be left)."""
+    return re.sub(r"\s*[(\[]?\b(19[3-9]\d|20[0-3]\d)[)\]]?\s*$", "", song).strip() or song
+
+
 def first_artist(artist: str) -> str:
     return re.split(r"\s+(?:&|feat\.?|ft\.?|x|a|and)\s+|,|/", artist, flags=re.I)[0].strip()
 
@@ -400,6 +406,7 @@ def find_track(artist: str, song: str) -> tuple[str, str] | None:
     cmd = ytdlp()
     if not cmd:
         return None
+    song = bare_song(song)
     a, t = _key(first_artist(artist)), _key(re.sub(r"\s*[(\[].*?[)\]]", "", song) or song)
     best, best_score = None, float("-inf")
     for query in (f"{first_artist(artist)} {song}", f"{first_artist(artist)} {song} official audio"):
@@ -455,6 +462,7 @@ def small_cover(url: str) -> str:
 
 def lookup(artist: str, song: str) -> dict | None:
     """{artist, title, album, cover} from Deezer, else iTunes; None if unsure."""
+    song = bare_song(song)
     best, best_score = None, 0
     q = urllib.parse.quote(f"{first_artist(artist)} {song}")
     try:
@@ -1229,6 +1237,9 @@ COMPILATION = re.compile(r"greatest|best of|hits|collection|anthology|essential|
                          r"the very|definitive|platinum|story|years|antologie|výběr|to nej", re.I)
 
 
+_WD_PLACES: dict = {}  # (artist, song) keys -> where Wikidata says the song was recorded
+
+
 def wikidata_release(artist: str, song: str) -> str:
     """The song's original release from Wikidata (the database behind Wikipedia): "1992-05-12", "1992-05" or
     "1992" as precise as it's known, the earliest of the song's items by that performer (the song, its single);
@@ -1258,7 +1269,7 @@ def wikidata_release(artist: str, song: str) -> str:
         perfs = get("action=wbgetentities&props=labels&languages=en|cs&ids=" + "|".join(sorted(perf_ids)[:40]))["entities"]
         by = {pid for pid, p in perfs.items()
               if any(a in _key(l["value"]) or _key(l["value"]) in a for l in p.get("labels", {}).values())}
-        dates = []
+        dates, places = [], []
         for it in named.values():
             c = it.get("claims", {})
             if any(v and v["id"] in by for v in val(c, "P175")):
@@ -1266,6 +1277,12 @@ def wikidata_release(artist: str, song: str) -> str:
                     m = re.match(r"\+(\d{4})-(\d\d)-(\d\d)", (v or {}).get("time", ""))
                     if m:
                         dates.append("-".join(x for x in m.groups() if x != "00"))
+                places += [v["id"] for v in val(c, "P483") if v and v["id"] not in places]  # recorded at
+        if places:  # the studios' names
+            got = get("action=wbgetentities&props=labels&languages=cs|en&ids=" + "|".join(places[:4]))["entities"]
+            names = [(p.get("labels", {}).get("cs") or p.get("labels", {}).get("en") or {}).get("value")
+                     for p in (got[q] for q in places[:4] if q in got)]
+            _WD_PLACES[(a, t)] = [n for n in names if n][:2]
         return min(dates, key=lambda d: (d + "-00-00")[:10]) if dates else ""
     except (OSError, ValueError, KeyError, TypeError):
         return ""
@@ -1316,6 +1333,7 @@ def earliest_release(artist: str, song: str) -> str:
 def track_facts(artist: str, song: str, info: dict | None) -> str:
     """The song's line under the album: its first release and where it was recorded ('Poprvé vydáno 24. září
     1991 …'), else when its album came out; "" when nothing's known."""
+    song = bare_song(song)
     # asked with the names the lookup found (the stream's may be misspelt: "PAVLOVS ´DOG")
     facts = song_facts(info["artist"], info["title"]) if info and not info.get("artist_photo") else ""
     if not facts:
@@ -1327,6 +1345,12 @@ def track_facts(artist: str, song: str, info: dict | None) -> str:
             facts = f"Poprvé vydáno {_date(day)} ({{ago:{day[:4]}}})"
         elif info and (day := album_released(info)):
             facts = f"Album vydáno {_date(day)} ({{ago:{day[:4]}}})"
+        places = [p for n in ([(info["artist"], info["title"])] if info and not info.get("artist_photo") else [])
+                  + [(artist, song)]
+                  for p in _WD_PLACES.get((_key(first_artist(n[0])), _key(re.sub(r"\s*[(\[].*?[)\]]", "", n[1])
+                                                                          .strip() or n[1])), [])]
+        if places:
+            facts = " · ".join(x for x in (facts, f"Nahráno v {' a '.join(dict.fromkeys(places).keys())}") if x)
     return facts
 
 
@@ -1340,6 +1364,51 @@ def album_released(info: dict) -> str:
         except (OSError, ValueError):
             pass
     return ""
+
+
+COVER_PX = 4096
+
+
+def square_cover(data: bytes | None) -> bytes | None:
+    """A cover that isn't square (a YouTube video's still: 16:9, black bars, a timestamp or captions at its
+    edges) made a COVER_PX square: the black bars found and cut off, then a wide picture's middle square (its
+    edges' text cut off with them), a tall one whole with its sides the picture itself blurred and darkened.
+    Square ones as they are."""
+    if not data:
+        return data
+    from gi.repository import GdkPixbuf
+    try:
+        loader = GdkPixbuf.PixbufLoader()
+        loader.write(data)
+        loader.close()
+        pb = loader.get_pixbuf()
+        w, h = pb.get_width(), pb.get_height()
+    except (GLib.Error, AttributeError):
+        return data
+    ff = shutil.which("ffmpeg") or os.path.join(DATA_DIR, "ffmpeg", "ffmpeg")
+    if abs(w - h) <= max(w, h) * 0.03 or not os.access(ff, os.X_OK):
+        return data
+    n = COVER_PX
+    bars = ""
+    try:  # the picture without its black bars (a 4:3 video in a 16:9 still)
+        out = subprocess.run([ff, "-i", "pipe:0", "-vf", "cropdetect=limit=24:round=2:skip=0", "-f", "null", "-"],
+                             input=data, capture_output=True, timeout=30).stderr.decode("utf-8", "ignore")
+        m = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", out)
+        if m and int(m[-1][0]) > w * 0.3 and int(m[-1][1]) > h * 0.3:
+            bars = "crop={}:{}:{}:{},".format(*m[-1])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    graph = (f"[0]{bars}split[b][f];[b]scale=256:256:force_original_aspect_ratio=increase,crop=256:256,"
+             f"gblur=sigma=8,eq=brightness=-0.12,scale={n}:{n}:flags=bicubic[bg];"
+             f"[f]crop='min(iw,ih)':ih,scale={n}:{n}:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
+             f"[bg][fg]overlay=(W-w)/2:(H-h)/2")
+    try:
+        r = subprocess.run([ff, "-v", "error", "-i", "pipe:0", "-filter_complex", graph, "-frames:v", "1",
+                            "-q:v", "2", "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"],
+                           input=data, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return data
+    return r.stdout if r.returncode == 0 and r.stdout else data
 
 
 def fetch(url: str) -> bytes | None:
@@ -6587,7 +6656,7 @@ class App(Adw.Application):
                 if self.track_view is tv:
                     self.update()
                 return False
-            threading.Thread(target=lambda: GLib.idle_add(got, fetch(row["cover"])), daemon=True).start()
+            threading.Thread(target=lambda: GLib.idle_add(got, square_cover(fetch(row["cover"]))), daemon=True).start()
         if not (t and (t["artist"], t["title"]) == (row["artist"], row["title"]) and t["state"] != "failed"):
             self.play_song(row["artist"], row["title"])  # (already playing or paused: left as it is)
         self.update()
@@ -7170,7 +7239,7 @@ class App(Adw.Application):
 
     def _lookup(self, lid, artist, song):
         info = lookup(artist, song)
-        data = fetch(info["cover"]) if info and info.get("cover") else None
+        data = square_cover(fetch(info["cover"])) if info and info.get("cover") else None
         GLib.idle_add(self._looked_up, lid, info, data)
         facts = track_facts(artist, song, info)
         self.db.set_facts(first_artist(artist), song, facts)  # HRÁLO shows it too
