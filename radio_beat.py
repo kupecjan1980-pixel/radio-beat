@@ -4914,7 +4914,7 @@ class Window(Adw.ApplicationWindow):
                           valign=Gtk.Align.CENTER)
         stop.add_css_class("round")
         stop.add_css_class("stop-button")
-        stop.connect("clicked", lambda *_: app.back_to_radio() if app.track_view or app.song_track else app.quit_all())
+        stop.connect("clicked", lambda *_: app.back_to_radio() if app.track_view else app.quit_all())
         self.vol = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
         self.vol.set_round_digits(1)  # follows the mouse pixel by pixel, not in whole percents
         self.vol.set_hexpand(True)
@@ -6613,9 +6613,9 @@ class App(Adw.Application):
             self.win.track_changed()
 
     def song_live(self) -> bool:
-        """The radio's buttons act on the HRÁLO song: it's on the main screen, or playing (paused in HRÁLO,
-        the radio is heard and its buttons are the radio's again)."""
-        return bool(self.track_view or (self.song_track and self.song_track["state"] != "paused"))
+        """The buttons below the cover act on the HRÁLO song only while it's on the main screen (it only looks
+        like the radio's); otherwise they're the radio's, a song playing in HRÁLO or not."""
+        return bool(self.track_view)
 
     def toggle_pause(self):
         if self.song_live():  # a HRÁLO song playing or on the screen: its pause
