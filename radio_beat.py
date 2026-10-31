@@ -1191,6 +1191,13 @@ class History:
             return self.db.execute("SELECT at, artist, title, album, show, cover, facts FROM plays WHERE at < ? "
                                    "ORDER BY at DESC LIMIT ?", (before, n)).fetchall()
 
+    def missing(self) -> list[tuple]:
+        """(artist, title) of the songs some play of which still lacks its picture or track info, newest first."""
+        with self.lock:
+            return self.db.execute("SELECT artist, title, max(cover IS NULL), max(facts IS NULL) FROM plays "
+                                   "WHERE cover IS NULL OR facts IS NULL GROUP BY lower(artist), lower(title) "
+                                   "ORDER BY max(at) DESC").fetchall()
+
     def set_facts(self, artist: str, title: str, facts: str) -> None:
         """A song's first release and such ("" when nothing's known): every play of it lacking them."""
         with self.lock, self.db:
@@ -6498,8 +6505,29 @@ class App(Adw.Application):
         self.set_accels_for_action("app.quit", ["<Control>q"])
 
     # startup / command line
+    TEXT_SCALE = 1.6364  # the desktop's text size as on Omarchy (its 20 px fonts): the same on every computer
+
+    def _fill_history(self) -> bool:
+        """In the background, now and then: every song in the history lacking its picture or track info (new
+        plays, another computer's, ones cleared after the lookups got better) looked up, one at a time."""
+        import sqlite3
+        try:
+            queued = {(a.lower(), t.lower()) for a, t, *_ in self._art_queue}
+            for artist, title, cover, facts in self.db.missing():
+                if (artist.lower(), title.lower()) not in queued:  # (asked before: plays come in later too)
+                    self._art_asked.discard((artist.lower(), title.lower()))
+                self.want_song_art(artist, title, bool(cover), bool(facts))
+        except sqlite3.Error:
+            pass
+        return GLib.SOURCE_CONTINUE
+
     def do_startup(self):
         Adw.Application.do_startup(self)
+        # text as big as on this desktop everywhere (KDE says 1.0, Omarchy 1.64): the 'i' panel and the menus
+        # look the same on the DeskMini's full HD as on a 4K screen at 2x
+        Gtk.Settings.get_default().set_property("gtk-xft-dpi", int(96 * 1024 * self.TEXT_SCALE))
+        GLib.timeout_add_seconds(60, lambda: (self._fill_history(), False)[1])
+        GLib.timeout_add_seconds(1800, self._fill_history)
         self.fonts_ok = load_fonts()
         css = Gtk.CssProvider()
         css.load_from_data(CSS)
