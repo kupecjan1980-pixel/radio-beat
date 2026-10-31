@@ -1516,7 +1516,7 @@ COVER_PX = 4096
 
 def square_cover(data: bytes | None) -> bytes | None:
     """A cover that isn't square (a YouTube video's still: 16:9, black bars, a timestamp or captions at its
-    edges) made a COVER_PX square: the black bars found and cut off, then a wide picture's middle square (its
+    edges) made square, at its own resolution (COVER_PX at most): the black bars found and cut off, then a wide picture's middle square (its
     edges' text cut off with them), a tall one whole with its sides the picture itself blurred and darkened.
     Square ones as they are."""
     if not data:
@@ -1533,16 +1533,19 @@ def square_cover(data: bytes | None) -> bytes | None:
     ff = shutil.which("ffmpeg") or os.path.join(DATA_DIR, "ffmpeg", "ffmpeg")
     if abs(w - h) <= max(w, h) * 0.03 or not os.access(ff, os.X_OK):
         return data
-    n = COVER_PX
-    bars = ""
+    bars, side = "", min(w, h)
     try:  # the picture without its black bars (a 4:3 video in a 16:9 still)
         out = subprocess.run([ff, "-i", "pipe:0", "-vf", "cropdetect=limit=24:round=2:skip=0", "-f", "null", "-"],
                              input=data, capture_output=True, timeout=30).stderr.decode("utf-8", "ignore")
         m = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", out)
         if m and int(m[-1][0]) > w * 0.3 and int(m[-1][1]) > h * 0.3:
             bars = "crop={}:{}:{}:{},".format(*m[-1])
+            side = min(int(m[-1][0]), int(m[-1][1]))
     except (OSError, subprocess.SubprocessError):
         pass
+    # Its own resolution (at most COVER_PX): a small still stays small, so the enhancing sees it needs the AI
+    # upscaling (blown up to 4096 here by plain resizing it looked big enough, and stayed blurry).
+    n = max(64, min(COVER_PX, side))
     graph = (f"[0]{bars}split[b][f];[b]scale=256:256:force_original_aspect_ratio=increase,crop=256:256,"
              f"gblur=sigma=8,eq=brightness=-0.12,scale={n}:{n}:flags=bicubic[bg];"
              f"[f]crop='min(iw,ih)':ih,scale={n}:{n}:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
@@ -7895,7 +7898,9 @@ class App(Adw.Application):
         if data:
             try:
                 self.cover_tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
-                self.upscale_src["cover"] = (info["cover"], data)
+                # (a video's still is squared at its own size now: not the old blown-up one's cached result)
+                key = info["cover"] + ("#square2" if "ytimg.com" in info["cover"] else "")
+                self.upscale_src["cover"] = (key, data)
                 self.orig_tex["cover"] = self.cover_tex
                 self._enhance("cover")
             except GLib.Error:
