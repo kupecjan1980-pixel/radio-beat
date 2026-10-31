@@ -6139,7 +6139,7 @@ class Window(Adw.ApplicationWindow):
             self.show_pic.set_from_paintable(tex or a.logo_tex)
         self.vol_icon.set_from_icon_name("audio-volume-muted-symbolic" if a.muted else "audio-volume-high-symbolic")
         self.discs[2].set_tooltip_text("Sound on" if a.muted else "Mute")
-        paused = a.song_track["state"] != "playing" if a.song_track else a.paused  # a HRÁLO song: its state
+        paused = a.song_track["state"] != "playing" if a.song_track and a.song_live() else a.paused  # a HRÁLO song: its state
         self.play_btn.set_icon_name("media-playback-start-symbolic" if paused else "media-playback-pause-symbolic")
         self.play_btn.set_tooltip_text("Play" if paused else "Pause")
         if a.error:
@@ -6551,6 +6551,8 @@ class App(Adw.Application):
             return
         t["state"] = "paused" if t["state"] == "playing" else "playing"
         self.tmpv.pause(t["state"] == "paused")
+        if self.mpv:  # the song paused: the radio heard meanwhile; playing again: the radio muted again
+            self.mpv.mute(self.muted or t["state"] == "playing")
         self._track_changed()
 
     def stop_song(self, resume: bool = True) -> None:
@@ -6610,8 +6612,13 @@ class App(Adw.Application):
         if self.win:
             self.win.track_changed()
 
+    def song_live(self) -> bool:
+        """The radio's buttons act on the HRÁLO song: it's on the main screen, or playing (paused in HRÁLO,
+        the radio is heard and its buttons are the radio's again)."""
+        return bool(self.track_view or (self.song_track and self.song_track["state"] != "paused"))
+
     def toggle_pause(self):
-        if self.track_view or self.song_track:  # a HRÁLO song playing or on the screen: its pause
+        if self.song_live():  # a HRÁLO song playing or on the screen: its pause
             t = self.song_track
             if t and t["state"] in ("playing", "paused"):
                 self.pause_song()
@@ -6738,7 +6745,7 @@ class App(Adw.Application):
                                                            capture_output=True), daemon=True).start()
         else:
             if self.mpv:  # (the radio stays muted while a HRÁLO song plays)
-                self.mpv.mute(self.muted or bool(self.song_track and self.song_track["state"] in ("playing", "paused")))
+                self.mpv.mute(self.muted or bool(self.song_track and self.song_track["state"] == "playing"))
             if self.tmpv:
                 self.tmpv.mute(self.muted)
         self.update()
