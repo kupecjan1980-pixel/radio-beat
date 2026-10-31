@@ -3324,10 +3324,10 @@ CSS = b"""
 .puddle label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
 .puddle .puddle-now label { font-weight: 700; }
 .puddle .boxed-list, .puddle .boxed-list > row { background: rgba(255,255,255,0.04); }
-.puddle button.puddle-tab { padding: 2px 10px; min-height: 0; border-radius: 999px; color: white;
-                            background: rgba(255,255,255,0.10); font-weight: 700; }
-.puddle button.puddle-tab:hover { background: rgba(255,255,255,0.22); }
-.puddle button.puddle-tab.on-air { background: #E3051A; }
+.puddle button.puddle-tab { padding: 4px 14px; min-height: 0; border-radius: 999px; color: white;
+                            background: none; box-shadow: none; font-weight: 700; }  /* the glass is the tab */
+.puddle button.puddle-tab:hover { background: rgba(255,255,255,0.10); }
+.puddle button.puddle-tab.on-air { background: none; }
 .puddle .puddle-now { background: rgba(227,5,26,0.25); border-radius: 10px; padding: 6px; }
 .puddle .puddle-past { opacity: 0.55; }
 .viewer { background: rgba(0,0,0,0.93); }
@@ -4117,6 +4117,14 @@ class GlassCard(Gtk.Box):
         edge = [_rgba(255, 255, 255, 0.30), _rgba(255, 255, 255, 0.12),
                 _rgba(255, 255, 255, 0.08), _rgba(255, 255, 255, 0.12)]  # top, right, bottom, left
         snap.append_border(rr, [1.0, 1.0, 1.0, 1.0], edge)
+
+
+class PillGlass(GlassCard):
+    """Glass the shape of a pill (round ends, half its height): the 'i' panel's tabs, like the round buttons."""
+
+    def do_size_allocate(self, width, height, baseline):
+        self.radius = height / 2
+        Gtk.Box.do_size_allocate(self, width, height, baseline)
 
 
 class MenuGlass(GlassCard):
@@ -5209,12 +5217,21 @@ class Window(Adw.ApplicationWindow):
                                        min_children_per_line=1, max_children_per_line=len(self.PUDDLE_MODES),
                                        homogeneous=False)
         self.puddle_tabs = []
+        self.puddle_pills = []
         for i in range(len(self.PUDDLE_MODES)):
-            tab = Gtk.Button(label="", has_frame=False, halign=Gtk.Align.CENTER, hexpand=True)
+            tab = Gtk.Button(label="", has_frame=False)
             tab.add_css_class("puddle-tab")
             tab.connect("clicked", lambda _b, i=i: self._puddle_go(i))
+            # in a pill of glass like the pause, stop and gear buttons (the chosen one red like pause)
+            pill = PillGlass([(self.backdrop, 0.45), (self.cover, 0.0)], halign=Gtk.Align.CENTER, hexpand=True)
+            pill.mag, pill.concave, pill.depth = 1.3, True, False
+            pill.set_homogeneous(True)
+            pill.append(tab)
+            self.backdrop.watchers.append(pill)
+            self.cover.watchers.append(pill)
             self.puddle_tabs.append(tab)
-            self.puddle_head.append(tab)
+            self.puddle_pills.append(pill)
+            self.puddle_head.append(pill)
         self.puddle_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         self.puddle_scroll = PinnedScroll(child=self.puddle_list, vexpand=True,
                                           hscrollbar_policy=Gtk.PolicyType.NEVER,
@@ -5499,6 +5516,8 @@ class Window(Adw.ApplicationWindow):
         for i, tab in enumerate(self.puddle_tabs):
             tab.set_label(a.cz(self.PUDDLE_MODES[i]))
             (tab.add_css_class if i == self.puddle_mode else tab.remove_css_class)("on-air")
+            self.puddle_pills[i].color = (227, 5, 26, 0.55) if i == self.puddle_mode else None
+            self.puddle_pills[i].queue_draw()
         self._clear_puddle()
         self._played_before = None
         self._art_wait.clear()
