@@ -329,6 +329,11 @@ def _score(artist: str, song: str, cand_artist: str, cand_title: str) -> int:
     return score
 
 
+def small_cover(url: str) -> str:
+    """A cover's small version (Deezer 250 px, iTunes 300 px): enough for a list's picture."""
+    return re.sub(r"/\d+x\d+-", "/250x250-", url) if "dzcdn" in url else re.sub(r"\d+x\d+bb", "300x300bb", url)
+
+
 def lookup(artist: str, song: str) -> dict | None:
     """{artist, title, album, cover} from Deezer, else iTunes; None if unsure."""
     best, best_score = None, 0
@@ -830,6 +835,8 @@ class History:
             self.db.execute("CREATE INDEX IF NOT EXISTS plays_at ON plays (at DESC)")
             self.db.execute("CREATE TABLE IF NOT EXISTS hosts (name TEXT PRIMARY KEY, shows TEXT, first REAL, "
                             "last REAL)")
+            if "cover" not in [r[1] for r in self.db.execute("PRAGMA table_info(plays)")]:
+                self.db.execute("ALTER TABLE plays ADD COLUMN cover TEXT")  # its picture ("": none found)
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:  # once: a song logged twice (the app
                 kept: dict = {}                                             # restarted during it) kept once
                 gone = []
@@ -849,27 +856,37 @@ class History:
             if self.db.execute("SELECT 1 FROM plays WHERE at > ? AND lower(artist) = lower(?) AND lower(title) = "
                                "lower(?)", (now - self.SAME, artist, title)).fetchone():
                 return  # logged already (the app restarted during the song)
-            self.db.execute("INSERT INTO plays VALUES (?, ?, ?, NULL, ?, ?)", (now, artist, title, show, host))
+            self.db.execute("INSERT INTO plays VALUES (?, ?, ?, NULL, ?, ?, NULL)", (now, artist, title, show, host))
         if self.on_play:
             self.on_play()
 
     on_play = None  # called after a play is logged (the HRÁLO view shows it)
 
     def page(self, before: float, n: int = 60) -> list[tuple]:
-        """(at, artist, title, album, show) of the plays before `before`, newest first."""
+        """(at, artist, title, album, show, cover) of the plays before `before`, newest first."""
         with self.lock:
-            return self.db.execute("SELECT at, artist, title, album, show FROM plays WHERE at < ? ORDER BY at DESC "
-                                   "LIMIT ?", (before, n)).fetchall()
+            return self.db.execute("SELECT at, artist, title, album, show, cover FROM plays WHERE at < ? ORDER BY at "
+                                   "DESC LIMIT ?", (before, n)).fetchall()
+
+    def song_art(self, artist: str, title: str, album: str | None, cover: str) -> None:
+        """A song's album and picture, looked up later ("" when none was found): every play of it lacking them."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE plays SET cover = ? WHERE lower(artist) = lower(?) AND lower(title) = lower(?) "
+                            "AND cover IS NULL", (cover, artist, title))
+            if album:
+                self.db.execute("UPDATE plays SET album = ? WHERE lower(artist) = lower(?) AND lower(title) = "
+                                "lower(?) AND album IS NULL", (album, artist, title))
 
     def count(self) -> int:
         with self.lock:
             return self.db.execute("SELECT COUNT(*) FROM plays").fetchone()[0]
 
     def export(self, since: float, n: int = 2000) -> list[list]:
-        """Plays after `since`, oldest first: [at, artist, title, album, show, host] (for the other computers)."""
+        """Plays after `since`, oldest first: [at, artist, title, album, show, host, cover] (for the other
+        computers)."""
         with self.lock:
-            return [list(r) for r in self.db.execute("SELECT at, artist, title, album, show, host FROM plays WHERE "
-                                                     "at > ? ORDER BY at LIMIT ?", (since, n)).fetchall()]
+            return [list(r) for r in self.db.execute("SELECT at, artist, title, album, show, host, cover FROM plays "
+                                                     "WHERE at > ? ORDER BY at LIMIT ?", (since, n)).fetchall()]
 
     def merge(self, rows) -> int:
         """Plays from another computer: each kept unless this one logged it too (the same song within SAME s;
@@ -877,28 +894,35 @@ class History:
         new = 0
         with self.lock, self.db:
             for r in rows:
-                if not (isinstance(r, list) and len(r) == 6 and isinstance(r[0], (int, float))
+                if isinstance(r, list) and len(r) == 6:
+                    r = r + [None]  # an older Rádio Beat: no picture
+                if not (isinstance(r, list) and len(r) == 7 and isinstance(r[0], (int, float))
                         and all(isinstance(x, str) and len(x) <= 300 for x in r[1:3])
                         and all(x is None or (isinstance(x, str) and len(x) <= 300) for x in r[3:])
                         and 1e9 < r[0] < time.time() + 86400):
                     continue
-                at, artist, title, album, show, host = r
-                same = self.db.execute("SELECT rowid, album FROM plays WHERE at BETWEEN ? AND ? AND lower(artist) = "
-                                       "lower(?) AND lower(title) = lower(?) LIMIT 1",
+                at, artist, title, album, show, host, cover = r
+                if cover and not cover.startswith("https://"):
+                    cover = None
+                same = self.db.execute("SELECT rowid, album, cover FROM plays WHERE at BETWEEN ? AND ? AND "
+                                       "lower(artist) = lower(?) AND lower(title) = lower(?) LIMIT 1",
                                        (at - self.SAME, at + self.SAME, artist, title)).fetchone()
                 if same:
                     if album and not same[1]:
                         self.db.execute("UPDATE plays SET album = ? WHERE rowid = ?", (album, same[0]))
+                    if cover and not same[2]:
+                        self.db.execute("UPDATE plays SET cover = ? WHERE rowid = ?", (cover, same[0]))
                     continue
-                self.db.execute("INSERT INTO plays VALUES (?, ?, ?, ?, ?, ?)", (at, artist, title, album, show, host))
+                self.db.execute("INSERT INTO plays VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (at, artist, title, album, show, host, cover))
                 new += 1
         return new
 
-    def album(self, artist: str, title: str, album: str) -> None:
-        """The album, once the lookup found it (the newest play of that song)."""
+    def album(self, artist: str, title: str, album: str, cover: str | None = None) -> None:
+        """The album and its picture, once the lookup found them (the newest play of that song)."""
         with self.lock, self.db:
-            self.db.execute("UPDATE plays SET album = ? WHERE rowid = (SELECT rowid FROM plays WHERE artist = ? "
-                            "AND title = ? ORDER BY at DESC LIMIT 1)", (album, artist, title))
+            self.db.execute("UPDATE plays SET album = ?, cover = coalesce(?, cover) WHERE rowid = (SELECT rowid FROM "
+                            "plays WHERE artist = ? AND title = ? ORDER BY at DESC LIMIT 1)", (album, cover, artist, title))
 
     def host(self, name: str, show: str | None) -> None:
         now = time.time()
@@ -4971,6 +4995,7 @@ class Window(Adw.ApplicationWindow):
         self.puddle_scroll.get_vadjustment().connect("value-changed", lambda *_: self._played_more())
         self._played_before = None  # the oldest play listed (None: not this view)
         self._played_day = None
+        self._art_wait: dict = {}  # (artist, title) -> its pictures in HRÁLO waiting for the lookup
         stage = Gtk.Overlay(child=self.puddle_scroll, vexpand=True)
         stage.add_overlay(self.puddle_pin)
         self.puddle.append(self.puddle_head)
@@ -5163,6 +5188,7 @@ class Window(Adw.ApplicationWindow):
             tex = self.app.show_pics.get(img) if img else None
             pic.set_from_paintable(tex or self.app.logo_tex)
             self.app.want_show_pic(img)
+            self._last_pic = pic
             row.append(pic)
             box.set_hexpand(True)
             row.append(box)
@@ -5217,6 +5243,7 @@ class Window(Adw.ApplicationWindow):
             (tab.add_css_class if i == self.puddle_mode else tab.remove_css_class)("on-air")
         self._clear_puddle()
         self._played_before = None
+        self._art_wait.clear()
         now = time.localtime()
         if mode == "ZAJÍMAVOSTI":
             if a.about:
@@ -5265,16 +5292,29 @@ class Window(Adw.ApplicationWindow):
                 self._puddle_block("", "", self.app.cz("Zatím nic nehrálo."))
             self._played_before = 0.0  # all shown
             return
-        for at, artist, title, album, show in rows:
+        for at, artist, title, album, show, cover in rows:
             t = time.localtime(at)
             day = (t.tm_year, t.tm_yday)
             if day != self._played_day:
                 self._played_day = day
                 self._puddle_block("", f"{DAYS[t.tm_wday].upper()} {t.tm_mday}. {MONTHS[t.tm_mon - 1].upper()} "
                                        f"{t.tm_year}", "")
+            # with its album's picture like the shows' (looked up when it has none yet: the logo meanwhile)
             self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{artist} – {plain_title(title)}",
-                               " · ".join(x for x in (plain_title(album or ""), show) if x))
+                               " · ".join(x for x in (plain_title(album or ""), show) if x),
+                               img=small_cover(cover) if cover else "")
+            if cover is None:
+                self._art_wait.setdefault((artist.lower(), title.lower()), []).append(self._last_pic)
+                self.app.want_song_art(artist, title)
         self._played_before = rows[-1][0]
+
+    def song_art_got(self, artist: str, title: str, url: str) -> None:
+        """A played song's picture looked up: its rows in HRÁLO show it (once it's fetched)."""
+        for pic in self._art_wait.pop((artist.lower(), title.lower()), []):
+            pic.img_url = url
+            if self.app.show_pics.get(url):
+                pic.set_from_paintable(self.app.show_pics[url])
+        self.app.want_show_pic(url)
 
     def played_new(self) -> None:
         """A song just logged: HRÁLO open at its top shows it (further down, it's there on the next look)."""
@@ -5593,6 +5633,9 @@ class App(Adw.Application):
         self._feed = threading.Event()
         threading.Thread(target=self._feeder, daemon=True).start()
         self.db = History(os.path.join(DATA_DIR, "history.db"))
+        self._art_asked: set = set()  # played songs whose picture was looked up this run (HRÁLO)
+        self._art_queue: list = []
+        self._art_busy = False
         self.host_info: dict[str, str] = {}  # every host seen -> what Wikipedia says (Czech)
         self._last_lead = ""
         self.station_about = ""
@@ -6127,6 +6170,30 @@ class App(Adw.Application):
                 threading.Thread(target=work, daemon=True).start()
         self._enhance_show()
 
+    def want_song_art(self, artist: str, title: str) -> None:
+        """A played song with no picture yet: looked up (one at a time, a little apart: the services' limits),
+        remembered in the history, shown in HRÁLO."""
+        key = (artist.lower(), title.lower())
+        if key in self._art_asked:
+            return
+        self._art_asked.add(key)
+        self._art_queue.append((artist, title))
+        if not self._art_busy:
+            self._art_busy = True
+            threading.Thread(target=self._art_worker, daemon=True).start()
+
+    def _art_worker(self) -> None:
+        while self._art_queue:
+            artist, title = self._art_queue.pop(0)
+            info = lookup(artist, title)
+            cover = (info or {}).get("cover") or ""
+            self.db.song_art(artist, title, (info or {}).get("album"), cover)
+            if cover:
+                url = small_cover(cover)
+                GLib.idle_add(lambda a=artist, t=title, u=url: (self.win and self.win.song_art_got(a, t, u), False)[1])
+            time.sleep(0.4)
+        self._art_busy = False
+
     def want_show_pic(self, url: str) -> None:
         """A show's picture for the 'i' puddle's lineup: fetched once; the puddle fills it in."""
         if url and url not in self.show_pics:
@@ -6579,7 +6646,7 @@ class App(Adw.Application):
             return False  # song changed meanwhile
         self.info = info
         if info and info.get("album") and self.artist_raw and self.song:
-            self.db.album(first_artist(self.artist_raw), self.song, info["album"])
+            self.db.album(first_artist(self.artist_raw), self.song, info["album"], info.get("cover"))
         if data:
             try:
                 self.cover_tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
