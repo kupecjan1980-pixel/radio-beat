@@ -317,13 +317,28 @@ def _json(url: str):
         return json.load(r)
 
 
+def _key(s: str) -> str:
+    """A name as compared: no brackets, no "- Remastered 2002" or such, no leading "The", no spaces or hyphens
+    ("LOCOMOTION" = "The Loco-Motion (Remastered 2002)", "ACDC" = "AC/DC")."""
+    s = re.sub(r"\s+-\s+.*\b(remaster\w*|live|mono|stereo|single|edit|version|mix)\b.*$", "", s, flags=re.I)
+    return re.sub(r"^the ", "", norm(s)).replace(" ", "")
+
+
 def _score(artist: str, song: str, cand_artist: str, cand_title: str) -> int:
-    a, t = norm(first_artist(artist)), norm(song)
-    ca, ct = norm(cand_artist), norm(cand_title)
+    import difflib
+    a, t = _key(first_artist(artist)), _key(song)
+    ca, ct = _key(cand_artist), _key(cand_title)
     if not ca or (a not in ca and ca not in a):
         return -1
     score = 2 if ca == a else 1
-    score += 3 if ct == t else (1 if t in ct or ct in t else -2)
+    if ct == t:
+        score += 3
+    elif len(t) >= 4 and (t in ct or ct in t):
+        score += 1
+    elif difflib.SequenceMatcher(None, t, ct).ratio() >= 0.85:  # a letter or two off (the stream's spelling)
+        score += 2
+    else:
+        score -= 2
     if "live" in cand_title.lower() and "live" not in song.lower():
         score -= 1
     return score
@@ -361,7 +376,19 @@ def lookup(artist: str, song: str) -> dict | None:
                         "released": (x.get("releaseDate") or "")[:10]}
     except (OSError, ValueError, KeyError):
         pass
-    return best if best_score >= 3 else None
+    if best_score >= 3:
+        return best
+    # the song not found anywhere: at least the artist's photo (always a picture)
+    try:
+        for x in _json(f"https://api.deezer.com/search/artist?q={urllib.parse.quote(first_artist(artist))}&limit=5"
+                       ).get("data", []):
+            if _key(x.get("name") or "") == _key(first_artist(artist)) and x.get("picture_xl") \
+                    and "/artist//" not in x["picture_xl"]:  # (an empty placeholder has no picture id)
+                return {"artist": x["name"], "title": song, "album": None, "cover": x["picture_xl"],
+                        "artist_photo": True}
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
 
 
 # --- song facts: first release and where it was recorded (MusicBrainz) ---------------
@@ -849,6 +876,9 @@ class History:
                         kept[song] = at
                 self.db.executemany("DELETE FROM plays WHERE rowid = ?", gone)
                 self.db.execute("PRAGMA user_version = 1")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:  # once: songs not found before looked up
+                self.db.execute("UPDATE plays SET cover = NULL WHERE cover = ''")  # again (a better match now)
+                self.db.execute("PRAGMA user_version = 2")
 
     def play(self, artist: str, title: str, show: str | None, host: str | None) -> None:
         now = time.time()
@@ -3101,6 +3131,8 @@ CSS = b"""
 .puddle button.puddle-tab.on-air { background: #E3051A; }
 .puddle .puddle-now { background: rgba(227,5,26,0.25); border-radius: 10px; padding: 6px; }
 .puddle .puddle-past { opacity: 0.55; }
+.viewer { background: rgba(0,0,0,0.93); }
+.viewer label { color: white; }
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
 popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
 popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
@@ -4996,6 +5028,9 @@ class Window(Adw.ApplicationWindow):
         self._played_before = None  # the oldest play listed (None: not this view)
         self._played_day = None
         self._art_wait: dict = {}  # (artist, title) -> its pictures in HRÁLO waiting for the lookup
+        self._played_rows: list[dict] = []  # HRÁLO's songs as listed (the full-screen viewer goes through them)
+        self._viewing = None  # the viewer's song (index), None: closed
+        self._big_pics: dict = {}  # cover URL -> big texture (the viewer: the last few)
         stage = Gtk.Overlay(child=self.puddle_scroll, vexpand=True)
         stage.add_overlay(self.puddle_pin)
         self.puddle.append(self.puddle_head)
@@ -5018,6 +5053,7 @@ class Window(Adw.ApplicationWindow):
         gear_body = Puddle(behind, orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.END, valign=Gtk.Align.START)
         gear_body.append(self.menu_content)
         self.gear_water = Water(self, self.gear_tile, gear_body, overlay)
+        self._make_viewer(overlay)  # above the panels
         self.waters = [self.info_water, self.gear_water]
         # a click anywhere else draws it back into its button
         outside = Gtk.GestureClick(button=0)
@@ -5244,6 +5280,7 @@ class Window(Adw.ApplicationWindow):
         self._clear_puddle()
         self._played_before = None
         self._art_wait.clear()
+        self._played_rows = []
         now = time.localtime()
         if mode == "ZAJÍMAVOSTI":
             if a.about:
@@ -5303,18 +5340,93 @@ class Window(Adw.ApplicationWindow):
             self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{artist} – {plain_title(title)}",
                                " · ".join(x for x in (plain_title(album or ""), show) if x),
                                img=small_cover(cover) if cover else "")
+            self._played_rows.append({"at": at, "artist": artist, "title": title, "album": album, "show": show,
+                                      "cover": cover})
+            click = Gtk.GestureClick()  # the picture full screen
+            click.connect("released", lambda *_, i=len(self._played_rows) - 1: self.view_played(i))
+            self._last_pic.add_controller(click)
+            self._last_pic.set_cursor_from_name("pointer")
             if cover is None:
                 self._art_wait.setdefault((artist.lower(), title.lower()), []).append(self._last_pic)
                 self.app.want_song_art(artist, title)
         self._played_before = rows[-1][0]
 
-    def song_art_got(self, artist: str, title: str, url: str) -> None:
+    def song_art_got(self, artist: str, title: str, cover: str, album: str | None) -> None:
         """A played song's picture looked up: its rows in HRÁLO show it (once it's fetched)."""
+        url = small_cover(cover)
         for pic in self._art_wait.pop((artist.lower(), title.lower()), []):
             pic.img_url = url
             if self.app.show_pics.get(url):
                 pic.set_from_paintable(self.app.show_pics[url])
+        for row in self._played_rows:  # the viewer: the big one
+            if (row["artist"].lower(), row["title"].lower()) == (artist.lower(), title.lower()):
+                row["cover"] = cover
+                row["album"] = row["album"] or album
         self.app.want_show_pic(url)
+
+    def _make_viewer(self, overlay) -> None:
+        """HRÁLO's pictures full screen: a click on one opens it, the wheel goes to the newer / older song, a click
+        or Esc closes it."""
+        v = self.viewer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, visible=False)
+        v.add_css_class("viewer")
+        self.viewer_pic = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, vexpand=True,
+                                      hexpand=True, margin_top=24, margin_start=24, margin_end=24)
+        self.viewer_title = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, margin_start=24, margin_end=24)
+        self.viewer_title.add_css_class("show-title")
+        self.viewer_sub = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, margin_start=24, margin_end=24,
+                                    margin_bottom=24)
+        self.viewer_sub.add_css_class("show-sub")
+        for w in (self.viewer_pic, self.viewer_title, self.viewer_sub):
+            v.append(w)
+        click = Gtk.GestureClick()
+        click.connect("released", lambda *_: self.view_played(None))
+        v.add_controller(click)
+        wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL
+                                          | Gtk.EventControllerScrollFlags.DISCRETE)
+        wheel.connect("scroll", lambda _c, _dx, dy: (self._view_step(1 if dy > 0 else -1), True)[1])
+        v.add_controller(wheel)
+        overlay.add_overlay(v)
+
+    def view_played(self, i: int | None) -> None:
+        """The i-th song of HRÁLO full screen (None: closed)."""
+        self._viewing = i
+        if i is None or not 0 <= i < len(self._played_rows):
+            self._viewing = None
+            self.viewer.set_visible(False)
+            return
+        row = self._played_rows[i]
+        t = time.localtime(row["at"])
+        self.viewer_title.set_text(f"{row['artist']} – {plain_title(row['title'])}")
+        self.viewer_sub.set_text(" · ".join(x for x in (
+            f"{DAYS[t.tm_wday]} {t.tm_mday}. {MONTHS[t.tm_mon - 1]} {t.tm_year} {t.tm_hour}:{t.tm_min:02d}",
+            plain_title(row["album"] or ""), row["show"]) if x))
+        cover = row["cover"]
+        small = self.app.show_pics.get(small_cover(cover)) if cover else None
+        self.viewer_pic.set_paintable(self._big_pics.get(cover) or small or self.app.logo_tex)
+        self.viewer.set_visible(True)
+        if cover and cover not in self._big_pics:
+            def got(data, cover=cover, i=i):
+                try:
+                    tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data)) if data else None
+                except GLib.Error:
+                    tex = None
+                if tex:
+                    self._big_pics[cover] = tex
+                    while len(self._big_pics) > 12:
+                        self._big_pics.pop(next(iter(self._big_pics)))
+                    if self._viewing == i:
+                        self.viewer_pic.set_paintable(tex)
+                return False
+            threading.Thread(target=lambda: GLib.idle_add(got, fetch(cover)), daemon=True).start()
+
+    def _view_step(self, d: int) -> None:
+        if self._viewing is None:
+            return
+        i = self._viewing + d
+        if i >= len(self._played_rows) - 3 and self._played_before:  # near the list's end: older ones loaded
+            self._played_more(force=True)
+        if 0 <= i < len(self._played_rows):
+            self.view_played(i)
 
     def played_new(self) -> None:
         """A song just logged: HRÁLO open at its top shows it (further down, it's there on the next look)."""
@@ -5513,6 +5625,9 @@ class Window(Adw.ApplicationWindow):
         return True
 
     def on_key(self, _ctl, keyval, _code, _state):
+        if keyval == Gdk.KEY_Escape and self._viewing is not None:
+            self.view_played(None)
+            return True
         if keyval == Gdk.KEY_F11 or (keyval == Gdk.KEY_Escape and self.is_fullscreen()):
             self.toggle_full()
             return True
@@ -6189,8 +6304,9 @@ class App(Adw.Application):
             cover = (info or {}).get("cover") or ""
             self.db.song_art(artist, title, (info or {}).get("album"), cover)
             if cover:
-                url = small_cover(cover)
-                GLib.idle_add(lambda a=artist, t=title, u=url: (self.win and self.win.song_art_got(a, t, u), False)[1])
+                album = None if (info or {}).get("artist_photo") else (info or {}).get("album")
+                GLib.idle_add(lambda a=artist, t=title, c=cover, al=album:
+                              (self.win and self.win.song_art_got(a, t, c, al), False)[1])
             time.sleep(0.4)
         self._art_busy = False
 
