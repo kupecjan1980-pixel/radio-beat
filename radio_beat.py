@@ -2355,7 +2355,43 @@ CZ_STEPS = (("quick AI redraw", "rychlé AI překreslení"), ("AI redraw for det
 def cz_steps(text: str) -> str:
     for en, cz in CZ_STEPS:
         text = text.replace(en, cz)
-    return re.sub(r"(\d)\.(\d+) (s|MB|GB)\b", r"\1,\2 \3", text)  # Czech decimal commas
+    text = re.sub(r"(\d)\.(\d+) (s|MB|GB)\b", r"\1,\2 \3", text)  # Czech decimal commas
+    # the first Czech wording of what a step waited for, as it reads now
+    text = re.sub(r"GPU vytížená (\d+) %", r"vytížení GPU \1 %", text)
+    text = re.sub(r"(?<!CPU )čekal na: ", "CPU čekal na: ", text)
+    text = text.replace("na GPU (procesor ji jen zásobuje daty)", "GPU (CPU ji jen zásobuje daty)")
+    text = text.replace("GPU (procesor ji jen zásobuje daty)", "GPU (CPU ji jen zásobuje daty)")
+    text = text.replace("načítání a ukládání obrázku, to jde jen jedním vláknem",
+                        "načtení a uložení obrázku (to jde jen jedním vláknem)")
+    for old, new in (("rezervu pro plynulý obraz", "rezervu pro plynulý obraz"), ("animace", "dokončení animace"),
+                     ("otevřený panel", "zavření panelu")):
+        text = re.sub(rf"(?<!dokončení ){old} (\d+(?:,\d+)? s)", rf"{new} (\1)", text)
+    return text
+
+
+def recaption_cache() -> None:
+    """Once: the notes kept with the cached pictures (and the last picture's, in the settings) in today's words."""
+    mark = os.path.join(UPSCALED_DIR, ".notes-cz2")
+    if os.path.exists(mark) or not os.path.isdir(UPSCALED_DIR):
+        return
+    for name in os.listdir(UPSCALED_DIR):
+        if not name.endswith(".txt"):
+            continue
+        path = os.path.join(UPSCALED_DIR, name)
+        try:
+            with open(path) as f:
+                old = f.read()
+            new = cz_steps(old)
+            if new != old:
+                with open(path + ".part", "w") as f:
+                    f.write(new)
+                os.replace(path + ".part", path)
+        except OSError:
+            continue
+    try:
+        open(mark, "w").close()
+    except OSError:
+        pass
 
 
 def _secs(t: float) -> str:
@@ -6897,7 +6933,8 @@ class App(Adw.Application):
         self.orig_tex: dict[str, object] = {}  # kind -> the picture as it came
         # the last picture enhanced and its sizes (kept over restarts: shown until the next one is done)
         last = self.settings.get("last_picture") or ["Zatím žádný obrázek nebyl vylepšen", ""]
-        self.picture_text, self.picture_size = last[0], last[1]
+        self.picture_text, self.picture_size = cz_steps(last[0]), last[1]
+        threading.Thread(target=recaption_cache, daemon=True).start()
         self.picture_doing = ""  # the one being enhanced now
         self.icon_text = ""
         self._lookup_id = 0
