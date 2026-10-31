@@ -3957,6 +3957,51 @@ row:hover .bob-arrow { animation: bob 900ms ease-in-out infinite; }
 """
 
 
+def mem_text(b: float) -> str:
+    """Bytes for people: kB under a megabyte, else MB with one decimal."""
+    return f"{b / 1024:.0f} kB" if b < 1 << 20 else f"{b / (1 << 20):.1f} MB"
+
+
+def tex_bytes(tex) -> int:
+    """What a texture holds: 4 bytes a pixel (on the GPU: VRAM, or GTT on an APU)."""
+    return tex.get_width() * tex.get_height() * 4 if tex is not None else 0
+
+
+def app_memory() -> str:
+    """The whole app's memory: RAM (resident) and what the GPU driver counts for it (VRAM, GTT), from
+    /proc/self/status and the DRM fdinfo (each GPU client once)."""
+    rss = 0
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss = int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    seen, vram, gtt = set(), 0, 0
+    try:
+        for fd in os.listdir("/proc/self/fdinfo"):
+            try:
+                with open(f"/proc/self/fdinfo/{fd}") as f:
+                    info = dict(l.split(":", 1) for l in f if ":" in l)
+            except OSError:
+                continue
+            cid = info.get("drm-client-id", "").strip()
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+
+            def kib(key):
+                v = info.get(key, "").split()
+                return int(v[0]) * (1024 if v[1:] == ["KiB"] else 1 << 20 if v[1:] == ["MiB"] else 1) if v else 0
+            vram += kib("drm-memory-vram")
+            gtt += kib("drm-memory-gtt")
+    except OSError:
+        pass
+    gpu = f", GPU: VRAM {mem_text(vram)} + GTT {mem_text(gtt)} (sdílená RAM pro GPU)" if seen else ""
+    return f"RAM {mem_text(rss)}{gpu}"
+
+
 # The look's switchable effects (gear menu), set from the settings by Window.apply_look.
 EFFECTS = {"mirror": True, "shadows": True, "anim": True, "season": True}
 NO_SHADOW_CSS = """
@@ -5175,15 +5220,17 @@ SEASON_CZ = {"autumn": ("podzim", "podzimu", "listí"), "winter": ("zima", "zimy
              "spring": ("jaro", "jara", "květy, větvičky a tráva"), "summer": ("léto", "léta", "slunce, palmy, mušle a vlny")}
 
 
-def season_text() -> str:
+def season_text(clock_bytes: int = None) -> str:
     if not EFFECTS["season"]:
         return "Vypnuto: datum a čas jen v barvách měsíce"
     season, nxt, share = season_today()
     name, _, motifs = SEASON_CZ[season]
-    text = (f"Na písmenech dne, měsíce, roku a času, oříznuto do jejich tvaru; každý den trochu jinak · "
-            f"dnes: {name} ({motifs})")
+    text = (f"Na písmenech dne, měsíce, roku a času, oříznuto do jejich tvaru; klik na datum je vypne a zapne; "
+            f"každý den trochu jinak · dnes: {name} ({motifs})")
     if share > 0:
         text += f", přidává se {round(share * 100)} % {SEASON_CZ[nxt][1]}"
+    if clock_bytes is not None:
+        text += f" · paměť: GPU {mem_text(clock_bytes)} (jednou za den vykreslené ozdoby)"
     return text
 
 
@@ -5535,7 +5582,7 @@ class ClockView(Gtk.Widget):
         if not EFFECTS["season"]:
             return
         if self._decor[0] != key:
-            self._decor = (key, [SeasonDecor.build(n, ink.width, ink.height, c)
+            self._decor = (key, [self._as_texture(SeasonDecor.build(n, ink.width, ink.height, c), ink)
                                  for n, ((_, ink), c) in enumerate(zip(lays, day_colors(len(lays))))])
         y = 0.0
         for (lay, ink), node in zip(lays, self._decor[1]):
@@ -5548,10 +5595,28 @@ class ClockView(Gtk.Widget):
             snap.pop()
             if node is not None:
                 snap.translate(Graphene.Point().init(ink.x, ink.y))
-                snap.append_node(node)
+                snap.append_texture(node, Graphene.Rect().init(0, 0, ink.width, ink.height))
             snap.pop()
             snap.restore()
             y += ink.height + gap
+
+
+    def _as_texture(self, node, ink):
+        """A line's decorations rendered once (a day) into a texture at the screen's scale: drawn from it every
+        second (the colon), and its memory known."""
+        native = self.get_native()
+        if node is None or not native:
+            return None
+        surf = native.get_surface()
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+        s = Gtk.Snapshot()
+        s.scale(k, k)
+        s.append_node(node)
+        return native.get_renderer().render_texture(s.to_node(), Graphene.Rect().init(0, 0, ink.width * k,
+                                                                                      ink.height * k))
+
+    def decor_bytes(self) -> int:
+        return sum(tex_bytes(t) for t in self._decor[1])
 
 
 class InfoStack(Gtk.Widget):
@@ -6305,9 +6370,6 @@ class Window(Adw.ApplicationWindow):
         for key, title in (("mirror", "Odrazy písma na okrajích skla"), ("shadows", "Stíny tlačítek (3D)"),
                            ("anim", "Animace"), ("season", "Ozdoby podle ročního období na datu a čase")):
             row = Adw.SwitchRow(title=title, subtitle_lines=0)
-            if key == "shadows":
-                row.set_subtitle("Tlačítka, jejich ikony, pilulky a posuvník hlasitosti vrhají stín jako písmo "
-                                 "(dolů a doleva): víc vystupují; vypnuto: ploché")
             row.set_active(self.app.settings.get("fx_" + key, True))
             row.connect("notify::active", lambda r, _, k=key: self.app.set_look(**{"fx_" + k: r.get_active()}))
             group.add(row)
@@ -6802,6 +6864,8 @@ class Window(Adw.ApplicationWindow):
                 self._puddle_last = None
                 self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
         water.body.fresh()  # never an earlier picture's lens or mirror while it opens: drawn anew
+        self.refresh_effects()
+        GLib.timeout_add_seconds(3, lambda: (self.refresh_effects(), False)[1])  # the strips' memory, once built
         water.show()
         if water is self.gear_water:  # from the top (a control taking the focus scrolled it a row down)
             GLib.idle_add(lambda: (self.menu_content.get_vadjustment().set_value(0), False)[1])
@@ -7425,12 +7489,20 @@ class Window(Adw.ApplicationWindow):
         for key, row in getattr(self, "fx_rows", {}).items():
             if row.get_active() != EFFECTS[key]:
                 row.set_active(EFFECTS[key])  # changed elsewhere (a click on the date and time)
-        for key, text in (("mirror", self.mirror_text), ("anim", self.app.anim_text), ("season", season_text)):
+        for key, text in (("mirror", self.mirror_text), ("anim", self.app.anim_text),
+                          ("season", lambda: season_text(self.clock.decor_bytes() if getattr(self, "clock", None) else None)),
+                          ("shadows", self.shadow_text)):
             row = getattr(self, "fx_rows", {}).get(key)
             if row:
                 t = text()
                 if row.get_subtitle() != t:
                     row.set_subtitle(t)
+
+    def shadow_text(self) -> str:
+        if not EFFECTS["shadows"]:
+            return "Vypnuto: tlačítka, ikony, pilulky a posuvník jsou ploché"
+        return ("Tlačítka, jejich ikony, pilulky a posuvník hlasitosti vrhají stín jako písmo (dolů a doleva): víc "
+                "vystupují · paměť: žádná vlastní (GTK je kreslí v každém snímku)")
 
     def mirror_text(self) -> str:
         if not EFFECTS["mirror"]:
@@ -7443,7 +7515,11 @@ class Window(Adw.ApplicationWindow):
         else:
             n = len(TEXT_MAP["cells"])
             now = f"v tomto obrázku nalezeno písmo na {n} ploškách" if n else "v tomto obrázku žádné písmo nenalezeno"
-        return f"{what} · teď: {now}"
+        strips = sum(tex_bytes(t) for w in getattr(self, "waters", []) if w.body._mirror_tex
+                     for t, _ in w.body._mirror_tex[1])
+        cells = TEXT_MAP["cells"]
+        ram = sys.getsizeof(cells) + len(cells) * 64  # the lettering map: a set of cells (each a small tuple)
+        return f"{what} · teď: {now} · paměť: GPU {mem_text(strips)} (zrcadlené pruhy), RAM {mem_text(ram)} (mapa písma)"
     def on_double(self, _gesture, n, x, y) -> None:
         if n != 2:
             return
@@ -8105,7 +8181,7 @@ class App(Adw.Application):
         what = "Tlačítka pod myší pulzují, ozubené kolo tiká, logo vlaje, šipky poskakují"
         if not self.settings.get("fx_anim", True):
             return "Vypnuto: tlačítka a logo se pod myší nehýbou (méně práce pro GPU)"
-        return f"{what} · {self.frames_text()}"
+        return f"{what} · {self.frames_text()} · paměť: žádná vlastní (kreslí se v každém snímku)"
 
     def frames_text(self) -> str:
         """How smooth the animations run on this screen: measured, the last one and the last 10 minutes."""
@@ -8520,6 +8596,7 @@ class App(Adw.Application):
     def notes_text(self) -> str:
         """The gear menu's notes: the picture steps, and what the song recognition did last."""
         text = self.enhancer.notes()
+        text += f"\n• Paměť celé aplikace: {app_memory()}"
         if self.win:
             GLib.idle_add(lambda: (self.win.refresh_effects(), False)[1])  # the animations' result is on its switch
         if self.settings.get("recognise", False):
