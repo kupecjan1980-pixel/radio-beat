@@ -2265,6 +2265,7 @@ class GpuWatch:
         self.mhz: list[int] = []
         self.watts: list[float] = []
         self.top = 0
+        self.ram = self.vram = self.gtt = 0  # the step's programs at their peak (summed when several run)
         self.dev = next((os.path.dirname(p) for p in sorted(glob.glob("/sys/class/drm/card*/device/gpu_busy_percent"))),
                         None)
         self.power = next((p for d in sorted(glob.glob("/sys/class/drm/card*/device/hwmon/hwmon*"))
@@ -2272,13 +2273,14 @@ class GpuWatch:
                            if os.path.exists(p)), None)
         ru = resource.getrusage(resource.RUSAGE_CHILDREN)
         self.cpu0, self.t0 = ru.ru_utime + ru.ru_stime, time.monotonic()
-        self.run = self.dev is not None or self.power is not None
+        self.run = True  # (memory is watched even without GPU sensors)
         if self.run:
             threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self) -> None:
         end = time.monotonic() + 3600
         while self.run and time.monotonic() < end:
+            self._memory()
             if self.power:
                 try:
                     with open(self.power) as f:
@@ -2304,6 +2306,18 @@ class GpuWatch:
                 if cur and busy:
                     self.mhz.append(cur)
             time.sleep(0.2)
+
+    def _memory(self) -> None:
+        """RAM and GPU memory of the step's programs now; the peaks kept."""
+        if not self.enh:
+            return
+        with self.enh.plock:
+            pids = [p.pid for p in self.enh.procs if p.poll() is None]
+        ram = vram = gtt = 0
+        for pid in pids:
+            r, v, g, _ = proc_memory(pid)
+            ram, vram, gtt = ram + r, vram + v, gtt + g
+        self.ram, self.vram, self.gtt = max(self.ram, ram), max(self.vram, vram), max(self.gtt, gtt)
 
     def stop(self, gpu: bool = True) -> str:
         """ "GPU vytížená 84 % při 1980 z 2000 MHz, 23 W, 3,2 z 16 vláken CPU" (averages over the step; the GPU
@@ -2336,6 +2350,11 @@ class GpuWatch:
                         waits.append(f"{why} ({_secs(t - self.paused0.get(why, 0.0))})")
             if waits:
                 parts.append("CPU čekal na: " + ", ".join(waits))
+        if self.ram:
+            mem = f"paměť až RAM {mem_text(self.ram)}"
+            if self.vram or self.gtt:
+                mem += f" + GPU VRAM {mem_text(self.vram)} a GTT {mem_text(self.gtt)}"
+            parts.append(mem)
         return ", ".join(parts)
 
 
@@ -2663,7 +2682,8 @@ class Enhancer:
             lines.append("• Zaostřování a odšumování: čeká se na ffmpeg")
         lines.append("• Plynulý přechod mezi kroky: GTK (GSK) na GPU")
         lines.append("• U každého kroku: jak dlouho trval, kde běžel, vytížení a takt GPU, příkon čipu (čidlo amdgpu: na APU "
-                     "celý čip), kolik vláken CPU v průměru vytížil a na co čekal")
+                     "celý čip), kolik vláken CPU v průměru vytížil, na co čekal a kolik paměti jeho programy nejvíc zabraly "
+                     "(RAM a na GPU VRAM + GTT, ze /proc)")
         lines.append(f"• NPU (testování): {self.npu_text}")
         return "\n".join(lines)
 
@@ -3967,12 +3987,12 @@ def tex_bytes(tex) -> int:
     return tex.get_width() * tex.get_height() * 4 if tex is not None else 0
 
 
-def app_memory() -> str:
-    """The whole app's memory: RAM (resident) and what the GPU driver counts for it (VRAM, GTT), from
-    /proc/self/status and the DRM fdinfo (each GPU client once)."""
+def proc_memory(pid="self") -> tuple:
+    """(RAM resident, VRAM, GTT, has a GPU client) of a process: /proc/<pid>/status and its DRM fdinfo (each GPU
+    client once). Bytes."""
     rss = 0
     try:
-        with open("/proc/self/status") as f:
+        with open(f"/proc/{pid}/status") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
                     rss = int(line.split()[1]) * 1024
@@ -3980,9 +4000,9 @@ def app_memory() -> str:
         pass
     seen, vram, gtt = set(), 0, 0
     try:
-        for fd in os.listdir("/proc/self/fdinfo"):
+        for fd in os.listdir(f"/proc/{pid}/fdinfo"):
             try:
-                with open(f"/proc/self/fdinfo/{fd}") as f:
+                with open(f"/proc/{pid}/fdinfo/{fd}") as f:
                     info = dict(l.split(":", 1) for l in f if ":" in l)
             except OSError:
                 continue
@@ -3998,7 +4018,13 @@ def app_memory() -> str:
             gtt += kib("drm-memory-gtt")
     except OSError:
         pass
-    gpu = f", GPU: VRAM {mem_text(vram)} + GTT {mem_text(gtt)} (sdílená RAM pro GPU)" if seen else ""
+    return rss, vram, gtt, bool(seen)
+
+
+def app_memory() -> str:
+    """The whole app's memory: RAM (resident) and what the GPU driver counts for it (VRAM, GTT)."""
+    rss, vram, gtt, gpu = proc_memory()
+    gpu = f", GPU: VRAM {mem_text(vram)} + GTT {mem_text(gtt)} (sdílená RAM pro GPU)" if gpu else ""
     return f"RAM {mem_text(rss)}{gpu}"
 
 
