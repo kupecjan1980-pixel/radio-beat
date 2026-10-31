@@ -1091,6 +1091,15 @@ class History:
                 self.db.execute("PRAGMA user_version = 3")
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 4:
                 self.db.execute("PRAGMA user_version = 4")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 5:  # once: track info looked up again where
+                stale = re.compile(r"Poprvé vydáno [^(·]*? (%s) \\(" % "|".join(map(re.escape, COUNTRY_IN.values())))
+                redo = [(rowid,) for rowid, facts in self.db.execute(  # it said where the release came out
+                    "SELECT rowid, facts FROM plays WHERE facts IS NOT NULL") if stale.search(facts)]
+                self.db.executemany("UPDATE plays SET facts = NULL WHERE rowid = ?", redo)
+                # and songs with a year after the name ("Green Onions 1962"): not found then, looked up again
+                self.db.execute("UPDATE plays SET cover = NULL, album = NULL, facts = NULL WHERE title GLOB "
+                                "'*[12][90][0-9][0-9]' OR title GLOB '*([12][90][0-9][0-9])'")
+                self.db.execute("PRAGMA user_version = 5")
 
     def play(self, artist: str, title: str, show: str | None, host: str | None) -> None:
         import sqlite3
