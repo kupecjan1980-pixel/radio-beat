@@ -6197,7 +6197,13 @@ class Window(Adw.ApplicationWindow):
         overlay.add_overlay(scrim)
         # The time and date (in Czech, capitals: "8:50" over "PÁTEK 30. ŘÍJNA 2026") at the bottom right: below
         # the volume slider, right of the cover, against the screen's right edge, filling that room.
-        self.clock = ClockView(halign=Gtk.Align.END, valign=Gtk.Align.END, can_target=False)
+        self.clock = ClockView(halign=Gtk.Align.END, valign=Gtk.Align.END)
+        # A click on the date and time: the season's decorations off, and on again (the gear's switch follows)
+        click = Gtk.GestureClick()
+        click.connect("pressed", lambda g, n, *_: (g.set_state(Gtk.EventSequenceState.CLAIMED),
+                                                   n == 1 and app.set_look(fx_season=not EFFECTS["season"])))
+        self.clock.add_controller(click)
+        self.clock.set_cursor(Gdk.Cursor.new_from_name("pointer"))
         self.clock.set_visible(False)
         overlay.add_overlay(self.clock)
         GLib.timeout_add_seconds(1, self._tick_clock)
@@ -7399,6 +7405,9 @@ class Window(Adw.ApplicationWindow):
 
     def refresh_effects(self) -> None:
         """The effect switches' notes: what each does, and what it's doing now."""
+        for key, row in getattr(self, "fx_rows", {}).items():
+            if row.get_active() != EFFECTS[key]:
+                row.set_active(EFFECTS[key])  # changed elsewhere (a click on the date and time)
         for key, text in (("mirror", self.mirror_text), ("anim", self.app.anim_text), ("season", season_text)):
             row = getattr(self, "fx_rows", {}).get(key)
             if row:
@@ -7423,8 +7432,8 @@ class Window(Adw.ApplicationWindow):
             return
         w = self.pick(x, y, Gtk.PickFlags.DEFAULT)
         while w is not None and w is not self:
-            if isinstance(w, (Gtk.Button, Gtk.MenuButton, Gtk.Scale, Adw.HeaderBar)):
-                return  # their own clicks (the title bar maximises on double click)
+            if isinstance(w, (Gtk.Button, Gtk.MenuButton, Gtk.Scale, Adw.HeaderBar, ClockView)):
+                return  # their own clicks (the title bar maximises on double click; the clock: its decorations)
             w = w.get_parent()
         self.toggle_full()
 
