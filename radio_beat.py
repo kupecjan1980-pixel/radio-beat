@@ -225,7 +225,7 @@ def kwin_rule(on: bool) -> None:
     w = lambda key, val, group=KWIN_RULE: subprocess.run(
         ["kwriteconfig6", "--file", "kwinrulesrc", "--group", group, "--key", key, str(val)], capture_output=True)
     if on:
-        for key, val in (("Description", "Rádio Beat: open next to the tray"), ("wmclass", APP_ID),
+        for key, val in (("Description", "Rádio Beat: otevřít u oznamovací oblasti"), ("wmclass", APP_ID),
                          ("wmclassmatch", 1), ("wmclasscomplete", "false"),
                          ("placement", KWIN_UNDER_MOUSE), ("placementrule", KWIN_FORCE)):
             w(key, val)
@@ -2805,7 +2805,7 @@ class Enhancer:
                 if self.gpu_index not in real:
                     self.gpu_index = max(real, key=lambda i: (bool(DISCRETE_GPU.search(real[i])), -i))
                     self.soft = bool(SOFTWARE_GPU.search(real[self.gpu_index]))
-                    self.gpu = (f"the CPU {_cpu_name()} (software Vulkan)" if self.soft
+                    self.gpu = (f"CPU {_cpu_name()} (softwarový Vulkan)" if self.soft
                                 else real[self.gpu_index])
                     out, err = self._esr(src, os.path.join(work, "o.png"))  # again, on that one
                 if out:
@@ -5519,7 +5519,7 @@ class Window(Adw.ApplicationWindow):
                 click.connect("pressed", lambda g, *_: (g.set_state(Gtk.EventSequenceState.CLAIMED),
                                                         app.toggle_mute()))
                 disc.add_controller(click)
-                disc.set_tooltip_text("Mute")
+                disc.set_tooltip_text("Ztlumit")
             controls.append(disc)
         controls.append(self.vol)
         inner.append(controls)
@@ -6746,21 +6746,21 @@ class Window(Adw.ApplicationWindow):
             tex = a.show_pics.get(cur["img"]) if cur["img"] else None
             self.show_pic.set_from_paintable(tex or a.logo_tex)
         self.vol_icon.set_from_icon_name("audio-volume-muted-symbolic" if a.muted else "audio-volume-high-symbolic")
-        self.discs[2].set_tooltip_text("Sound on" if a.muted else "Mute")
+        self.discs[2].set_tooltip_text("Zapnout zvuk" if a.muted else "Ztlumit")
         paused = a.song_track["state"] != "playing" if a.song_track and a.song_live() else a.paused  # a HRÁLO song: its state
         self.play_btn.set_icon_name("media-playback-start-symbolic" if paused else "media-playback-pause-symbolic")
-        self.play_btn.set_tooltip_text("Play" if paused else "Pause")
+        self.play_btn.set_tooltip_text("Přehrát" if paused else "Pozastavit")
         if a.error:
             self.status.set_text(a.error)
         elif a.paused:
-            self.status.set_text("Paused")
+            self.status.set_text("Pozastaveno")
         elif a.tries:
-            self.status.set_text(f"Reconnecting… ({a.stream()[1]})")
+            self.status.set_text(f"Znovu se připojuje… ({a.stream()[1]})")
         else:
             parts = [p for p in (a.codec, f"{a.bitrate} kbps" if a.bitrate else None) if p]
             if a.alt:
                 parts.append(f"backup: {a.stream()[1]}")
-            self.status.set_text(" · ".join(parts) if parts else "Connecting…")
+            self.status.set_text(" · ".join(parts) if parts else "Připojuje se…")
         self.update_note.set_text(a.update_text)
         self.update_btn.set_label("Aktualizovat" if a.update_ready else "Zkontrolovat")
         self.update_btn.set_sensitive(not a.update_busy)
@@ -6798,7 +6798,7 @@ def _track_refresh(self) -> None:
     self.back_disc.set_visible(True)
     playing = bool(t and t["state"] == "playing")
     self.play_btn.set_icon_name("media-playback-pause-symbolic" if playing else "media-playback-start-symbolic")
-    self.play_btn.set_tooltip_text("Pause" if playing else "Play")
+    self.play_btn.set_tooltip_text("Pozastavit" if playing else "Přehrát")
     self.vol_icon.set_from_icon_name("audio-volume-muted-symbolic" if a.muted else "audio-volume-high-symbolic")
     when = time.localtime(tv["at"])
     played = f"Hrálo {DAYS[when.tm_wday]} {when.tm_mday}. {when.tm_mon}. {when.tm_hour}:{when.tm_min:02d}"
