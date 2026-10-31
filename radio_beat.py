@@ -550,6 +550,18 @@ def _video_thumb(vid: str) -> str:
         return f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
 
 
+def proper_names(artist: str, song: str, info: dict | None) -> tuple[str | None, str | None]:
+    """The song's names as the lookup spells them, when they're the stream's own but for marks and case
+    ("ZAPOMENUTY HRICHY" → "Zapomenutý hříchy", "SKWOR" → "Škwor"); None for a name it didn't improve."""
+    if not info:
+        return None, None
+    a = info.get("artist")
+    t = plain_title(info.get("title") or "")
+    sa = a if a and _key(a) == _key(first_artist(artist)) and a != artist else None
+    st = t if t and _key(t) == _key(bare_song(song)) and t != song else None
+    return sa, st
+
+
 def youtube_song(artist: str, song: str) -> dict | None:
     """A song neither Deezer nor iTunes has (Czech bands as Špinaví lůzři): its video on YouTube, the still."""
     import difflib
@@ -562,7 +574,12 @@ def youtube_song(artist: str, song: str) -> dict | None:
         both = _key(v["title"] + " " + v["owner"])
         name = _key(re.split(r"\s[-–|]\s", v["title"])[-1]) if re.search(r"\s[-–|]\s", v["title"]) else _key(v["title"])
         if a in both and t and (t in _key(v["title"]) or difflib.SequenceMatcher(None, t, name).ratio() >= 0.85):
-            return {"artist": first_artist(artist), "title": song, "album": None, "cover": _video_thumb(v["id"]),
+            # the video's own spelling when it's the same names (with the Czech marks the stream drops)
+            parts = [x.strip() for x in re.split(r"\s[-–|]\s", re.sub(r"\s*[(\[].*?[)\]]", "", v["title"]))]
+            shown_t = next((x for x in parts if _key(x) == t), song)
+            shown_a = next((x for x in parts + [v["owner"].removesuffix(" - Topic")] if _key(x) == a),
+                           first_artist(artist))
+            return {"artist": shown_a, "title": shown_t, "album": None, "cover": _video_thumb(v["id"]),
                     "youtube": True}
     return None
 
@@ -1120,6 +1137,10 @@ class History:
             # when this computer looked a song's picture or track info up (the other computers get it then)
             self.db.execute("CREATE TABLE IF NOT EXISTS found (artist TEXT, title TEXT, at REAL, "
                             "PRIMARY KEY (artist, title))")
+            # a song's names as spelled properly (the stream drops the Czech marks: "ZAPOMENUTY HRICHY" is
+            # "Zapomenutý hříchy"), from the lookup; NULL: looked up, nothing better found
+            self.db.execute("CREATE TABLE IF NOT EXISTS names (artist TEXT, title TEXT, shown_artist TEXT, "
+                            "shown_title TEXT, PRIMARY KEY (artist, title))")
             cols = [r[1] for r in self.db.execute("PRAGMA table_info(plays)")]
             if "cover" not in cols:
                 self.db.execute("ALTER TABLE plays ADD COLUMN cover TEXT")  # its picture ("": none found)
@@ -1194,17 +1215,32 @@ class History:
     on_play = None  # called after a play is logged (the HRÁLO view shows it)
 
     def page(self, before: float, n: int = 60) -> list[tuple]:
-        """(at, artist, title, album, show, cover, facts) of the plays before `before`, newest first."""
+        """(at, artist, title, album, show, cover, facts, shown artist, shown title) of the plays before `before`,
+        newest first (the shown names: properly spelled, else the stream's)."""
         with self.lock:
-            return self.db.execute("SELECT at, artist, title, album, show, cover, facts FROM plays WHERE at < ? "
-                                   "ORDER BY at DESC LIMIT ?", (before, n)).fetchall()
+            return self.db.execute(
+                "SELECT p.at, p.artist, p.title, p.album, p.show, p.cover, p.facts, "
+                "coalesce(n.shown_artist, p.artist), coalesce(n.shown_title, p.title) FROM plays p LEFT JOIN names n "
+                "ON n.artist = lower(p.artist) AND n.title = lower(p.title) WHERE p.at < ? ORDER BY p.at DESC LIMIT ?",
+                (before, n)).fetchall()
+
+    def set_names(self, artist: str, title: str, shown_artist: str | None, shown_title: str | None,
+                  mine: bool = True) -> None:
+        """The song's properly spelled names (None: none better), noted as found here to share them."""
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO names VALUES (lower(?), lower(?), ?, ?)",
+                            (artist, title, shown_artist, shown_title))
+            if mine:
+                self._found(artist, title)
 
     def missing(self) -> list[tuple]:
         """(artist, title) of the songs some play of which still lacks its picture or track info, newest first."""
         with self.lock:
-            return self.db.execute("SELECT artist, title, max(cover IS NULL), max(facts IS NULL) FROM plays "
-                                   "WHERE cover IS NULL OR facts IS NULL GROUP BY lower(artist), lower(title) "
-                                   "ORDER BY max(at) DESC").fetchall()
+            return self.db.execute(
+                "SELECT p.artist, p.title, max(p.cover IS NULL), max(p.facts IS NULL) FROM plays p LEFT JOIN names n "
+                "ON n.artist = lower(p.artist) AND n.title = lower(p.title) "
+                "WHERE p.cover IS NULL OR p.facts IS NULL OR n.artist IS NULL "
+                "GROUP BY lower(p.artist), lower(p.title) ORDER BY max(p.at) DESC").fetchall()
 
     def set_facts(self, artist: str, title: str, facts: str) -> None:
         """A song's first release and such ("" when nothing's known): every play of it lacking them."""
@@ -1226,13 +1262,15 @@ class History:
     def _found(self, artist: str, title: str) -> None:
         self.db.execute("INSERT OR REPLACE INTO found VALUES (lower(?), lower(?), ?)", (artist, title, time.time()))
 
-    def lacks(self, artist: str, title: str) -> tuple[bool, bool]:
-        """Whether some play of the song still lacks its picture, its track info (another computer may have
-        sent them meanwhile)."""
+    def lacks(self, artist: str, title: str) -> tuple[bool, bool, bool]:
+        """Whether some play of the song still lacks its picture, its track info, and whether its names were
+        never looked up (another computer may have sent them meanwhile)."""
         with self.lock:
             got = self.db.execute("SELECT max(cover IS NULL), max(facts IS NULL) FROM plays WHERE lower(artist) = "
                                   "lower(?) AND lower(title) = lower(?)", (artist, title)).fetchone()
-        return bool(got and got[0]), bool(got and got[1])
+            named = self.db.execute("SELECT 1 FROM names WHERE artist = lower(?) AND title = lower(?)",
+                                    (artist, title)).fetchone()
+        return bool(got and got[0]), bool(got and got[1]), not named
 
     def info_export(self, since: float, n: int = 2000) -> list[list]:
         """Songs this computer looked up after `since`, oldest first: [artist, title, album, cover, facts, at]."""
@@ -1244,8 +1282,10 @@ class History:
                 got = self.db.execute("SELECT album, cover, facts FROM plays WHERE lower(artist) = ? AND "
                                       "lower(title) = ? ORDER BY (cover IS NULL) + (facts IS NULL), at DESC LIMIT 1",
                                       (artist, title)).fetchone()
+                named = self.db.execute("SELECT shown_artist, shown_title FROM names WHERE artist = ? AND title = ?",
+                                        (artist, title)).fetchone()
                 if got:
-                    out.append([artist, title, *got, at])
+                    out.append([artist, title, *got, at, *(named or (None, None))])
             return out
 
     def info_merge(self, rows) -> int:
@@ -1256,11 +1296,14 @@ class History:
         try:
             with self.lock, self.db:
                 for r in rows:
-                    if not (isinstance(r, list) and len(r) == 6 and all(isinstance(x, str) and len(x) <= 300
-                                                                        for x in r[:2])
-                            and all(x is None or (isinstance(x, str) and len(x) <= 500) for x in r[2:5])):
+                    if not (isinstance(r, list) and len(r) in (6, 8) and all(isinstance(x, str) and len(x) <= 300
+                                                                             for x in r[:2])
+                            and all(x is None or (isinstance(x, str) and len(x) <= 500) for x in r[2:5] + r[6:])):
                         continue
-                    artist, title, album, cover, facts, _ = r
+                    artist, title, album, cover, facts, _ = r[:6]
+                    if len(r) == 8 and (r[6] or r[7]):  # its proper names
+                        self.db.execute("INSERT OR IGNORE INTO names VALUES (lower(?), lower(?), ?, ?)",
+                                        (artist, title, r[6], r[7]))
                     if cover and not cover.startswith("https://"):
                         cover = None
                     song = "lower(artist) = ? AND lower(title) = ?"
@@ -3593,7 +3636,7 @@ class CacheShare:
                 rows = reply.get("songs") or []
                 info_got += self.history.info_merge(rows)
                 if rows:
-                    mark["info_in"] = max(mark["info_in"], max(r[5] for r in rows if isinstance(r, list) and len(r) == 6))
+                    mark["info_in"] = max(mark["info_in"], max(r[5] for r in rows if isinstance(r, list) and len(r) in (6, 8)))
                 if not reply.get("more") or not rows:
                     break
             while rows := self.history.info_export(mark["info_out"]):
@@ -4827,7 +4870,10 @@ class InfoStack(Gtk.Widget):
         def build(scale: float, shrink: float = 1.0):
             out, y = [], 0.0
             for part, text in enumerate(texts):
-                rows = self._part_lines(text, part, w, self.PARTS[part][2] * scale) if text else []
+                # the track info's parts ("Poprvé vydáno …", "Nahráno v …") each from a line of its own, without
+                # the dot between them
+                segs = [x.strip() for x in text.split(" · ")] if part == 3 else [text]
+                rows = [row for seg in segs if seg for row in self._part_lines(seg, part, w, self.PARTS[part][2] * scale)]
                 if not rows:
                     continue
                 if out:
@@ -5625,7 +5671,7 @@ class Window(Adw.ApplicationWindow):
     def _tick_clock(self) -> bool:
         now = time.localtime()
         self._clock_texts = (f"{now.tm_hour}:{now.tm_min:02d}", DAYS[now.tm_wday].upper(),
-                             str(now.tm_mday), MONTHS[now.tm_mon - 1].upper(), str(now.tm_year))
+                             str(now.tm_mday), MONTHS_1[now.tm_mon - 1].upper(), str(now.tm_year))
         if self._clock_texts != self.clock.texts:
             self._place_clock()
         self.clock.colon = now.tm_sec % 2 == 0
@@ -6197,7 +6243,7 @@ class Window(Adw.ApplicationWindow):
                 self._puddle_block("", "", self.app.cz("Zatím nic nehrálo."))
             self._played_before = 0.0  # all shown
             return
-        for at, artist, title, album, show, cover, facts in rows:
+        for at, artist, title, album, show, cover, facts, shown_artist, shown_title in rows:
             last = self._played_rows[-1] if self._played_rows else None
             if last and (last["artist"].lower(), last["title"].lower()) == (artist.lower(), title.lower()) \
                     and last["at"] - at < 3 * 3600:
@@ -6210,9 +6256,9 @@ class Window(Adw.ApplicationWindow):
                                        f"{t.tm_year}", "")
             # with its album's picture like the shows' and its track info (looked up when missing: the logo meanwhile)
             row = {"at": at, "artist": artist, "title": title, "album": album, "show": show, "cover": cover,
-                   "facts": facts}
+                   "facts": facts, "shown_artist": shown_artist, "shown_title": shown_title}
             self._last_body = None
-            self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{artist} – {plain_title(title)}",
+            self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{shown_artist} – {plain_title(shown_title)}",
                                self._played_line(row) or " ", img=small_cover(cover) if cover else "")
             row["label"] = self._last_body
             # play / pause and stop in glass like the radio's: the song itself from YouTube (the radio waits)
@@ -6325,7 +6371,8 @@ class Window(Adw.ApplicationWindow):
             return
         self._hralo_at = self.puddle_scroll.get_vadjustment().get_value()
         row = self._played_rows[i]
-        self.app.show_track({k: row[k] for k in ("at", "artist", "title", "album", "show", "cover", "facts")})
+        self.app.show_track({k: row[k] for k in ("at", "artist", "title", "album", "show", "cover", "facts",
+                                                 "shown_artist", "shown_title")})
         self.info_water.hide()
 
     def back_from_track(self) -> None:
@@ -6646,11 +6693,11 @@ def _track_refresh(self) -> None:
     back beside pause; the status says what plays (the quality, which video)."""
     a = self.app
     tv, t = a.track_view, a.song_track
-    title = plain_title(tv["title"])
+    title = plain_title(tv.get("shown_title") or tv["title"])
     if title != self.song.get_text() and self.song.get_text():
         self.blink()
     self.song.set_text(title)
-    self.artist.set_text(tv["artist"])
+    self.artist.set_text(tv.get("shown_artist") or tv["artist"])
     self.album.set_text(plain_title(tv.get("album") or ""))
     self.album.set_visible(bool(tv.get("album")))
     self.facts.set_text(a.cz(tv.get("facts") or ""))
@@ -7433,9 +7480,11 @@ class App(Adw.Application):
             artist, title, want_cover, want_facts = self._art_queue.pop(0)
             lacks = self.db.lacks(artist, title)  # (the other computer may have sent them meanwhile)
             want_cover, want_facts = want_cover and lacks[0], want_facts and lacks[1]
-            if not want_cover and not want_facts:
+            if not want_cover and not want_facts and not lacks[2]:
                 continue
             info = lookup(artist, title)
+            if lacks[2]:  # (HRÁLO shows them the next time it lists the song)
+                self.db.set_names(artist, title, *proper_names(artist, title, info))
             cover = (info or {}).get("cover") or ""
             album = None if (info or {}).get("artist_photo") else (info or {}).get("album")
             if want_cover:
@@ -7674,6 +7723,8 @@ class App(Adw.Application):
 
     def _lookup(self, lid, artist, song):
         info = lookup(artist, song)
+        if info:  # its proper spelling, for HRÁLO
+            self.db.set_names(first_artist(artist), song, *proper_names(first_artist(artist), song, info))
         data = square_cover(fetch(info["cover"])) if info and info.get("cover") else None
         GLib.idle_add(self._looked_up, lid, info, data)
         facts = track_facts(artist, song, info)
