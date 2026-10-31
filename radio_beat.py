@@ -6705,7 +6705,8 @@ def _track_refresh(self) -> None:
     self._place_info()
     small = a.show_pics.get(small_cover(tv["cover"])) if tv.get("cover") else None
     pic = tv.get("tex") or small or a.logo_tex
-    redraw = small is not None and self.cover.pic is small and pic is not small  # the big one over the small
+    redraw = (small is not None and self.cover.pic is small and pic is not small  # the big one over the small
+              or a.refined == (self.cover.pic, pic))  # or its enhanced version: drawn in slowly
     self.cover.set_paintable(pic, redraw)
     self.backdrop.set_paintable(pic, redraw)
     GLib.idle_add(self._fit_info)
@@ -7129,6 +7130,10 @@ class App(Adw.Application):
                     tv["tex"] = None
                 if self.track_view is tv:
                     self.update()
+                    if tv["tex"]:  # enhanced like the radio's cover (upscaled to the screen), not as fetched
+                        key = row["cover"] + ("#square2" if "ytimg.com" in row["cover"] else "")
+                        self.orig_tex["track"], self.upscale_src["track"] = tv["tex"], (key, data)
+                        self._enhance("track")
                 return False
             threading.Thread(target=lambda: GLib.idle_add(got, square_cover(fetch(row["cover"]))), daemon=True).start()
         if not (t and (t["artist"], t["title"]) == (row["artist"], row["title"]) and t["state"] != "failed"):
@@ -8068,7 +8073,7 @@ class App(Adw.Application):
         if not tex or not src or not size:
             return
         w, h = tex.get_width(), tex.get_height()
-        what = "Cover" if kind == "cover" else "Logo"
+        what = "Cover" if kind in ("cover", "track") else "Logo"
         f = min(size[0] / w, size[1] / h)
         if not self.settings.get("enhance", True):
             self._picture_changed(f"{what}: {w}×{h} px, shown as it comes (enhancing is off)", kind)
@@ -8079,6 +8084,7 @@ class App(Adw.Application):
                                   "are downloaded", kind)
             return
         lid = self._lookup_id
+        track = self.track_view
 
         def done(pic: bytes):
             try:
@@ -8087,7 +8093,12 @@ class App(Adw.Application):
                 return
             if not self.settings.get("enhance", True):
                 return
-            if kind == "cover":
+            if kind == "track":  # a HRÁLO song's cover on the main screen: still that song's
+                if self.track_view is not track or not track:
+                    return
+                self.refined = (track.get("tex"), t)
+                track["tex"] = t
+            elif kind == "cover":
                 if lid != self._lookup_id:
                     return
                 self.refined = (self.cover_tex, t)
