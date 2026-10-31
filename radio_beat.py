@@ -366,8 +366,9 @@ def _score(artist: str, song: str, cand_artist: str, cand_title: str) -> int:
 
 YTDLP = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "radio-beat", "yt-dlp")
 YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
-NOT_STUDIO = re.compile(r"\blive\b|unplugged|concert|koncert|en vivo|cover|karaoke|instrumental|reaction|slowed|"
-                        r"sped up|\b8d\b|remix|tutorial|lesson|drum cam|bass cover|guitar cover|acoustic", re.I)
+NOT_STUDIO = re.compile(r"cover|karaoke|instrumental|reaction|slowed|sped up|\b8d\b|remix|tutorial|lesson|drum cam",
+                        re.I)  # not the song at all
+LIVE = re.compile(r"\blive\b|unplugged|concert|koncert|en vivo|acoustic", re.I)  # the song, but not the record
 
 
 def ytdlp() -> list[str] | None:
@@ -393,13 +394,14 @@ def ytdlp() -> list[str] | None:
 
 def find_track(artist: str, song: str) -> tuple[str, str] | None:
     """The song to play from YouTube: (its best audio stream, what it is: "opus 128 kbps"). The studio version
-    (YouTube Music's album audio, 'Artist - Topic', or official audio; never live, unplugged, cover, remix…),
-    FLAC when there is one, else the best audio there is. None when nothing fits."""
+    (YouTube Music's album audio, 'Artist - Topic', or official audio; never a cover, remix…), a live or
+    unplugged one only when there's nothing else; FLAC when there is one, else the best audio there is.
+    None when nothing fits."""
     cmd = ytdlp()
     if not cmd:
         return None
     a, t = _key(first_artist(artist)), _key(re.sub(r"\s*[(\[].*?[)\]]", "", song) or song)
-    best, best_score = None, 0
+    best, best_score = None, float("-inf")
     for query in (f"{first_artist(artist)} {song}", f"{first_artist(artist)} {song} official audio"):
         try:
             out = subprocess.run([*cmd, "-J", "--flat-playlist", "--no-warnings", f"ytsearch10:{query}"],
@@ -420,12 +422,15 @@ def find_track(artist: str, song: str) -> tuple[str, str] | None:
                 score += 3  # the artist's own channel
             if re.search(r"official audio|\baudio\b|visuali[sz]er", title, re.I):
                 score += 2
+            if LIVE.search(title):
+                score -= 30  # live: only when no studio version is found at all
             if score > best_score:
                 best, best_score = e, score
         if best is not None and best_score >= 13:
             break
     if best is None:
         return None
+    live = " · živě (studiová verze nenalezena)" if LIVE.search(best.get("title") or "") else ""
     try:
         out = subprocess.run([*cmd, "-f", "bestaudio[acodec=flac]/bestaudio", "--no-warnings", "--print",
                               "%(acodec)s %(abr)s", "--print", "urls",
@@ -440,7 +445,7 @@ def find_track(artist: str, song: str) -> tuple[str, str] | None:
         what = f"{codec} {round(float(abr))} kbps"
     except ValueError:
         what = codec
-    return out[1], f"{what} · YouTube: {best.get('title')}"
+    return out[1], f"{what}{live} · YouTube: {best.get('title')}"
 
 
 def small_cover(url: str) -> str:
@@ -6526,7 +6531,7 @@ class App(Adw.Application):
         if track is not self.song_track:
             return False  # another song chosen (or stopped) meanwhile
         if not found:
-            track.update(state="failed", note="Na YouTube se nenašla (jen živé verze nebo nic)")
+            track.update(state="failed", note="Na YouTube se nenašla")
             self._track_changed()
             return False
         url, what = found
