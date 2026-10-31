@@ -2946,8 +2946,16 @@ class Enhancer:
         while res is None and self.tile != self.TILES[-1]:
             # The GPU timed out (black or failed): smaller tiles from now on, and again.
             self.tile = self.TILES[self.TILES.index(self.tile) + 1]
+            self.tile_ok = 0
             self._save_tile()
             res, err = self._esr(feed, big, model)
+        if res and res != "killed" and self.tile != self.TILES[0]:
+            # Small tiles leave the GPU idle between them (it clocks down: a quarter of it busy): after a few
+            # pictures done right, the next bigger tile is tried again (a failure steps back down, as above).
+            self.tile_ok = getattr(self, "tile_ok", 0) + 1
+            if self.tile_ok >= 3:
+                self.tile, self.tile_ok = self.TILES[self.TILES.index(self.tile) - 1], 0
+                self._save_tile()
         if res == "killed":
             return "killed"
         if res is None or not self._resize(big, size, out):
