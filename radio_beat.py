@@ -53,16 +53,16 @@ UA = "RadioBeat-Linux/1.0"
 STREAMS = [
     ("aac128", "AAC 128 kbps", "https://icecast2.play.cz/beat128aac"),
     ("mp3128", "MP3 128 kbps", "https://icecast2.play.cz/radiobeat128.mp3"),
-    ("mp3backup", "MP3 128 kbps (backup server)", "https://icecast1.play.cz/beat64.mp3"),
+    ("mp3backup", "MP3 128 kbps (záložní server)", "https://icecast1.play.cz/beat64.mp3"),
     ("aac64", "AAC 64 kbps (radiobeat.cz)", "https://stream.rcs.revma.com/3d47nqvb938uv"),
 ]
 # What each stream sounds like (the list shows them best first).
 STREAM_NOTES = {
-    "flac": "Best: lossless, exactly as broadcast",
-    "aac128": "Very good: AAC keeps more detail than MP3 at the same rate",
-    "mp3128": "Good: MP3 needs more data than AAC for the same sound",
-    "mp3backup": "Good: the same MP3 from another server",
-    "aac64": "Lowest: half the data, fine on small speakers",
+    "flac": "Nejlepší: bezeztrátově, přesně jak se vysílá",
+    "aac128": "Velmi dobrá: AAC uchová víc detailů než MP3 při stejném datovém toku",
+    "mp3128": "Dobrá: MP3 potřebuje na stejný zvuk víc dat než AAC",
+    "mp3backup": "Dobrá: stejné MP3 z jiného serveru",
+    "aac64": "Nejnižší: poloviční data, stačí na malé reproduktory",
 }
 
 FLAC_CANDIDATES = [
@@ -262,7 +262,7 @@ def update_status() -> tuple[bool | None, str]:
         sha, info = c["sha"], c["commit"]
         LATEST["sha"] = sha
     except (OSError, ValueError, KeyError):
-        return None, "Couldn't reach GitHub"
+        return None, "GitHub nedostupný"
     try:
         with open(os.path.join(HERE, "VERSION")) as f:
             mine = f.read().strip()
@@ -270,22 +270,22 @@ def update_status() -> tuple[bool | None, str]:
         mine = ""
     if not re.fullmatch(r"[0-9a-f]{7,40}", mine):
         # not an installed copy (no VERSION: run from the source folder): never replaced by an update
-        return False, "Running from the source folder: not updated by itself"
+        return False, "Běží ze složky se zdrojáky: sám se neaktualizuje"
     if mine == sha:
-        return False, f"Up to date ({info['committer']['date'][:10]})"
+        return False, f"Aktuální ({info['committer']['date'][:10]})"
     # Only forwards: GitHub's commit must come after the installed one (a newer local build stays).
     if re.fullmatch(r"[0-9a-f]{7,40}", mine):
         try:
             status = _json(f"https://api.github.com/repos/{REPO}/compare/{mine}...{sha}")["status"]
         except urllib.error.HTTPError as e:
             if e.code == 404:  # not on GitHub: built here, newer than what's published
-                return False, "This version is newer than GitHub's (not published yet)"
-            return None, "Couldn't reach GitHub"
+                return False, "Tahle verze je novější než na GitHubu (ještě nevydaná)"
+            return None, "GitHub nedostupný"
         except (OSError, ValueError, KeyError):
-            return None, "Couldn't reach GitHub"
+            return None, "GitHub nedostupný"
         if status in ("behind", "identical"):
-            return False, "Up to date (newer than GitHub's)" if status == "behind" else "Up to date"
-    return True, f"New version from {info['committer']['date'][:10]}:\n{info['message'].splitlines()[0]}"
+            return False, "Aktuální (novější než na GitHubu)" if status == "behind" else "Aktuální"
+    return True, f"Nová verze z {info['committer']['date'][:10]}:\n{info['message'].splitlines()[0]}"
 
 
 def run_update() -> str | None:
@@ -2176,10 +2176,15 @@ UPSCALE_FROM = 1.05
 def _size(n: float) -> str:
     """Bytes in the biggest unit they make at least one of: KB, MB or GB."""
     if n >= 2**30:
-        return f"{n / 2**30:.2f} GB"
+        return f"{n / 2**30:.2f} GB".replace(".", ",")
     if n >= 2**20:
-        return f"{n / 2**20:.1f} MB"
+        return f"{n / 2**20:.1f} MB".replace(".", ",")
     return f"{n / 2**10:.0f} KB"
+
+
+def obrazku(n: int) -> str:
+    """'1 obrázek', '3 obrázky', '5 obrázků'."""
+    return f"{n} " + ("obrázek" if n == 1 else "obrázky" if 2 <= n <= 4 else "obrázků")
 
 
 # The cache (this computer's own disk) may take 80 % of the space it could have (the free space plus what it
@@ -2247,21 +2252,39 @@ DENOISE_THREADS = 2
 
 
 class GpuWatch:
-    """How busy the GPU was during a step and at what clock (amdgpu's sysfs; nothing where there's none)."""
+    """A step watched: how busy the GPU was and at what clock (amdgpu's sysfs), the watts the chip drew (the
+    amdgpu sensor: the whole chip on an APU), and how many CPU threads the step's programs kept busy on
+    average (their CPU time over the step's time)."""
 
     def __init__(self):
+        import resource
         self.busy: list[int] = []
         self.mhz: list[int] = []
+        self.watts: list[float] = []
         self.top = 0
         self.dev = next((os.path.dirname(p) for p in sorted(glob.glob("/sys/class/drm/card*/device/gpu_busy_percent"))),
                         None)
-        self.run = self.dev is not None
+        self.power = next((p for d in sorted(glob.glob("/sys/class/drm/card*/device/hwmon/hwmon*"))
+                           for p in (os.path.join(d, "power1_average"), os.path.join(d, "power1_input"))
+                           if os.path.exists(p)), None)
+        ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+        self.cpu0, self.t0 = ru.ru_utime + ru.ru_stime, time.monotonic()
+        self.run = self.dev is not None or self.power is not None
         if self.run:
             threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self) -> None:
         end = time.monotonic() + 3600
         while self.run and time.monotonic() < end:
+            if self.power:
+                try:
+                    with open(self.power) as f:
+                        self.watts.append(int(f.read()) / 1e6)
+                except (OSError, ValueError):
+                    pass
+            if not self.dev:
+                time.sleep(0.2)
+                continue
             try:
                 with open(os.path.join(self.dev, "gpu_busy_percent")) as f:
                     busy = int(f.read())
@@ -2279,19 +2302,45 @@ class GpuWatch:
                     self.mhz.append(cur)
             time.sleep(0.2)
 
-    def stop(self) -> str:
-        """ "84 % busy at 1980 of 2000 MHz" (averages over the step), or "" when it couldn't tell."""
+    def stop(self, gpu: bool = True) -> str:
+        """ "GPU vytížená 84 % při 1980 z 2000 MHz, 23 W, 3,2 z 16 vláken CPU" (averages over the step; the GPU
+        part only for a GPU step, and only what it could tell)."""
+        import resource
         self.run = False
-        if len(self.busy) < 2:
-            return ""
-        text = f"{round(sum(self.busy) / len(self.busy))} % busy"
-        if self.mhz and self.top:
-            text += f" at {round(sum(self.mhz) / len(self.mhz))} of {self.top} MHz"
-        return text
+        parts = []
+        if gpu and len(self.busy) >= 2:
+            text = f"GPU vytížená {round(sum(self.busy) / len(self.busy))} %"
+            if self.mhz and self.top:
+                text += f" při {round(sum(self.mhz) / len(self.mhz))} z {self.top} MHz"
+            parts.append(text)
+        if self.watts:
+            parts.append(f"{sum(self.watts) / len(self.watts):.0f} W")
+        ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+        took = time.monotonic() - self.t0
+        if took > 0.2:
+            used = (ru.ru_utime + ru.ru_stime - self.cpu0) / took
+            parts.append(f"{used:.1f}".replace(".", ",") + f" z {os.cpu_count() or 1} vláken CPU")
+        return ", ".join(parts)
+
+
+# The steps' notes kept with the cached pictures were English before (and come so from older versions): shown
+# in Czech.
+CZ_STEPS = (("quick AI redraw", "rychlé AI překreslení"), ("AI redraw for detail", "AI překreslení pro detail"),
+            ("AI redrawn and upscaled", "AI překreslení a zvětšení"), ("AI redrawn", "AI překreslení"),
+            ("AI upscaled", "AI zvětšení"), ("upscaled (smooth", "zvětšeno (hladce"), ("sharpened", "zostřeno"),
+            ("denoised", "odšuměno a zostřeno"), ("final ", "výsledek "), (" on CPU", " na CPU"),
+            (" on GPU", " na GPU"), (" on NPU", " na NPU"), (" busy at ", " vytížená při "), (" of ", " z "),
+            (" threads", " vláken"), ("enhanced", "vylepšeno"))
+
+
+def cz_steps(text: str) -> str:
+    for en, cz in CZ_STEPS:
+        text = text.replace(en, cz)
+    return text
 
 
 def _secs(t: float) -> str:
-    return f"{t:.1f} s" if t < 10 else f"{t:.0f} s"
+    return f"{t:.1f} s".replace(".", ",") if t < 10 else f"{t:.0f} s"
 
 
 def _download(url: str, timeout: int = 120) -> bytes | None:
@@ -2327,7 +2376,7 @@ class Enhancer:
         self.vk_denoise = None  # None: not tested yet (the start-up test, after the downloads)
         self.vk_fail_px = 1 << 62  # pictures this big (pixels) came out black from the GPU denoise
         self.tile = self._load_tile()
-        self.status = "Starting…"
+        self.status = "Spouští se…"
         self.on_status, self.on_picture = on_status, on_picture
         self.jobs: dict[str, tuple] = {}  # kind ("logo" / "cover") -> job
         self.running: tuple | None = None
@@ -2350,7 +2399,7 @@ class Enhancer:
         # NPU (testing, off unless switched on): AMD XDNA through ONNX Runtime's Vitis AI provider.
         self.npu_wanted = False
         self.npu_ready = False  # driver, runtime and a model all found
-        self.npu_text = "Off"
+        self.npu_text = "Vypnuto"
         self.npu_model = None
         self.plock = threading.Lock()
         threading.Thread(target=self._worker, daemon=True).start()
@@ -2362,7 +2411,7 @@ class Enhancer:
         """What the NPU path has and lacks (for the gear menu): the amdxdna driver, ONNX Runtime with the Vitis
         AI provider (AMD's XRT and Ryzen AI Software), and a model for it."""
         if not self.npu_wanted:
-            self.npu_ready, self.npu_text = False, "Off: AI runs on the GPU"
+            self.npu_ready, self.npu_text = False, "Vypnuto: AI běží na GPU"
             return
         drivers = {os.path.basename(os.path.realpath(d))
                    for d in glob.glob("/sys/class/accel/accel*/device/driver")}
@@ -2376,15 +2425,15 @@ class Enhancer:
         has_ort, has_vai = bool(providers), "VitisAIExecutionProvider" in providers
         models = sorted(glob.glob(os.path.join(self.NPU_DIR, "*.onnx")))
         self.npu_model = models[0] if models else None
-        parts = ["NPU: " + ("found (amdxdna driver)" if have_npu else "not found (no amdxdna device)"),
-                 "runtime: " + ("ONNX Runtime with Vitis AI" if has_vai else
-                                "ONNX Runtime without the Vitis AI provider (AMD's XRT + Ryzen AI Software)" if has_ort
-                                else "missing (ONNX Runtime with Vitis AI: AMD's XRT + Ryzen AI Software)"),
+        parts = ["NPU: " + ("nalezena (ovladač amdxdna)" if have_npu else "nenalezena (žádné zařízení amdxdna)"),
+                 "běhové prostředí: " + ("ONNX Runtime s Vitis AI" if has_vai else
+                                "ONNX Runtime bez Vitis AI (AMD XRT + Ryzen AI Software)" if has_ort
+                                else "chybí (ONNX Runtime s Vitis AI: AMD XRT + Ryzen AI Software)"),
                  "model: " + (os.path.basename(self.npu_model) if self.npu_model else
-                              f"none (an NPU-built ONNX super-resolution model in {self.NPU_DIR})")]
+                              f"žádný (ONNX model pro zvětšování sestavený pro NPU do {self.NPU_DIR})")]
         self.npu_ready = have_npu and has_vai and bool(self.npu_model)
-        self.npu_text = " · ".join(parts) + (" — AI upscaling tries the NPU first" if self.npu_ready
-                                              else " — AI stays on the GPU")
+        self.npu_text = " · ".join(parts) + (" — AI zvětšování zkusí nejdřív NPU" if self.npu_ready
+                                              else " — AI zůstává na GPU")
         print(f"enhancer: {self.npu_text}", file=sys.stderr)
 
     def _npu(self, src: str, out: str, work: str) -> bool:
@@ -2496,52 +2545,54 @@ class Enhancer:
         cpu = f"{_cpu_name()} ({SIMD})" if SIMD else _cpu_name()
         gpu = f"GPU {self.gpu} (Vulkan)"
         if self.ai and self.soft:
-            parts = [f"No GPU for Vulkan here, so AI upscaling (Real-ESRGAN) on {self.gpu}: slow, but AI"]
+            parts = [f"Bez GPU pro Vulkan, takže AI zvětšování (Real-ESRGAN) na {self.gpu}: pomalé, ale AI"]
         elif self.ai:
-            parts = [f"AI upscaling and AI redraw for detail (Real-ESRGAN: x4plus for covers, "
-                     f"x4plus-anime for the logo): {gpu}"]
+            parts = [f"AI zvětšování a AI překreslování pro detail (Real-ESRGAN: x4plus pro obaly, "
+                     f"x4plus-anime pro logo): {gpu}"]
         else:
-            parts = [f"No Vulkan at all here (not even software), so smooth (Lanczos) upscaling: CPU {cpu}"]
+            parts = [f"Vůbec žádný Vulkan (ani softwarový), takže hladké zvětšování (Lanczos): CPU {cpu}"]
         if self.ffmpeg:
-            parts.append(f"sharpening: CPU {cpu}")
-            parts.append(f"denoising: {gpu}" if self.vk_denoise else
-                         "denoising: testing the GPU…" if self.vk_denoise is None else f"denoising: CPU {cpu}")
+            parts.append(f"zostřování: CPU {cpu}")
+            parts.append(f"odšumování: {gpu}" if self.vk_denoise else
+                         "odšumování: zkouší se GPU…" if self.vk_denoise is None else f"odšumování: CPU {cpu}")
         else:
-            parts.append("sharpening and denoising wait for ffmpeg (downloading)")
-        self._say("On. " + "; ".join(parts) + ".")
+            parts.append("zostřování a odšumování čekají na ffmpeg (stahuje se)")
+        self._say("Zapnuto. " + "; ".join(parts) + ".")
 
     def notes(self) -> str:
         """For the gear menu's notes: every picture step, its tool / AI model, and where it runs."""
-        cpu = f"CPU {_cpu_name()}" + (f" ({SIMD}: ffmpeg's widest code on it)" if SIMD else "")
+        cpu = f"CPU {_cpu_name()}" + (f" ({SIMD}: nejširší instrukce, které na něm ffmpeg použije)" if SIMD else "")
         on = (self.gpu if self.soft else f"GPU {self.gpu} (Vulkan)") if self.ai else None
-        lines = ["How pictures are made better:"]
+        lines = ["Jak se obrázky vylepšují:"]
         if self.ai is None:
-            lines.append("• AI: waiting for the GPU test (nothing is resized without AI until then)")
+            lines.append("• AI: čeká se na test GPU (do té doby se bez AI nic nezvětšuje)")
         elif self.ai:
-            lines += [f"• Quick AI pass: Real-ESRGAN {ESR_QUICK} (ncnn) on {on}",
-                      f"• Covers and show pictures: Real-ESRGAN {ESR_MODEL} (RealESRGAN_x4plus, 4x then "
-                      f"scaled down to the screen, Lanczos) on {on}",
-                      f"• Logo and app icon: Real-ESRGAN {ESR_MODEL_ART} (RealESRGAN_x4plus_anime_6B, "
-                      f"for flat colours and letters) on {on}",
-                      f"• Big pictures: AI redraw for detail from half size, same models, on {on}"]
+            lines += [f"• Rychlý AI průchod: Real-ESRGAN {ESR_QUICK} (ncnn) na {on}",
+                      f"• Obaly a obrázky pořadů: Real-ESRGAN {ESR_MODEL} (RealESRGAN_x4plus, 4× a pak "
+                      f"zmenšeno na obrazovku, Lanczos) na {on}",
+                      f"• Logo a ikona aplikace: Real-ESRGAN {ESR_MODEL_ART} (RealESRGAN_x4plus_anime_6B, "
+                      f"pro ploché barvy a písmena) na {on}",
+                      f"• Velké obrázky: AI překreslení pro detail z poloviční velikosti, stejné modely, na {on}"]
         else:
-            lines.append(f"• Upscaling: no Vulkan at all, so Lanczos (ffmpeg, not AI) on the {cpu}")
+            lines.append(f"• Zvětšování: žádný Vulkan, takže Lanczos (ffmpeg, ne AI) na {cpu}")
         if self.ffmpeg:
-            lines.append(f"• Sharpening: ffmpeg unsharp (fine + wide) and CAS on the {cpu}")
+            lines.append(f"• Zostřování: ffmpeg unsharp (jemné + široké) a CAS na {cpu}")
             if self.vk_denoise:
-                big = (f"; pictures of {self.vk_fail_px / 1e6:.1f} MP and more on the {cpu} (this GPU gives them "
-                       f"back black)" if self.vk_fail_px < 1 << 62 else "")
-                lines.append(f"• Denoising: ffmpeg nlmeans_vulkan on GPU {self.gpu}{big}")
+                big = (f"; obrázky od {self.vk_fail_px / 1e6:.1f} MP na {cpu} (tahle GPU je vrací "
+                       f"černé)" if self.vk_fail_px < 1 << 62 else "")
+                lines.append(f"• Odšumování: ffmpeg nlmeans_vulkan na GPU {self.gpu}{big}")
             elif self.vk_denoise is None:
-                lines.append("• Denoising: testing the GPU (ffmpeg nlmeans_vulkan); the CPU meanwhile")
+                lines.append("• Odšumování: zkouší se GPU (ffmpeg nlmeans_vulkan); mezitím CPU")
             else:
-                lines.append(f"• Denoising: ffmpeg NL-means on the {cpu}, {DENOISE_THREADS} threads (more aren't "
-                             f"faster: it waits on the memory; ffmpeg's Vulkan denoiser can't run here)")
-            lines.append(f"• App icon sizes: Lanczos down from the AI master (ffmpeg) on the {cpu}")
+                lines.append(f"• Odšumování: ffmpeg NL-means na {cpu}, {DENOISE_THREADS} vláken (víc nezrychlí: "
+                             f"čeká na paměť; Vulkan odšumovač ffmpegu tu neběží)")
+            lines.append(f"• Velikosti ikony aplikace: Lanczos zmenšený z AI předlohy (ffmpeg) na {cpu}")
         else:
-            lines.append("• Sharpening and denoising: waiting for ffmpeg")
-        lines.append("• Morph between steps: GTK (GSK) cross-fade on the GPU")
-        lines.append(f"• NPU (testing): {self.npu_text}")
+            lines.append("• Zostřování a odšumování: čeká se na ffmpeg")
+        lines.append("• Prolínání mezi kroky: GTK (GSK) na GPU")
+        lines.append("• U každého kroku: čas, kde běžel, vytížení a takt GPU, watty čipu (čidlo amdgpu: na APU "
+                     "celý čip) a kolik vláken CPU v průměru zaměstnal")
+        lines.append(f"• NPU (zkušebně): {self.npu_text}")
         return "\n".join(lines)
 
     def _picture(self, text: str) -> None:
@@ -2592,13 +2643,13 @@ class Enhancer:
                     GLib.idle_add(lambda: (then(), False)[1])
             if not need:
                 break
-            self._say(f"Downloading {' and '.join(need)}…")
+            self._say(f"Stahuje se {' a '.join(need)}…")
             got = (self._esr_ok() or self._install_esr()) and (self._ffmpeg_ok() or self._install_ffmpeg())
             if got:
                 continue
             wait = self.RETRY[min(tries, len(self.RETRY) - 1)]
             tries += 1
-            self._say(f"Download failed; trying again in {wait // 60} min (pictures shown as they are until then)")
+            self._say(f"Stahování selhalo; znovu za {wait // 60} min (do té doby obrázky, jak přijdou)")
             time.sleep(wait)
         self._test_vk_denoise()
         self._say_ready()
@@ -2766,11 +2817,11 @@ class Enhancer:
                 with open(hit[:-4] + ".txt") as f:
                     steps = f.read().strip()
             except OSError:
-                steps = "enhanced"
-            what = {"cover": "Cover", "logo": "Logo"}.get(kind, "Show picture")
+                steps = "vylepšeno"
+            what = {"cover": "Obal", "track": "Obal", "logo": "Logo"}.get(kind, "Obrázek pořadu")
             if self.on_picture:
-                self.on_picture(f"{what}: {src_size[0]}×{src_size[1]} px (original {_size(len(data))}) → "
-                                f"{size[0]}×{size[1]} px, {steps} (from the cache)", kind)
+                self.on_picture(f"{what}: {src_size[0]}×{src_size[1]} px (původně {_size(len(data))}) → "
+                                f"{size[0]}×{size[1]} px, {cz_steps(steps)} (z mezipaměti)", kind)
             self.drop(kind)
             return
         self.jobs[kind] = (key, data, src_size, size, done, screen)
@@ -2821,16 +2872,16 @@ class Enhancer:
         # a small picture while a panel is open: the quick AI pass and sharpening only, not cached (the full
         # enhancing follows in the background once the panels are closed)
         self.light = kind.startswith("pic:") and self.quiet
-        what = {"cover": "Cover", "logo": "Logo"}.get(kind, "Show picture")
+        what = {"cover": "Obal", "track": "Obal", "logo": "Logo"}.get(kind, "Obrázek pořadu")
         self.model = ESR_MODEL_ART if kind in ("logo", "icon") else ESR_MODEL
         same = size == (w0, h0)  # big enough already: no upscaling
         orig = _size(len(data))
         self.sizes[kind] = [len(data), None, None]  # source, fast enhanced (the first step shown), final
         if same:
-            scr = f"the {screen[0]}×{screen[1]} px screen" if screen else "the screen"
-            head = f"{what}: original {w0}×{h0} px ({orig}), no upscaling needed (big enough for {scr})"
+            scr = f"obrazovku {screen[0]}×{screen[1]} px" if screen else "obrazovku"
+            head = f"{what}: původně {w0}×{h0} px ({orig}), zvětšovat netřeba (dost velký na {scr})"
         else:
-            head = f"{what}: original {w0}×{h0} px ({orig}) → {size[0]}×{size[1]} px"
+            head = f"{what}: původně {w0}×{h0} px ({orig}) → {size[0]}×{size[1]} px"
         # The icon master only wants the final picture; everything else shows each step.
         sizes = self.sizes
         steps: list[str] = []
@@ -2865,10 +2916,11 @@ class Enhancer:
                     with open(cached[:-4] + ".txt") as f:
                         was = f.read().strip()
                 except OSError:
-                    was = "enhanced"
-                if "final " not in was:
-                    was += f", final {_size(len(pic))}"
-                self._picture(f"{head}, {was} ({f'fetched from {fetched}' if fetched else 'from the cache'})")
+                    was = "vylepšeno"
+                was = cz_steps(was)
+                if "výsledek " not in was:
+                    was += f", výsledek {_size(len(pic))}"
+                self._picture(f"{head}, {was} ({f'staženo z {fetched}' if fetched else 'z mezipaměti'})")
                 return
             os.remove(cached)
         if self.light:
@@ -2897,14 +2949,14 @@ class Enhancer:
         label = None
         t = time.monotonic()
         if self.ai:
-            show(f": quick AI pass on {self.gpu}…")
+            show(f": rychlý AI průchod na {self.gpu}…")
             t, watch = time.monotonic(), self._watch()
             quick = os.path.join(work, "quick.png")
             out = self._ai(src, src_size, size, quick, work, ESR_QUICK)
             if out == "killed" or not live():
                 return
             if out:
-                steps.append(f"quick AI redraw {_secs(time.monotonic() - t)} on {self._where(watch)}")
+                steps.append(f"rychlé AI překreslení {_secs(time.monotonic() - t)} na {self._where(watch)}")
                 emit(open(quick, "rb").read())
             if self.light and out:  # a small picture: the quick pass is enough
                 shutil.copyfile(quick, up)
@@ -2912,30 +2964,32 @@ class Enhancer:
                     sharp = os.path.join(work, "sharp.png")
                     self._keep(sharp, steps, emit, cached)
                 return
-            show(f", AI upscaling ({self.model}) on {self.gpu}…")
+            show(f", AI zvětšování ({self.model}) na {self.gpu}…")
             t = time.monotonic()
             watch = self._watch()
             full = self._ai(src, src_size, size, up, work, self.model)
             if full == "killed" or not live():
                 return
             if full:
-                label = f"AI {full} ({self.model}) {_secs(time.monotonic() - t)} on {self._where(watch)}"
+                label = f"AI {full} ({self.model}) {_secs(time.monotonic() - t)} na {self._where(watch)}"
             elif out:
                 shutil.copyfile(quick, up)
-                label = "(full AI pass failed, the quick one kept)"
+                label = "(plný AI průchod selhal, zůstal ten rychlý)"
                 cached = None  # the full pass again next time
         if label is None:
+            watch = self._watch()
             if not self._resize(src, size, up) or not live():
                 if live():
-                    show(": couldn't be upscaled, shown as it is")
+                    show(": nešlo zvětšit, ukázáno, jak je")
                 return
-            label = "upscaled (smooth: no Vulkan here for AI)" if not self.ai else "upscaled (smooth: AI failed)"
+            label = "zvětšeno (hladce: bez Vulkanu pro AI)" if not self.ai else "zvětšeno (hladce: AI selhala)"
             if self.ai:
                 cached = None  # AI again next time
-        steps.append(f"{label} {_secs(time.monotonic() - t)} on CPU" if label.startswith("up") else label)
+        steps.append(f"{label} {_secs(time.monotonic() - t)} na CPU, {watch.stop(False)}" if label.startswith("zvětš")
+                     else label)
         emit(open(up, "rb").read())
         if not self.ffmpeg:
-            show(" (sharpening and denoising: no ffmpeg yet)")
+            show(" (zostření a odšumění: zatím chybí ffmpeg)")
             return
         if self._sharpen(up, work, steps, show, live, emit):
             self._final(up, steps, show, live, emit, cached, work)
@@ -2944,7 +2998,7 @@ class Enhancer:
         """1. sharpened as it is, shown at once; 2. AI-redrawn for detail
         (when there's a GPU); 3. denoised and sharpened: the final one."""
         if not self.ffmpeg:
-            show(" (sharpening and denoising: no ffmpeg yet)")
+            show(" (zostření a odšumění: zatím chybí ffmpeg)")
             return
         orig = os.path.join(work, "orig.png")
         if not self._ff(["-i", src], "format=rgb24", orig):
@@ -2956,15 +3010,15 @@ class Enhancer:
             return
         base = orig
         if self.ai:
-            show(f", AI redrawing for detail on {self.gpu}…")
+            show(f", AI překreslování pro detail na {self.gpu}…")
             t, watch = time.monotonic(), self._watch()
             redrawn = os.path.join(work, "redrawn.png")
             out = self._ai(orig, size, size, redrawn, work, self.model)
             if out == "killed" or not live():
                 return
             if out:
-                steps.append(f"AI redraw for detail ({self.model}) {_secs(time.monotonic() - t)} "
-                             f"on {self._where(watch)}")
+                steps.append(f"AI překreslení pro detail ({self.model}) {_secs(time.monotonic() - t)} "
+                             f"na {self._where(watch)}")
                 base = redrawn
             else:
                 cached = None  # the redraw again next time
@@ -2978,13 +3032,13 @@ class Enhancer:
         w0, h0 = src_size
         # Real-ESRGAN reads plain 8-bit RGB only (a CMYK JPEG or a 16-bit PNG cover: "decode image failed"):
         # every picture goes in as one.
-        feed, how = os.path.join(work, "feed.png"), "upscaled"
+        feed, how = os.path.join(work, "feed.png"), "zvětšení"
         if not self._ff(["-i", src], "format=rgb24", feed):
             feed = src
         if min(w0, h0) >= REDRAW_FROM:
             half = os.path.join(work, "half.png")
             if self._ff(["-i", src], f"scale={w0 // 2}:{h0 // 2}:flags=lanczos,format=rgb24", half):
-                feed, how = half, "redrawn" if size == src_size else "redrawn and upscaled"
+                feed, how = half, "překreslení" if size == src_size else "překreslení a zvětšení"
         big = os.path.join(work, "x4.png")
         if self.npu_ready and self._npu(feed, big, work):
             return how if self._resize(big, size, out) else None
@@ -3010,22 +3064,22 @@ class Enhancer:
         return how
 
     def _sharpen(self, pic, work, steps, show, live, emit) -> bool:
-        show(", sharpening…")
-        t = time.monotonic()
+        show(", zostřování…")
+        t, watch = time.monotonic(), self._watch()
         sharp = os.path.join(work, "sharp.png")
-        if not self._ff(["-i", pic], SHARPEN, sharp) or not live():
+        if not self._ff(["-i", pic], SHARPEN, sharp, threads=os.cpu_count() or 1) or not live():
             if live():
-                show(" (sharpening failed)")
+                show(" (zostření selhalo)")
             return False
-        steps.append(f"sharpened {_secs(time.monotonic() - t)} on CPU{', ' + SIMD if SIMD else ''}")
+        steps.append(f"zostřeno {_secs(time.monotonic() - t)} na CPU{', ' + SIMD if SIMD else ''}, {watch.stop(False)}")
         emit(open(sharp, "rb").read())
         return True
 
     def _where(self, watch: GpuWatch | None = None) -> str:
         """Where the AI runs, for the steps' notes: on the GPU with how busy it was and its clock."""
-        where = "NPU" if self.npu_ready else "CPU (no GPU for Vulkan)" if self.soft else "GPU"
-        load = watch.stop() if watch else ""
-        return f"{where}, {load}" if where == "GPU" and load else where
+        where = "NPU" if self.npu_ready else "CPU (bez GPU pro Vulkan)" if self.soft else "GPU"
+        load = watch.stop(where == "GPU") if watch else ""
+        return f"{where}, {load}" if load else where
 
     def _watch(self) -> GpuWatch:
         watch = GpuWatch()
@@ -3040,7 +3094,7 @@ class Enhancer:
         with open(jpg, "rb") as f:
             pic = f.read()
         emit(pic, True)
-        steps.append(f"final {_size(len(pic))}")
+        steps.append(f"výsledek {_size(len(pic))}")
         if cached:
             os.makedirs(UPSCALED_DIR, exist_ok=True)
             with open(cached + ".part", "wb") as f:
@@ -3052,7 +3106,7 @@ class Enhancer:
 
     def _final(self, base, steps, show, live, emit, cached, work) -> None:
         """Denoised (GPU when ffmpeg can, else CPU), then sharpened: shown and cached."""
-        show(", denoising…")
+        show(", odšumování…")
         t, watch = time.monotonic(), self._watch()
         final = os.path.join(work, "final.jpg")
         from gi.repository import GdkPixbuf
@@ -3066,19 +3120,19 @@ class Enhancer:
         load = watch.stop()
         where = f"GPU, {load}" if load else "GPU"  # the NPU never denoises: not _where()
         if not ok and live():
-            t = time.monotonic()  # the CPU's own time
+            t, watch = time.monotonic(), self._watch()  # the CPU's own time
             ok = self._ff(["-i", base], f"{DENOISE},{SHARPEN}", final, jpeg=True, threads=DENOISE_THREADS)
-            where = f"CPU, {SIMD + ', ' if SIMD else ''}{DENOISE_THREADS} threads"
+            where = f"CPU, {SIMD + ', ' if SIMD else ''}{watch.stop(False)}"
         if not ok or not live():
             if live():
-                show(" (denoising failed)")
+                show(" (odšumění selhalo)")
             return
-        steps.append(f"denoised {_secs(time.monotonic() - t)} on {where}")
+        steps.append(f"odšuměno a zostřeno {_secs(time.monotonic() - t)} na {where}")
         with open(final, "rb") as f:
             pic = f.read()
         emit(pic, True)
-        steps.append(f"final {_size(len(pic))}")
-        show("" if cached else " (not cached: tried again next time)")
+        steps.append(f"výsledek {_size(len(pic))}")
+        show("" if cached else " (neuloženo: příště znovu)")
         if not cached:
             return
         os.makedirs(UPSCALED_DIR, exist_ok=True)
@@ -3190,26 +3244,26 @@ class Enhancer:
         src, fast, final = (self.sizes.get(kind) or [None, None, None])[:3]
         if not src:
             return ""
-        parts = [f"source {_size(src)}"]
+        parts = [f"původní {_size(src)}"]
         if fast:  # no first pass (from the cache, or a picture big enough already): left out
-            parts.append(f"fast enhanced {_size(fast)}")
-        parts.append(f"final enhanced {_size(final) if final is not None else '…'}")
-        return "Size: " + " / ".join(parts)
+            parts.append(f"rychle vylepšený {_size(fast)}")
+        parts.append(f"výsledný {_size(final) if final is not None else '…'}")
+        return "Velikost: " + " / ".join(parts)
 
     shared_counts: dict = {}  # the other computers' names -> (pictures there, pictures both have together)
 
     def cache_text(self) -> str:
         if self.cache_used < 0:
-            return "Cache: counting…"
+            return "Mezipaměť: počítá se…"
         try:
             here = sum(1 for f in os.listdir(UPSCALED_DIR) if f.endswith(".jpg"))
         except OSError:
             here = 0
-        pics = f"{here} pictures here"
+        pics = f"{obrazku(here)} tady"
         for who, (there, total) in self.shared_counts.items():
-            pics += f", {there} on {who.rsplit('-', 1)[0]}, {total} in all"
-        return (f"Cache: {pics}; {_size(self.cache_used)} used of {self.cache_allowed / 2**30:.1f} GB set aside "
-                f"(80 % of the free space, on this computer)")
+            pics += f", {there} na {who.rsplit('-', 1)[0]}, {total} celkem"
+        return (f"Mezipaměť: {pics}; zabráno {_size(self.cache_used)} z vyhrazených "
+                f"{self.cache_allowed / 2**30:.1f} GB (80 % volného místa na tomto počítači)".replace(".", ","))
 
     def _trim(self) -> None:
         """When the cache is full: the least used pictures go first (shown the fewest times), and of those the
@@ -3283,7 +3337,7 @@ class CacheShare:
         self.on_status = on_status
         self.on = False
         self.peers: dict[str, str] = {}  # address -> its name
-        self.text = "Off"
+        self.text = "Vypnuto"
         self.port_note = ""
         self.got = self.gave = 0  # pictures fetched and handed over since the start
         self.server = None
@@ -3324,7 +3378,7 @@ class CacheShare:
             self.server.shutdown()
             self.server.server_close()
             self.server = None
-        self._say("Looking for other computers on this network…" if on else "Off")
+        self._say("Hledají se další počítače v této síti…" if on else "Vypnuto")
         if on:
             self.wake.set()
 
@@ -3478,7 +3532,7 @@ class CacheShare:
             self.server = http.server.ThreadingHTTPServer(("0.0.0.0", SHARE_PORT), Handler)
         except OSError as e:
             self.server = None
-            self._say(f"Can't serve the pictures (port {SHARE_PORT}: {e.strerror}); still fetches from others")
+            self._say(f"Obrázky nejde nabízet (port {SHARE_PORT}: {e.strerror}); od ostatních se dál stahuje")
             return
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -3528,15 +3582,15 @@ class CacheShare:
             self._note("")
             return
         wall, cmd = got
-        how = f"run once in a terminal: sudo sh -c '{cmd}'"
+        how = f"jednou spusť v terminálu: sudo sh -c '{cmd}'"
         if os.path.exists(self.REFUSED):
-            self._note(f"The firewall ({wall}) turns the others away; this one still fetches and hands over. "
-                      f"To let them in, turn sharing off and on (asks again), or {how}")
+            self._note(f"Firewall ({wall}) ostatní odmítá; tento počítač dál stahuje a předává. "
+                      f"Aby je pustil, vypni a zapni sdílení (zeptá se znovu), nebo {how}")
             return
-        self._note(f"Asking for the administrator's password to open port {SHARE_PORT} ({wall}, this network only)…")
+        self._note(f"Žádá se heslo správce pro otevření portu {SHARE_PORT} ({wall}, jen tato síť)…")
         r = self._run(["pkexec", "sh", "-c", cmd]) if shutil.which("pkexec") else None
         if r is not None and r.returncode == 0:
-            self._note(f"Port {SHARE_PORT} opened in the firewall ({wall}, local network only).")
+            self._note(f"Port {SHARE_PORT} ve firewallu otevřen ({wall}, jen místní síť).")
             self.wake.set()
             return
         if r is not None and r.returncode in (126, 127) and "agent" not in (r.stderr or "").lower():
@@ -3545,8 +3599,8 @@ class CacheShare:
                     f.write(time.strftime("%Y-%m-%d %H:%M"))
             except OSError:
                 pass
-        self._note(f"Couldn't open port {SHARE_PORT} in the firewall ({wall}); this one still fetches and hands "
-                  f"over. To let the others in too, {how}")
+        self._note(f"Port {SHARE_PORT} ve firewallu otevřít nešlo ({wall}); tento počítač dál stahuje a předává. "
+                  f"Aby šli dovnitř i ostatní: {how}")
 
     # finding the others, and swapping pictures with them
     def _loop(self) -> None:
@@ -3556,7 +3610,7 @@ class CacheShare:
                 try:
                     self._round()
                 except Exception as e:  # never the app's end
-                    self._say(f"Sharing failed: {e}")
+                    self._say(f"Sdílení selhalo: {e}")
             self.wake.wait(SHARE_EVERY)
             self.wake.clear()
 
@@ -3654,8 +3708,8 @@ class CacheShare:
             pass
         self.plays_in += got
         self.plays_out += sent
-        return (f"; played songs: {got} new from there, {sent} sent ({self.history.count()} in all here); "
-                f"track info: {info_got} songs filled in from there, {info_sent} sent")
+        return (f"; hrané skladby: {got} nových odtamtud, {sent} odesláno ({self.history.count()} celkem tady); "
+                f"informace o skladbách: {info_got} doplněno odtamtud, {info_sent} odesláno")
 
     def fetch(self, name: str) -> str | None:
         """A picture about to be made: fetched from a computer that has it already (with its notes).
@@ -3698,7 +3752,7 @@ class CacheShare:
     def _round(self) -> None:
         self.peers = self._find()
         if not self.peers:
-            self._say(f"No other computer with Rádio Beat on this network yet (looks every {SHARE_EVERY // 60} min)")
+            self._say(f"V této síti zatím žádný další počítač s Rádiem Beat (hledá každých {SHARE_EVERY // 60} min)")
             return
         for ip, who in self.peers.items():
             theirs = set(json.loads(self._ask(ip, "/radio-beat/v1/list")).get("files", []))
@@ -3739,8 +3793,8 @@ class CacheShare:
             mine = self._names()
             self.enh.shared_counts[who] = (len(jpg(theirs)), len(jpg(theirs | mine)))
             plays = self._plays(ip, who)
-            self._say(f"Shared with {who.rsplit('-', 1)[0]} ({ip}) at {time.strftime('%H:%M')}: "
-                      f"{got} pictures fetched, {gave} handed over (since the start: {self.got} in, {self.gave} out)"
+            self._say(f"Sdíleno s {who.rsplit('-', 1)[0]} ({ip}) v {time.strftime('%H:%M')}: "
+                      f"{got} obrázků staženo, {gave} předáno (od spuštění: {self.got} sem, {self.gave} tam)"
                       f"{plays}")
         if self.got:
             self.enh._trim()
@@ -5247,7 +5301,7 @@ class Window(Adw.ApplicationWindow):
         header = self.header = Adw.HeaderBar(show_title=False, valign=Gtk.Align.START,
                                              show_start_title_buttons=False, show_end_title_buttons=False)
         header.add_css_class("overlay-header")
-        close = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="Close (keeps playing in the tray)")
+        close = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="Zavřít (hraje dál v oznamovací oblasti)")
         close.connect("clicked", lambda *_: self.close())
         close.add_css_class("close-button")
         # Close and the gear in glass tiles like the dishes below (close in red glass).
@@ -5272,7 +5326,7 @@ class Window(Adw.ApplicationWindow):
                 gear.add_controller(m)
             header.pack_end(tile)
         # 'i': the programme and curiosities, in glass water flowing down from it (the puddle)
-        info_btn = Gtk.Button(label="i", tooltip_text="Programme and curiosities")
+        info_btn = Gtk.Button(label="i", tooltip_text="Program a zajímavosti")
         info_btn.add_css_class("info-button")
         info_btn.connect("clicked", lambda *_: self.toggle_puddle())
         tile = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER, hexpand=False)
@@ -5396,7 +5450,7 @@ class Window(Adw.ApplicationWindow):
         self.play_btn.add_css_class("round")
         self.play_btn.add_css_class("play-button")
         self.play_btn.connect("clicked", lambda *_: app.toggle_pause())
-        stop = Gtk.Button(icon_name="media-playback-stop-symbolic", tooltip_text="Stop and quit",
+        stop = Gtk.Button(icon_name="media-playback-stop-symbolic", tooltip_text="Zastavit a ukončit",
                           valign=Gtk.Align.CENTER)
         stop.add_css_class("round")
         stop.add_css_class("stop-button")
@@ -5472,7 +5526,7 @@ class Window(Adw.ApplicationWindow):
         group = Adw.PreferencesGroup()
         # Quality: the stream now and a bobbing arrow; its list opens from the menu's left edge, glass like
         # the menu, best sound first.
-        self.quality = Adw.ActionRow(title="Quality", activatable=True)
+        self.quality = Adw.ActionRow(title="Kvalita", activatable=True)
         self.quality_now = Gtk.Label(xalign=1)
         self.quality_now.add_css_class("dim-label")
         arrow = Gtk.Image(icon_name="pan-down-symbolic")
@@ -5483,7 +5537,7 @@ class Window(Adw.ApplicationWindow):
         self.quality_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         self.quality_list.add_css_class("boxed-list")
         self.quality_list.connect("row-activated", self.on_quality)
-        head = Gtk.Label(label="Best sound first", xalign=0, margin_start=12, margin_top=8, margin_bottom=4)
+        head = Gtk.Label(label="Nejlepší zvuk nahoře", xalign=0, margin_start=12, margin_top=8, margin_bottom=4)
         head.add_css_class("dim-label")
         head.add_css_class("caption")
         qbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_top=6, margin_bottom=6, margin_start=6,
@@ -5504,56 +5558,56 @@ class Window(Adw.ApplicationWindow):
         self.quality.connect("activated", lambda *_: self.quality_pop.popup())
         self.fill_quality()
         group.add(self.quality)
-        auto = Adw.SwitchRow(title="Start at login", subtitle="Plays with just the tray icon")
+        auto = Adw.SwitchRow(title="Spustit po přihlášení", subtitle="Hraje jen s ikonou v oznamovací oblasti")
         auto.set_active(autostart_on())
         auto.connect("notify::active", lambda r, _: set_autostart(r.get_active()))
         group.add(auto)
-        self.card_row = Adw.SwitchRow(title="Volume on the sound card", subtitle=self.app.card_text(),
+        self.card_row = Adw.SwitchRow(title="Hlasitost na zvukové kartě", subtitle=self.app.card_text(),
                                       subtitle_lines=0, sensitive=self.app.card.ok)
         self.card_row.set_active(self.app.card_on())
         self.card_row.connect("notify::active", lambda r, _: self.app.set_card_volume(r.get_active()))
         group.add(self.card_row)
-        self.picture_row = Adw.ActionRow(title="Picture now", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
+        self.picture_row = Adw.ActionRow(title="Obrázek teď", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
         group.add(self.picture_row)
-        self.recognise_row = Adw.SwitchRow(title="Recognise songs (testing)", subtitle_lines=0)
+        self.recognise_row = Adw.SwitchRow(title="Rozpoznávat skladby (zkušebně)", subtitle_lines=0)
         self.recognise_row.set_active(self.app.settings.get("recognise", False))
         self.recognise_row.connect("notify::active", lambda r, _: self.app.set_recognise(r.get_active()))
         group.add(self.recognise_row)
         if is_kde():
-            near = Adw.SwitchRow(title="Open in the corner", subtitle="Bottom right, on the taskbar by the clock (also after full screen)")
+            near = Adw.SwitchRow(title="Otevírat v rohu", subtitle="Vpravo dole, na liště u hodin (i po celé obrazovce)")
             near.set_active(self.app.settings.get("tray_popup", True))
             near.connect("notify::active", lambda r, _: self.app.set_tray_popup(r.get_active()))
             group.add(near)
-        self.enhance_row = Adw.SwitchRow(title="Enhance pictures", subtitle=self.app.enhance_status(),
+        self.enhance_row = Adw.SwitchRow(title="Vylepšovat obrázky", subtitle=self.app.enhance_status(),
                                          subtitle_lines=0)
         self.enhance_row.set_active(self.app.settings.get("enhance", True))
         self.enhance_row.connect("notify::active", lambda r, _: self.app.set_enhance(r.get_active()))
         group.add(self.enhance_row)
-        self.share_row = Adw.SwitchRow(title="Share pictures on this network", subtitle_lines=0,
+        self.share_row = Adw.SwitchRow(title="Sdílet obrázky v této síti", subtitle_lines=0,
                                        subtitle=GLib.markup_escape_text(self.app.share_status()))
         self.share_row.set_active(self.app.settings.get("share", True))
         self.share_row.connect("notify::active", lambda r, _: self.app.set_share(r.get_active()))
         group.add(self.share_row)
-        self.npu_row = Adw.SwitchRow(title="Use the NPU (testing)", subtitle=self.app.enhancer.npu_text,
+        self.npu_row = Adw.SwitchRow(title="Použít NPU (zkušebně)", subtitle=self.app.enhancer.npu_text,
                                      subtitle_lines=0)
         self.npu_row.set_active(self.app.settings.get("npu", False))
         self.npu_row.connect("notify::active", lambda r, _: self.app.set_npu(r.get_active()))
         group.add(self.npu_row)
         dialect = Adw.SwitchRow(title="Ostravština",
-                                subtitle="The texts about the song, the artist and the show in the Ostrava dialect "
-                                         "(short vowels, fest, fajne); off: standard Czech", subtitle_lines=0)
+                                subtitle="Texty o skladbě, interpretovi a pořadu po ostravsku "
+                                         "(krátké samohlásky, fest, fajne); vypnuto: spisovně", subtitle_lines=0)
         dialect.set_active(self.app.settings.get("ostrava", True))
         dialect.connect("notify::active", lambda r, _: (self.app.set_look(ostrava=r.get_active()), self.app.update()))
         group.add(dialect)
-        style = Adw.SwitchRow(title="Beat Radio text style",
-                              subtitle="Fonts like the station logo's (Anton, Oswald); off: the normal ones"
-                              if self.app.fonts_ok else "Off: its fonts are missing (fonts/ folder)",
+        style = Adw.SwitchRow(title="Písmo Beat Radio",
+                              subtitle="Písma jako v logu stanice (Anton, Oswald); vypnuto: běžná"
+                              if self.app.fonts_ok else "Vypnuto: chybí jeho písma (složka fonts/)",
                               subtitle_lines=0, sensitive=self.app.fonts_ok)
         style.set_active(self.app.fonts_ok and self.app.settings.get("font", "beat") == "beat")
         style.connect("notify::active", lambda r, _: self.app.set_look(font="beat" if r.get_active() else "default"))
         group.add(style)
-        shade = Adw.ActionRow(title="Background shade",
-                              subtitle="How much the panels behind the text darken the cover", subtitle_lines=0)
+        shade = Adw.ActionRow(title="Ztmavení pozadí",
+                              subtitle="Jak moc plochy za textem ztmaví obal", subtitle_lines=0)
         self.shade_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
         self.shade_scale.set_value(self.app.settings.get("shade", 100))
         self.shade_scale.set_size_request(220, -1)  # the menu is wide now: room for a slider you can see
@@ -5565,20 +5619,20 @@ class Window(Adw.ApplicationWindow):
         self.shade_scale.connect("value-changed", lambda sc: self.app.set_look(shade=round(sc.get_value())))
         shade.add_suffix(self.shade_scale)
         group.add(shade)
-        start_full = Adw.SwitchRow(title="Start in full screen",
-                                   subtitle="Opens filling the screen; a double click makes it a window"
-                                   + (" in the bottom-right corner" if is_kde() else ""), subtitle_lines=0)
+        start_full = Adw.SwitchRow(title="Spouštět přes celou obrazovku",
+                                   subtitle="Otevře se přes celou obrazovku; dvojklik z něj udělá okno"
+                                   + (" v pravém dolním rohu" if is_kde() else ""), subtitle_lines=0)
         start_full.set_active(self.app.settings.get("start_full", True))
         start_full.connect("notify::active", lambda r, _: self.app.set_look(start_full=r.get_active()))
         group.add(start_full)
-        auto_up = Adw.SwitchRow(title="Update by itself",
-                                subtitle="Looks for a new version every 5 minutes, installs it and restarts",
+        auto_up = Adw.SwitchRow(title="Aktualizovat se samo",
+                                subtitle="Každých 5 minut hledá novou verzi, nainstaluje ji a restartuje se",
                                 subtitle_lines=0)
         auto_up.set_active(self.app.settings.get("auto_update", True))
         auto_up.connect("notify::active", lambda r, _: self.app.set_look(auto_update=r.get_active()))
         group.add(auto_up)
-        self.update_row = Adw.ActionRow(title="Updates")
-        self.update_btn = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
+        self.update_row = Adw.ActionRow(title="Aktualizace")
+        self.update_btn = Gtk.Button(label="Zkontrolovat", valign=Gtk.Align.CENTER)
         self.update_btn.connect("clicked", lambda *_: self.app.update_clicked())
         self.update_row.add_suffix(self.update_btn)
         group.add(self.update_row)
@@ -5602,7 +5656,7 @@ class Window(Adw.ApplicationWindow):
                                  vscrollbar_policy=Gtk.PolicyType.AUTOMATIC, vexpand=True)
         fit.add_css_class("gear-menu")
         self.menu_content = fit
-        btn = Gtk.Button(icon_name="emblem-system-symbolic", tooltip_text="Settings")
+        btn = Gtk.Button(icon_name="emblem-system-symbolic", tooltip_text="Nastavení")
         btn.add_css_class("gear-button")
         btn.connect("clicked", lambda *_: self.toggle_water(self.gear_water))
         return btn
@@ -6677,15 +6731,15 @@ class Window(Adw.ApplicationWindow):
                 parts.append(f"backup: {a.stream()[1]}")
             self.status.set_text(" · ".join(parts) if parts else "Connecting…")
         self.update_note.set_text(a.update_text)
-        self.update_btn.set_label("Update" if a.update_ready else "Check")
+        self.update_btn.set_label("Aktualizovat" if a.update_ready else "Zkontrolovat")
         self.update_btn.set_sensitive(not a.update_busy)
         (self.update_btn.add_css_class if a.update_ready else self.update_btn.remove_css_class)("suggested-action")
         if abs(self.vol.get_value() - a.volume_now()) >= 1:
             self.vol.set_value(a.volume_now())
         self.card_row.set_subtitle(a.card_text())
         self.recognise_row.set_subtitle(GLib.markup_escape_text(
-            "When the stream names no song (jingles, breaks), a 12 s clip is recognised once a minute through "
-            f"Shazam's unofficial API (shazamio). {a.recognise_text}"))
+            "Když stream nepojmenuje skladbu (znělky, přestávky), jednou za minutu se 12s ukázka rozpozná přes "
+            f"neoficiální API Shazamu (shazamio). {a.recognise_text}"))
 
 
 def _track_refresh(self) -> None:
@@ -6794,7 +6848,7 @@ class App(Adw.Application):
         self.card_set_at = 0.0  # when the slider last set it
         self._vol_cur = self._vol_target = 0.0  # mpv's volume now, and where it's gliding to
         self.muted = False  # the speaker button
-        self.recognise_text = "Off"
+        self.recognise_text = "Vypnuto"
         self._recognise_id = 0
         self._recognising = False
         self._recognised_last = None
@@ -6811,7 +6865,7 @@ class App(Adw.Application):
         self.alt = 0  # streams moved on from the chosen one (backup servers)
         self.last_reconnect = 0.0
         self.quitting = False
-        self.update_text = "Not checked yet"
+        self.update_text = "Zatím nezkontrolováno"
         self.update_ready = False
         self.update_busy = False
         for name, which in (("info", "info_water"), ("settings", "gear_water")):
@@ -6952,7 +7006,7 @@ class App(Adw.Application):
     def check_update(self):
         if self.update_busy:
             return
-        self.update_busy, self.update_text = True, "Checking…"
+        self.update_busy, self.update_text = True, "Kontroluje se…"
         self.update()
 
         def work():
@@ -6971,7 +7025,7 @@ class App(Adw.Application):
         if not self.update_ready:
             self.check_update()
             return
-        self.update_busy, self.update_text = True, "Updating…"
+        self.update_busy, self.update_text = True, "Aktualizuje se…"
         self.update()
 
         def work():
@@ -6981,7 +7035,7 @@ class App(Adw.Application):
 
     def _updated(self, err):
         if err:
-            self.update_busy, self.update_text = False, f"Update failed: {err}"
+            self.update_busy, self.update_text = False, f"Aktualizace selhala: {err}"
             self.update()
             return False
         # Start the new version once this one is gone (same app id), then quit; with the window only if it was up.
@@ -7226,7 +7280,7 @@ class App(Adw.Application):
     def frames_text(self) -> str:
         """How smooth the animations run on this screen: measured, the last one and the last 10 minutes."""
         if not self._frames:
-            return "no animation measured yet"
+            return "zatím žádná animace nezměřena"
         hz = 60.0
         try:
             mon = self.win.get_display().get_monitor_at_surface(self.win.get_surface())
@@ -7239,8 +7293,8 @@ class App(Adw.Application):
         on_time = sum(1 for x in every if x <= late) / len(every)
         size = self.screen_px()
         where = f"{size[0]}×{size[1]} px, {hz:.0f} Hz" if size else f"{hz:.0f} Hz"
-        return (f"{where}: the last one {1000 / last[len(last) // 2]:.0f} fps, slowest frame {last[-1]:.0f} ms; "
-                f"the last 10 minutes {on_time:.0%} of {len(every)} frames on time (within {late:.0f} ms)")
+        return (f"{where}: poslední {1000 / last[len(last) // 2]:.0f} fps, nejpomalejší snímek {last[-1]:.0f} ms; "
+                f"posledních 10 minut {on_time:.0%} z {len(every)} snímků včas (do {late:.0f} ms)")
 
     # volume: Rádio Beat's own (mpv), or the sound card's (card_on: mpv stays at 100 %, a knob on the card moves the slider)
     def card_on(self) -> bool:
@@ -7248,10 +7302,10 @@ class App(Adw.Application):
 
     def card_text(self) -> str:
         if not self.card.ok:
-            return "Off: needs pactl (the PipeWire/PulseAudio sound tools)"
+            return "Vypnuto: chybí pactl (zvukové nástroje PipeWire/PulseAudio)"
         if not self.card_on():
-            return "Off: the slider is Rádio Beat's own volume"
-        return f"The slider is {self.card_name or 'the sound card'}'s volume: its knob moves the slider too"
+            return "Vypnuto: posuvník je vlastní hlasitost Rádia Beat"
+        return f"Posuvník je hlasitost karty {self.card_name or 'zvukové karty'}: její knoflík hýbe i posuvníkem"
 
     def volume_now(self) -> int:
         return self.card_vol if self.card_on() and self.card_vol is not None else self.settings["volume"]
@@ -7599,10 +7653,10 @@ class App(Adw.Application):
         self.settings["recognise"] = on
         save_settings(self.settings)
         if on:
-            self.recognise_text = "Getting ready…"
+            self.recognise_text = "Připravuje se…"
             threading.Thread(target=self._shazam_setup, daemon=True).start()
         else:
-            self.recognise_text = "Off"
+            self.recognise_text = "Vypnuto"
         self._recognise_changed()
 
     def _shazam_setup(self) -> None:
@@ -7610,17 +7664,17 @@ class App(Adw.Application):
         py = os.path.join(self.SHAZAM_DIR, "bin", "python3")
         ok = os.path.exists(py) and subprocess.run([py, "-c", "import shazamio"], capture_output=True).returncode == 0
         if not ok:
-            GLib.idle_add(self._recognise_status, "Installing shazamio (once)…")
+            GLib.idle_add(self._recognise_status, "Instaluje se shazamio (jednou)…")
             r = subprocess.run(["python3", "-m", "venv", self.SHAZAM_DIR], capture_output=True, text=True)
             if r.returncode == 0:
                 r = subprocess.run([py, "-m", "pip", "install", "--quiet", "shazamio"], capture_output=True, text=True,
                                    timeout=900)
             ok = r.returncode == 0
             if not ok:
-                GLib.idle_add(self._recognise_status, "Couldn't install shazamio: "
+                GLib.idle_add(self._recognise_status, "shazamio nešlo nainstalovat: "
                               + ((r.stderr or "").strip().splitlines() or ["?"])[-1][:120])
                 return
-        GLib.idle_add(self._recognise_status, "Ready: songs the stream doesn't name are recognised (Shazam)")
+        GLib.idle_add(self._recognise_status, "Připraveno: skladby, které stream nepojmenuje, se rozpoznávají (Shazam)")
         GLib.idle_add(self._recognise_tick)
 
     def _recognise_status(self, text: str) -> bool:
@@ -7636,9 +7690,9 @@ class App(Adw.Application):
     def notes_text(self) -> str:
         """The gear menu's notes: the picture steps, and what the song recognition did last."""
         text = self.enhancer.notes()
-        text += f"\n• Animations: {self.frames_text()}"
+        text += f"\n• Animace: {self.frames_text()}"
         if self.settings.get("recognise", False):
-            text += f"\n• Song recognition (testing): {self.recognise_text}"
+            text += f"\n• Rozpoznávání skladeb (zkušebně): {self.recognise_text}"
         return text
 
     def _recognise_tick(self) -> bool:
@@ -7683,12 +7737,12 @@ class App(Adw.Application):
     def _recognised(self, found, rec: float = 0.0, took: float = 0.0) -> bool:
         self._recognising = False
         when = time.strftime("%H:%M")
-        how = f"(12 s clip recorded in {_secs(rec)}, Shazam, unofficial API)"
+        how = f"(12s ukázka nahraná za {_secs(rec)}, Shazam, neoficiální API)"
         if not found:
-            self.recognise_text = f"{when}: nothing found in {_secs(took)} {how}"
+            self.recognise_text = f"{when}: nic nenalezeno za {_secs(took)} {how}"
             self._recognise_changed()
             return False
-        self.recognise_text = f"{when}: found {found[0]} – {found[1]} in {_secs(took)} {how}"
+        self.recognise_text = f"{when}: nalezeno {found[0]} – {found[1]} za {_secs(took)} {how}"
         if not self.station_only():
             self.recognise_text += " – not shown: the stream names a song by now"
         elif found == self._recognised_last:
@@ -7975,7 +8029,7 @@ class App(Adw.Application):
 
     def enhance_status(self) -> str:
         if not self.settings.get("enhance", True):
-            return "Off: pictures are shown as they come."
+            return "Vypnuto: obrázky se ukazují, jak přijdou."
         return f"{self.enhancer.status} {self.icon_text}".strip()
 
     def _enhance_status_changed(self, _text: str) -> None:
@@ -8006,8 +8060,8 @@ class App(Adw.Application):
             self.win.share_row.set_subtitle(GLib.markup_escape_text(self.share_status()))
 
     def share_status(self) -> str:
-        return ("Every computer with Rádio Beat on this network keeps the same enhanced pictures (each its own "
-                f"copy, none twice): what one makes, the others have too. {self.share.text} "
+        return ("Každý počítač s Rádiem Beat v této síti má stejné vylepšené obrázky (každý svou kopii, nic "
+                f"dvakrát): co udělá jeden, mají i ostatní. {self.share.text} "
                 f"{self.share.port_note}").strip()
 
     def enhance_px(self) -> tuple[int, int] | None:
@@ -8022,7 +8076,7 @@ class App(Adw.Application):
         save_settings(self.settings)
         self.enhancer.npu_wanted = on
         if self.win:
-            self.win.npu_row.set_subtitle("Checking…" if on else "Off: AI runs on the GPU")
+            self.win.npu_row.set_subtitle("Kontroluje se…" if on else "Vypnuto: AI běží na GPU")
 
         def work():
             self.enhancer.npu_probe()
@@ -8148,14 +8202,14 @@ class App(Adw.Application):
         except (OSError, ValueError):
             mark = {}
         if mark.get("logo") == self._sha(logo) and mark.get("256") == self._sha(self._icon_paths(256)[0]):
-            self.icon_text = "App icon: AI-sharpened in every size."
+            self.icon_text = "Ikona aplikace: AI zostřená ve všech velikostech."
             self._enhance_status_changed("")
             return
         with open(logo, "rb") as f:
             data = f.read()
         tex = Gdk.Texture.new_from_filename(logo)
         w, h = tex.get_width(), tex.get_height()
-        self.icon_text = "App icon: being made sharper…"
+        self.icon_text = "Ikona aplikace: zostřuje se…"
         self._enhance_status_changed("")
         self.enhancer.request("icon", f"icon:{self._sha(logo)}", data, (w, h), (w * 4, h * 4),
                               lambda pic: threading.Thread(target=self._icons_from, args=(pic, logo),
@@ -8215,7 +8269,7 @@ class App(Adw.Application):
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if cmd[0].startswith("kbuildsycoca"):
                     break
-        self.icon_text = "App icon: AI-sharpened in every size (new icons show after the next start)."
+        self.icon_text = "Ikona aplikace: AI zostřená ve všech velikostech (nové ikony po příštím spuštění)."
         self._enhance_status_changed("")
         return False
 
