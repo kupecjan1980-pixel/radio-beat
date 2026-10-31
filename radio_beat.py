@@ -5790,7 +5790,9 @@ class Window(Adw.ApplicationWindow):
         qglass.append(self.quality_fit)
         self.quality_pop = Gtk.Popover(child=qglass, has_arrow=False, position=Gtk.PositionType.TOP)
         self.quality_pop.add_css_class("glass-menu")
-        self.quality_pop.set_parent(pill)
+        # hung from the tab, not the pill: a popover parented to the (homogeneous) pill box counts in its width
+        # when open, and the pill grew to the menu's width, squeezing the volume slider to half
+        self.quality_pop.set_parent(self.quality_tab)
         self.quality_pop.connect("show", self._place_quality)
         self.quality_tab.connect("clicked", lambda *_: self.quality_pop.popup())
         self.fill_quality()
@@ -5829,13 +5831,17 @@ class Window(Adw.ApplicationWindow):
             self.app.set_quality(row.sid)
             self.fill_quality()
 
+    QUALITY_GAP = 10  # between the pill and its menu (as the gear menu's)
+
     def _place_quality(self, pop) -> None:
-        """Above the pill, its right edge on the pill's (the notes wrap)."""
+        """Above the pill, a gap between, its right edge on the pill's (the notes wrap)."""
         pw = self.quality_pill.get_width()
         w = max(pw, min(self.get_width() - 44, 460))
         self.quality_fit.set_size_request(w, -1)
+        ok, at = self.quality_pill.compute_point(self.quality_tab, Graphene.Point().init(0, 0))
+        px, py = (at.x, at.y) if ok else (0, 0)  # the pill's corner, in the tab (the popover's parent)
         r = Gdk.Rectangle()
-        r.x, r.y, r.width, r.height = pw - w, 0, w, 1
+        r.x, r.y, r.width, r.height = round(px + pw - w), round(py - self.QUALITY_GAP), w, 1
         pop.set_pointing_to(r)
         GLib.idle_add(lambda: (pop.get_child().queue_draw(), False)[1])
 
