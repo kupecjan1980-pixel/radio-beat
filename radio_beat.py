@@ -148,15 +148,35 @@ function place(w) {  // true when it was put there (not while full screen or sti
     w.frameGeometry = {x: a.x + a.width - g.width, y: a.y + a.height - g.height, width: g.width, height: g.height};
     return true;
 }
+function corner(w) {  // the bottom-right rectangle for the window's size as a window (not full screen)
+    var a = workspace.clientArea(KWin.MaximizeArea, w);
+    var r = w.fullscreenGeometryRestore;
+    var width = r && r.width > 0 && r.width < a.width ? r.width : Math.min(560, a.width);
+    var height = r && r.height > 0 && r.height < a.height ? r.height : Math.min(760, a.height);
+    return {x: a.x + a.width - width, y: a.y + a.height - height, width: width, height: height};
+}
+function landing(w) {  // full screen: leaving it lands in the corner (no stop at the top left on the way)
+    if (!w.fullScreen) return;
+    try { w.fullscreenGeometryRestore = corner(w); } catch (e) {}
+}
 function watch(w) {
     if (!w || w.resourceClass !== "%s") return;
     // KWin gives the window its size back after these signals: it's placed at the next fitting geometry.
     // Once placed, moving it by hand stays.
     var due = !place(w);
+    landing(w);
     function again() { due = !place(w); }
     if (w.frameGeometryChanged) w.frameGeometryChanged.connect(function () { if (due && place(w)) due = false; });
-    if (w.fullScreenChanged) w.fullScreenChanged.connect(again);
-    if (w.minimizedChanged) w.minimizedChanged.connect(function () { if (!w.minimized) again(); });
+    if (w.fullScreenChanged) w.fullScreenChanged.connect(function () {
+        if (w.fullScreen) { landing(w); return; }
+        w.frameGeometry = corner(w);  // straight to the corner, before it's drawn anywhere else
+        again();
+    });
+    // brought back from the taskbar or the tray: always a window in the corner, even if it was full screen
+    if (w.minimizedChanged) w.minimizedChanged.connect(function () {
+        if (w.minimized) return;
+        if (w.fullScreen) { landing(w); w.fullScreen = false; } else again();
+    });
 }
 (workspace.windowAdded || workspace.clientAdded).connect(watch);
 """ % (APP_ID, APP_ID)
@@ -3443,13 +3463,11 @@ CSS = b"""
 .puddle button.puddle-tab.on-air { background: none; }
 .puddle .puddle-now { background: rgba(227,5,26,0.25); border-radius: 10px; padding: 6px; }
 .puddle .puddle-past { opacity: 0.55; }
-.viewer { background: rgba(0,0,0,0.93); }
-button.track-btn { min-width: 0; min-height: 0; padding: 6px; border-radius: 999px; color: white;
-                   background: rgba(255,255,255,0.12); }
-button.track-btn:hover { background: rgba(255,255,255,0.25); }
-button.track-btn.playing { background: #E3051A; }
-button.viewer-btn { padding: 14px; }
-.viewer label { color: white; }
+.glass-disc > button.disc-btn { background: none; box-shadow: none; min-width: 0; min-height: 0; padding: 0;
+                                border-radius: 999px; color: white; }  /* the glass is the button */
+.glass-disc > button.disc-btn:hover { background: rgba(255,255,255,0.10); }
+.glass-disc > button.disc-btn:active { background: rgba(0,0,0,0.15); }
+
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
 popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
 popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
@@ -4716,6 +4734,7 @@ class Window(Adw.ApplicationWindow):
         self.app = app
         self.set_icon_name(APP_ID)
         self._scale = 1.0
+        self._glass_buttons: list = []  # extra glass buttons (back, HRÁLO's): sized with the window
         self._fit = 1.0  # the song info's text: as big as fits its place (smaller or up to 1.6x)
         self._fit_queued = False
         self._scale_pending = False
@@ -4784,6 +4803,21 @@ class Window(Adw.ApplicationWindow):
         hold_while_hovered(tile)
         header.pack_end(tile)
         self.info_tile = tile
+        # back, left of 'i' (a tile like it): a HRÁLO song playing or on the screen → the radio again
+        back_btn = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text="Zpět na rádio (Esc)")
+        back_btn.connect("clicked", lambda *_: self.app.back_to_radio())
+        tile = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER, hexpand=False,
+                         visible=False)
+        tile.add_css_class("glass-head")
+        tile.mag, tile.concave, tile.depth = 1.3, True, False
+        tile.set_homogeneous(True)
+        tile.append(back_btn)
+        self.backdrop.watchers.append(tile)
+        self.cover.watchers.append(tile)
+        self.head_glass.append(tile)
+        hold_while_hovered(tile)
+        header.pack_end(tile)
+        self.back_disc = tile
         self.logo = FlagLogo(34)  # the (enhanced) logo itself, drawn sharp; waves under the mouse
         self.logo.add_css_class("top-logo")
         header.pack_start(self.logo)
@@ -4880,7 +4914,7 @@ class Window(Adw.ApplicationWindow):
                           valign=Gtk.Align.CENTER)
         stop.add_css_class("round")
         stop.add_css_class("stop-button")
-        stop.connect("clicked", lambda *_: app.quit_all())
+        stop.connect("clicked", lambda *_: app.back_to_radio() if app.track_view or app.song_track else app.quit_all())
         self.vol = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
         self.vol.set_round_digits(1)  # follows the mouse pixel by pixel, not in whole percents
         self.vol.set_hexpand(True)
@@ -5363,8 +5397,6 @@ class Window(Adw.ApplicationWindow):
         self._played_day = None
         self._art_wait: dict = {}  # (artist, title) -> its pictures in HRÁLO waiting for the lookup
         self._played_rows: list[dict] = []  # HRÁLO's songs as listed (the full-screen viewer goes through them)
-        self._viewing = None  # the viewer's song (index), None: closed
-        self._big_pics: dict = {}  # cover URL -> big texture (the viewer: the last few)
         stage = Gtk.Overlay(child=self.puddle_scroll, vexpand=True)
         stage.add_overlay(self.puddle_pin)
         self.puddle.append(self.puddle_head)
@@ -5387,7 +5419,7 @@ class Window(Adw.ApplicationWindow):
         gear_body = Puddle(behind, orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.END, valign=Gtk.Align.START)
         gear_body.append(self.menu_content)
         self.gear_water = Water(self, self.gear_tile, gear_body, overlay)
-        self._make_viewer(overlay)  # above the panels
+
         self.waters = [self.info_water, self.gear_water]
         # a click anywhere else draws it back into its button
         outside = Gtk.GestureClick(button=0)
@@ -5641,6 +5673,7 @@ class Window(Adw.ApplicationWindow):
         self._played_before = None
         self._art_wait.clear()
         self._played_rows = []
+        self._drop_glass_buttons()
         now = time.localtime()
         if mode == "ZAJÍMAVOSTI":
             if a.about:
@@ -5707,16 +5740,11 @@ class Window(Adw.ApplicationWindow):
             self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{artist} – {plain_title(title)}",
                                self._played_line(row) or " ", img=small_cover(cover) if cover else "")
             row["label"] = self._last_body
-            # play / pause and stop: the song itself from YouTube (the radio waits)
-            row["play"] = Gtk.Button(icon_name="media-playback-start-symbolic", valign=Gtk.Align.CENTER,
-                                     tooltip_text="Přehrát z YouTube (studiová verze, nejlepší kvalita)")
-            row["stop"] = Gtk.Button(icon_name="media-playback-stop-symbolic", valign=Gtk.Align.CENTER,
-                                     visible=False, tooltip_text="Zastavit (zpět na rádio)")
-            for b in (row["play"], row["stop"]):
-                b.add_css_class("track-btn")
-                self._last_top.append(b)
-            row["play"].connect("clicked", lambda _b, a=artist, ti=title: self.app.play_song(a, ti))
-            row["stop"].connect("clicked", lambda _b: self.app.stop_song())
+            # play / pause and stop in glass like the radio's: the song itself from YouTube (the radio waits)
+            row["play"] = self._glass_button("media-playback-start-symbolic", 40,
+                                             "Přehrát z YouTube (studiová verze, nejlepší kvalita)",
+                                             lambda a=artist, ti=title: self.app.play_song(a, ti))
+            self._last_top.append(row["play"])
             self._played_rows.append(row)
             self._track_row(row)
             click = Gtk.GestureClick()  # the picture full screen
@@ -5752,126 +5780,93 @@ class Window(Adw.ApplicationWindow):
         """A played song's line under it: the album, its first release, the show."""
         return " · ".join(x for x in (plain_title(row["album"] or ""), self.app.cz(row["facts"] or ""), row["show"]) if x)
 
+    def _glass_button(self, icon: str, size: int, tooltip: str, on_click, color=None) -> GlassCard:
+        """A button in a round dish of glass, like pause and stop below the cover (it pumps under the mouse);
+        `size` px at the window's base size, growing with it."""
+        btn = Gtk.Button(icon_name=icon, valign=Gtk.Align.CENTER, tooltip_text=tooltip)
+        btn.add_css_class("disc-btn")
+        btn.connect("clicked", lambda *_: on_click())
+        disc = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
+        disc.add_css_class("glass-disc")
+        disc.mag, disc.concave, disc.depth, disc.color = 1.3, True, False, color
+        disc.set_hexpand(False)
+        disc.set_homogeneous(True)
+        disc.append(btn)
+        disc.btn, disc.size = btn, size
+        self.backdrop.watchers.append(disc)
+        self.cover.watchers.append(disc)
+        hold_while_hovered(disc)
+        self._glass_buttons.append(disc)
+        self._size_glass_button(disc)
+        return disc
+
+    def _size_glass_button(self, disc) -> None:
+        px = disc.size * self._scale
+        disc.radius = px / 2
+        disc.set_size_request(int(px), int(px))
+        disc.btn.get_first_child() and disc.btn.get_first_child().set_pixel_size(int(px * 0.42))
+        disc.queue_draw()
+
+    def _drop_glass_buttons(self) -> None:
+        """The dishes of rows no longer listed: not redrawn along with the cover any more."""
+        gone = [d for d in self._glass_buttons if d.get_root() is None]
+        for d in gone:
+            self._glass_buttons.remove(d)
+            for view in (self.backdrop, self.cover):
+                if d in view.watchers:
+                    view.watchers.remove(d)
+
     def _track_row(self, row: dict) -> None:
         """A row's play / pause and stop buttons as the song stands (playing, paused, being looked for)."""
         t = self.app.song_track
         mine = bool(t and (t["artist"], t["title"]) == (row["artist"], row["title"]))
         state = t["state"] if mine else ""
-        row["play"].set_icon_name("media-playback-pause-symbolic" if state == "playing"
-                                  else "content-loading-symbolic" if state == "finding"
-                                  else "dialog-warning-symbolic" if state == "failed"
-                                  else "media-playback-start-symbolic")
-        row["play"].set_tooltip_text(t["note"] if mine else "Přehrát z YouTube (studiová verze, nejlepší kvalita)")
-        row["stop"].set_visible(mine and state in ("playing", "paused", "finding"))
-        (row["play"].add_css_class if mine and state in ("playing", "paused") else row["play"].remove_css_class)("playing")
+        play = row["play"]
+        play.btn.set_icon_name("media-playback-pause-symbolic" if state == "playing"
+                               else "content-loading-symbolic" if state == "finding"
+                               else "dialog-warning-symbolic" if state == "failed"
+                               else "media-playback-start-symbolic")
+        self._size_glass_button(play)
+        play.btn.set_tooltip_text(t["note"] if mine else "Přehrát z YouTube (studiová verze, nejlepší kvalita)")
+        play.color = (227, 5, 26, 0.55) if mine and state in ("playing", "paused") else None  # red like pause
+        play.queue_draw()
 
     def track_changed(self) -> None:
-        """The HRÁLO song playing changed: the rows' buttons and the full-screen view show it."""
+        """The HRÁLO song playing changed: the rows' buttons and the main screen show it."""
         for row in self._played_rows:
             if "play" in row:
                 self._track_row(row)
-        if self._viewing is not None:
-            self._view_buttons()
-
-    def _view_buttons(self) -> None:
-        row = self._played_rows[self._viewing]
-        t = self.app.song_track
-        mine = bool(t and (t["artist"], t["title"]) == (row["artist"], row["title"]))
-        state = t["state"] if mine else ""
-        self.viewer_play.set_icon_name("media-playback-pause-symbolic" if state == "playing"
-                                       else "media-playback-start-symbolic")
-        self.viewer_stop.set_visible(mine and state in ("playing", "paused", "finding"))
-        self.viewer_note.set_text(t["note"] if mine else "")
-
-    def _make_viewer(self, overlay) -> None:
-        """HRÁLO's pictures full screen: a click on one opens it, the wheel goes to the newer / older song, a click
-        or Esc closes it."""
-        v = self.viewer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, visible=False)
-        v.add_css_class("viewer")
-        self.viewer_pic = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, vexpand=True,
-                                      hexpand=True, margin_top=24, margin_start=24, margin_end=24)
-        self.viewer_title = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, margin_start=24, margin_end=24)
-        self.viewer_title.add_css_class("show-title")
-        self.viewer_sub = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, margin_start=24, margin_end=24,
-                                    margin_bottom=24)
-        self.viewer_sub.add_css_class("show-sub")
-        # play / pause and stop for the song shown, and what's playing (the quality, which video)
-        self.viewer_play = Gtk.Button(icon_name="media-playback-start-symbolic", tooltip_text="Přehrát z YouTube")
-        self.viewer_stop = Gtk.Button(icon_name="media-playback-stop-symbolic", tooltip_text="Zastavit", visible=False)
-        for b in (self.viewer_play, self.viewer_stop):
-            b.add_css_class("track-btn")
-            b.add_css_class("viewer-btn")
-        self.viewer_play.connect("clicked", lambda *_: self._viewing is not None and self.app.play_song(
-            self._played_rows[self._viewing]["artist"], self._played_rows[self._viewing]["title"]))
-        self.viewer_stop.connect("clicked", lambda *_: self.app.stop_song())
-        bar = Gtk.Box(spacing=16, halign=Gtk.Align.CENTER)
-        bar.append(self.viewer_play)
-        bar.append(self.viewer_stop)
-        self.viewer_note = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, margin_start=24, margin_end=24)
-        self.viewer_note.add_css_class("show-sub")
-        self.viewer_sub.set_margin_bottom(4)
-        for w in (self.viewer_pic, self.viewer_title, self.viewer_sub, bar, self.viewer_note):
-            v.append(w)
-        self.viewer_note.set_margin_bottom(24)
-        click = Gtk.GestureClick()
-        click.connect("released", lambda _g, _n, x, y: self._viewer_click(x, y))
-        v.add_controller(click)
-        wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL
-                                          | Gtk.EventControllerScrollFlags.DISCRETE)
-        wheel.connect("scroll", lambda _c, _dx, dy: (self._view_step(1 if dy > 0 else -1), True)[1])
-        v.add_controller(wheel)
-        overlay.add_overlay(v)
-
-    def _viewer_click(self, x: float, y: float) -> None:
-        """A click on the full-screen view closes it, not one on its buttons."""
-        w = self.viewer.pick(x, y, Gtk.PickFlags.DEFAULT)
-        while w is not None and w is not self.viewer:
-            if isinstance(w, Gtk.Button):
-                return
-            w = w.get_parent()
-        self.view_played(None)
+        self.refresh()
 
     def view_played(self, i: int | None) -> None:
-        """The i-th song of HRÁLO full screen (None: closed)."""
-        self._viewing = i
+        """A song of HRÁLO on the main screen like the radio's (its cover, its lines, pause, stop, volume) and
+        playing; back (or Esc) returns to the radio and to HRÁLO where it was."""
         if i is None or not 0 <= i < len(self._played_rows):
-            self._viewing = None
-            self.viewer.set_visible(False)
             return
+        self._hralo_at = self.puddle_scroll.get_vadjustment().get_value()
         row = self._played_rows[i]
-        t = time.localtime(row["at"])
-        self.viewer_title.set_text(f"{row['artist']} – {plain_title(row['title'])}")
-        self.viewer_sub.set_text(f"{DAYS[t.tm_wday]} {t.tm_mday}. {MONTHS[t.tm_mon - 1]} {t.tm_year} "
-                                 f"{t.tm_hour}:{t.tm_min:02d}" + (f"\n{self._played_line(row)}" if self._played_line(row)
-                                                                  else ""))
-        cover = row["cover"]
-        small = self.app.show_pics.get(small_cover(cover)) if cover else None
-        self.viewer_pic.set_paintable(self._big_pics.get(cover) or small or self.app.logo_tex)
-        self.viewer.set_visible(True)
-        self._view_buttons()
-        if cover and cover not in self._big_pics:
-            def got(data, cover=cover, i=i):
-                try:
-                    tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data)) if data else None
-                except GLib.Error:
-                    tex = None
-                if tex:
-                    self._big_pics[cover] = tex
-                    while len(self._big_pics) > 12:
-                        self._big_pics.pop(next(iter(self._big_pics)))
-                    if self._viewing == i:
-                        self.viewer_pic.set_paintable(tex)
-                return False
-            threading.Thread(target=lambda: GLib.idle_add(got, fetch(cover)), daemon=True).start()
+        self.app.show_track({k: row[k] for k in ("at", "artist", "title", "album", "show", "cover", "facts")})
+        self.info_water.hide()
 
-    def _view_step(self, d: int) -> None:
-        if self._viewing is None:
+    def back_from_track(self) -> None:
+        """Back from a HRÁLO song: the panel open again on HRÁLO, scrolled where it was."""
+        if self.puddle_open:
             return
-        i = self._viewing + d
-        if i >= len(self._played_rows) - 3 and self._played_before:  # near the list's end: older ones loaded
-            self._played_more(force=True)
-        if 0 <= i < len(self._played_rows):
-            self.view_played(i)
+        self.toggle_water(self.info_water)
+        self._puddle_go(self.PUDDLE_MODES.index("HRÁLO"))
+        at = getattr(self, "_hralo_at", 0.0)
+
+        def again(tries=40):
+            adj = self.puddle_scroll.get_vadjustment()
+            if adj.get_upper() - adj.get_page_size() < at and self._played_before and tries:
+                self._played_more(force=True)  # the older plays it had loaded
+            if adj.get_upper() - adj.get_page_size() >= at or not tries:
+                adj.set_value(at)
+                self._puddle_touched = time.monotonic()  # (it waits before scrolling by itself)
+                return False
+            GLib.timeout_add(50, again, tries - 1)
+            return False
+        GLib.timeout_add(80, again)
 
     def played_new(self) -> None:
         """A song just logged: HRÁLO open at its top shows it (further down, it's there on the next look)."""
@@ -5994,11 +5989,7 @@ class Window(Adw.ApplicationWindow):
                 f".gear-menu label {{ font-size: {8.5 * f:.1f}pt; }}\n"
                 f".gear-menu row .title {{ font-size: {9.5 * f:.1f}pt; }}\n"
                 f".gear-menu row .subtitle, .gear-menu label.caption {{ font-size: {8 * f:.1f}pt; }}\n"
-                # HRÁLO's play / stop: as big as the text around them
-                f"button.track-btn {{ min-width: {30 * f:.0f}px; min-height: {30 * f:.0f}px; }}\n"
-                f"button.track-btn image {{ -gtk-icon-size: {14 * f:.0f}px; }}\n"
-                f"button.viewer-btn {{ min-width: {56 * f:.0f}px; min-height: {56 * f:.0f}px; }}\n"
-                f"button.viewer-btn image {{ -gtk-icon-size: {24 * f:.0f}px; }}\n")
+                )
         self.scale_css.load_from_data(css.encode())
         self.show_pic.set_pixel_size(int(TEXT_PT["pic"] * f))
         self.logo.set_pixel_size(int(34 * f))
@@ -6012,6 +6003,8 @@ class Window(Adw.ApplicationWindow):
                 btn.set_size_request(-1, -1)
             tile.queue_draw()
         GLib.idle_add(self._square_tiles)
+        for disc in getattr(self, "_glass_buttons", []):
+            self._size_glass_button(disc)
         for disc, size in zip(self.discs, (68, 56, 46)):  # pause, stop (a little smaller), speaker (smaller still)
             disc.radius = size * f / 2
             disc.set_size_request(int(size * f), int(size * f))
@@ -6075,8 +6068,8 @@ class Window(Adw.ApplicationWindow):
         return True
 
     def on_key(self, _ctl, keyval, _code, _state):
-        if keyval == Gdk.KEY_Escape and self._viewing is not None:
-            self.view_played(None)
+        if keyval == Gdk.KEY_Escape and (self.app.track_view or self.app.song_track):
+            self.app.back_to_radio()
             return True
         if keyval == Gdk.KEY_F11 or (keyval == Gdk.KEY_Escape and self.is_fullscreen()):
             self.toggle_full()
@@ -6089,6 +6082,10 @@ class Window(Adw.ApplicationWindow):
 
     def refresh(self) -> None:
         a = self.app
+        if a.track_view:
+            self._refresh_track()
+            return
+        self.back_disc.set_visible(bool(a.song_track))
         info = a.info or {}
         title = plain_title(info.get("title") or a.song or "Rádio Beat")
         if title != self.song.get_text() and self.song.get_text():
@@ -6137,8 +6134,9 @@ class Window(Adw.ApplicationWindow):
             self.show_pic.set_from_paintable(tex or a.logo_tex)
         self.vol_icon.set_from_icon_name("audio-volume-muted-symbolic" if a.muted else "audio-volume-high-symbolic")
         self.discs[2].set_tooltip_text("Sound on" if a.muted else "Mute")
-        self.play_btn.set_icon_name("media-playback-start-symbolic" if a.paused else "media-playback-pause-symbolic")
-        self.play_btn.set_tooltip_text("Play" if a.paused else "Pause")
+        paused = a.song_track["state"] != "playing" if a.song_track else a.paused  # a HRÁLO song: its state
+        self.play_btn.set_icon_name("media-playback-start-symbolic" if paused else "media-playback-pause-symbolic")
+        self.play_btn.set_tooltip_text("Play" if paused else "Pause")
         if a.error:
             self.status.set_text(a.error)
         elif a.paused:
@@ -6160,6 +6158,41 @@ class Window(Adw.ApplicationWindow):
         self.recognise_row.set_subtitle(GLib.markup_escape_text(
             "When the stream names no song (jingles, breaks), a 12 s clip is recognised once a minute through "
             f"Shazam's unofficial API (shazamio). {a.recognise_text}"))
+
+
+def _track_refresh(self) -> None:
+    """The main screen for a HRÁLO song: like the radio's (its cover big, its lines, pause, stop, volume) with
+    back beside pause; the status says what plays (the quality, which video)."""
+    a = self.app
+    tv, t = a.track_view, a.song_track
+    title = plain_title(tv["title"])
+    if title != self.song.get_text() and self.song.get_text():
+        self.blink()
+    self.song.set_text(title)
+    self.artist.set_text(tv["artist"])
+    self.album.set_text(plain_title(tv.get("album") or ""))
+    self.album.set_visible(bool(tv.get("album")))
+    self.facts.set_text(a.cz(tv.get("facts") or ""))
+    self.facts.set_visible(bool(tv.get("facts")))
+    small = a.show_pics.get(small_cover(tv["cover"])) if tv.get("cover") else None
+    pic = tv.get("tex") or small or a.logo_tex
+    redraw = small is not None and self.cover.pic is small and pic is not small  # the big one over the small
+    self.cover.set_paintable(pic, redraw)
+    self.backdrop.set_paintable(pic, redraw)
+    GLib.idle_add(self._fit_info)
+    self.back_disc.set_visible(True)
+    playing = bool(t and t["state"] == "playing")
+    self.play_btn.set_icon_name("media-playback-pause-symbolic" if playing else "media-playback-start-symbolic")
+    self.play_btn.set_tooltip_text("Pause" if playing else "Play")
+    self.vol_icon.set_from_icon_name("audio-volume-muted-symbolic" if a.muted else "audio-volume-high-symbolic")
+    when = time.localtime(tv["at"])
+    played = f"Hrálo {DAYS[when.tm_wday]} {when.tm_mday}. {when.tm_mon}. {when.tm_hour}:{when.tm_min:02d}"
+    self.status.set_text(" · ".join(x for x in ((t["note"] if t else "Zastaveno"), played) if x))
+    if abs(self.vol.get_value() - a.volume_now()) >= 1:
+        self.vol.set_value(a.volume_now())
+
+
+Window._refresh_track = _track_refresh
 
 
 class App(Adw.Application):
@@ -6200,7 +6233,7 @@ class App(Adw.Application):
         self.db = History(os.path.join(DATA_DIR, "history.db"))
         self.song_track = None  # a song from HRÁLO playing (from YouTube): {artist, title, state, note}
         self.tmpv = None  # its own mpv
-        self._radio_was_on = False
+        self.track_view = None  # that song on the main screen instead of the radio's (back returns)
         self._art_asked: set = set()  # played songs whose picture was looked up this run (HRÁLO)
         self._art_queue: list = []
         self._art_busy = False
@@ -6331,7 +6364,7 @@ class App(Adw.Application):
         """The tray icon: brings the window up, or minimises it when it's up (like its taskbar button).
         Wayland doesn't tell an app it's minimised: the app remembers it did it, until the window is active again."""
         w = self.win
-        if w and w.get_visible() and not w.minimised:
+        if w and w.get_visible() and not w.minimised and w.is_active():
             if is_kde():
                 w.minimised = True
                 w.minimize()
@@ -6339,6 +6372,8 @@ class App(Adw.Application):
                 w.set_visible(False)  # not every desktop minimises (Hyprland): to the tray
         else:
             self.show_window()
+            if w and w.is_fullscreen():  # always a window in the bottom-right corner (KWin's script places it)
+                w.unfullscreen()
 
     # updates / tray placement
     def set_look(self, **changes) -> None:
@@ -6465,7 +6500,8 @@ class App(Adw.Application):
 
     # --- a song from HRÁLO, played from YouTube (the radio pauses meanwhile) -------------------------
     def play_song(self, artist: str, title: str) -> None:
-        if self.song_track and (self.song_track["artist"], self.song_track["title"]) == (artist, title):
+        t = self.song_track
+        if t and (t["artist"], t["title"]) == (artist, title) and t["state"] != "failed":
             self.pause_song()
             return
         self.stop_song(resume=False)
@@ -6493,11 +6529,10 @@ class App(Adw.Application):
                 track.update(state="failed", note=str(e))
                 self._track_changed()
                 return False
-        self._radio_was_on = self.mpv is not None and not self.paused
-        if self._radio_was_on:  # the radio waits
-            self.paused, self.paused_at = True, time.monotonic()
-            self.mpv.pause(True)
+        if self.mpv:  # the radio goes on, muted: live when the song's over (enhancing, history: as ever)
+            self.mpv.mute(True)
         self.tmpv.volume(self._vol_cur)
+        self.tmpv.mute(self.muted)
         self.tmpv.pause(False)
         self.tmpv.play(url)
         track.update(state="playing", note=what, started=False)
@@ -6519,10 +6554,36 @@ class App(Adw.Application):
         self.song_track = None
         if self.tmpv:
             self.tmpv.stop()
-        if resume and self._radio_was_on:
-            self.play()  # the radio again, live
-        self._radio_was_on = False
+        if self.mpv:
+            self.mpv.mute(self.muted)  # the radio heard again (it played on, live)
         self._track_changed()
+
+    def show_track(self, row: dict) -> None:
+        """A HRÁLO song on the main screen (its big cover, its lines) and playing; the radio muted meanwhile."""
+        self.track_view = dict(row, tex=None)
+        tv = self.track_view
+        if row.get("cover"):
+            def got(data):
+                try:
+                    tv["tex"] = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data)) if data else None
+                except GLib.Error:
+                    tv["tex"] = None
+                if self.track_view is tv:
+                    self.update()
+                return False
+            threading.Thread(target=lambda: GLib.idle_add(got, fetch(row["cover"])), daemon=True).start()
+        self.play_song(row["artist"], row["title"])
+        self.update()
+
+    def back_to_radio(self) -> None:
+        """Back from a HRÁLO song: the radio's screen and sound again, HRÁLO open where it was."""
+        if not self.track_view and not self.song_track:
+            return
+        shown, self.track_view = self.track_view, None
+        self.stop_song()  # the song reset: every play button shows play again
+        self.update()
+        if self.win and shown:
+            self.win.back_from_track()
 
     def _track_prop(self, name, value) -> bool:
         t = self.song_track
@@ -6534,7 +6595,10 @@ class App(Adw.Application):
             if not value:
                 t["started"] = True
             elif t.get("started") and t["state"] in ("playing", "paused"):
-                self.stop_song()  # it played to its end
+                self.stop_song()  # it played to its end: the radio again
+                if self.track_view:
+                    self.track_view = None
+                    self.update()
         return False
 
     def _track_changed(self) -> None:
@@ -6542,8 +6606,13 @@ class App(Adw.Application):
             self.win.track_changed()
 
     def toggle_pause(self):
-        if self.song_track:  # the radio's own button: the song gives way
-            self.stop_song(resume=False)
+        if self.track_view or self.song_track:  # a HRÁLO song playing or on the screen: its pause
+            t = self.song_track
+            if t and t["state"] in ("playing", "paused"):
+                self.pause_song()
+            elif self.track_view and (not t or t["state"] == "failed"):
+                self.play_song(self.track_view["artist"], self.track_view["title"])
+            return
         if not self.mpv:
             return
         if not self.paused:
@@ -6662,8 +6731,11 @@ class App(Adw.Application):
             target = self.card.sink or "@DEFAULT_SINK@"
             threading.Thread(target=lambda: subprocess.run(["pactl", "set-sink-mute", target, "1" if self.muted else "0"],
                                                            capture_output=True), daemon=True).start()
-        elif self.mpv:
-            self.mpv.mute(self.muted)
+        else:
+            if self.mpv:  # (the radio stays muted while a HRÁLO song plays)
+                self.mpv.mute(self.muted or bool(self.song_track and self.song_track["state"] in ("playing", "paused")))
+            if self.tmpv:
+                self.tmpv.mute(self.muted)
         self.update()
 
     def nudge_volume(self, d: int):
