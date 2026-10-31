@@ -3895,6 +3895,11 @@ CSS = b"""
 .stop-button { background: rgba(255,255,255,0.16); color: white; }
 .stop-button:hover { background: rgba(255,255,255,0.28); }
 .scrim scale trough highlight { background: #E3051A; }
+/* Buttons, their icons and the volume slider: the letters' shadow (down and left), standing out in 3D */
+scale.vol-slider trough { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
+scale.vol-slider slider { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
+.glass-disc image, .glass-head image, .vol-icon, button.quality-tab image
+    { -gtk-icon-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
 .overlay-header { background: none; box-shadow: none; }
 .show-card { padding: 0; }
 .show-pic { border-radius: 10px; }
@@ -4297,6 +4302,7 @@ class GlassCard(Gtk.Box):
         self.scrim = None  # the shaded panel it lies on: its shading copied into the glass (see-through)
         self.sharp_bars = False  # the blurred bars beside the cover seen sharp (the cover filling them) instead
         self.depth = True  # a soft shadow below the card: it floats over the cover
+        self.drop = False  # the letters' shadow under it (buttons, pills): they stand out like the text
         self.flash = 0.0  # 1 → 0 when the song changes
         self.flash_anim = None
         self.mirrors = []  # glass buttons beside it: seen through it like the rest, but upside down (a mirror)
@@ -4713,6 +4719,9 @@ class GlassCard(Gtk.Box):
         box = Graphene.Rect().init(0, 0, w, h)
         rr = self._rounded(0, 0, w, h, self.radius)
         rim = min(self.radius * self.wall, h / 2, w / 2)
+        if self.drop and shadow:  # the letters' shadow (down and left): a tight dark one and a soft one, 3D
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.9), -1, 2, 0, 1)
+            snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.65), -2, 3, 0, 5)
         if self.depth and shadow:  # it floats above the cover: a wide soft shadow and a tight one where it nearly touches
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
@@ -4959,6 +4968,10 @@ class GlassCard(Gtk.Box):
 
 class PillGlass(GlassCard):
     """Glass the shape of a pill (round ends, half its height): the 'i' panel's tabs, like the round buttons."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.drop = True  # the letters' shadow, like the buttons
 
     def do_size_allocate(self, width, height, baseline):
         self.radius = height / 2
@@ -5954,6 +5967,7 @@ class Window(Adw.ApplicationWindow):
             tile = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER, hexpand=False)
             tile.add_css_class(cls)
             tile.mag, tile.concave, tile.depth, tile.color = 1.3, True, False, color
+            tile.drop = True  # the letters' shadow: 3D
             tile.set_homogeneous(True)
             tile.append(child)
             self.backdrop.watchers.append(tile)
@@ -5976,6 +5990,7 @@ class Window(Adw.ApplicationWindow):
         tile = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER, hexpand=False)
         tile.add_css_class("glass-head")  # like the gear's tile (no pumping)
         tile.mag, tile.concave, tile.depth = 1.3, True, False
+        tile.drop = True  # the letters' shadow: 3D
         tile.set_homogeneous(True)
         tile.append(info_btn)
         self.backdrop.watchers.append(tile)
@@ -5991,6 +6006,7 @@ class Window(Adw.ApplicationWindow):
                          visible=False)
         tile.add_css_class("glass-head")
         tile.mag, tile.concave, tile.depth = 1.3, True, False
+        tile.drop = True  # the letters' shadow: 3D
         tile.set_homogeneous(True)
         tile.append(back_btn)
         self.backdrop.watchers.append(tile)
@@ -6119,6 +6135,7 @@ class Window(Adw.ApplicationWindow):
                              halign=Gtk.Align.CENTER, margin_start=margin)
             disc.add_css_class("glass-disc")
             disc.scrim, disc.mag, disc.concave, disc.depth, disc.color = scrim, 1.3, True, False, color
+            disc.drop = True  # the letters' shadow: 3D
             # (the bars beside the cover blurred under it, as around it: sharp they made a hard edge in it)
             disc.set_hexpand(False)  # only the slider takes the row's spare width
             disc.set_homogeneous(True)  # the button or icon fills the dish, centred
@@ -7052,6 +7069,7 @@ class Window(Adw.ApplicationWindow):
         disc = GlassCard([(self.backdrop, 0.45), (self.cover, 0.0)], valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
         disc.add_css_class("glass-disc")
         disc.mag, disc.concave, disc.depth, disc.color = 1.3, True, False, color
+        disc.drop = True  # the letters' shadow: 3D
         disc.set_hexpand(False)
         disc.set_homogeneous(True)
         disc.append(btn)
