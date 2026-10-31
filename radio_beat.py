@@ -3461,6 +3461,9 @@ CSS = b"""
                             background: none; box-shadow: none; font-weight: 700; }  /* the glass is the tab */
 .puddle button.puddle-tab:hover { background: rgba(255,255,255,0.10); }
 .puddle button.puddle-tab.on-air { background: none; }
+/* the tabs' cells light nothing of their own: only the tab, in its pill, like the round buttons */
+.puddle flowboxchild, .puddle flowboxchild:hover, .puddle flowboxchild:focus, .puddle flowboxchild:selected
+    { background: none; outline: none; box-shadow: none; padding: 0; }
 .puddle .puddle-now { background: rgba(227,5,26,0.25); border-radius: 10px; padding: 6px; }
 .puddle .puddle-past { opacity: 0.55; }
 .glass-disc > button.disc-btn { background: none; box-shadow: none; min-width: 0; min-height: 0; padding: 0;
@@ -6568,6 +6571,7 @@ class App(Adw.Application):
     def show_track(self, row: dict) -> None:
         """A HRÁLO song on the main screen (its big cover, its lines) and playing; the radio muted meanwhile."""
         self.track_view = dict(row, tex=None)
+        t = self.song_track
         tv = self.track_view
         if row.get("cover"):
             def got(data):
@@ -6579,7 +6583,8 @@ class App(Adw.Application):
                     self.update()
                 return False
             threading.Thread(target=lambda: GLib.idle_add(got, fetch(row["cover"])), daemon=True).start()
-        self.play_song(row["artist"], row["title"])
+        if not (t and (t["artist"], t["title"]) == (row["artist"], row["title"]) and t["state"] != "failed"):
+            self.play_song(row["artist"], row["title"])  # (already playing or paused: left as it is)
         self.update()
 
     def back_to_radio(self) -> None:
