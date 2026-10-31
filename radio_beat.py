@@ -4265,6 +4265,11 @@ class GlassCard(Gtk.Box):
         self.flash_anim = None
         self.mirrors = []  # glass buttons beside it: seen through it like the rest, but upside down (a mirror)
         self._mirror_paints = {}
+        # Its top and bottom edges mirror what lies just beyond them, upside down (the cover's title above the
+        # glass seen in its top edge, the closest part closest to the edge); the `mirrors` buttons then show
+        # only there, as they are (the mirror turns them).
+        self.edge_mirror = False
+        self._upright = False  # drawing what the edges mirror: the buttons as they are
 
     PULSE = 0.2  # how much more it magnifies at the top of a breath
     LIFT = 0.04  # and how much bigger the whole card gets then (outline, text and all), like the buttons' pump
@@ -4371,12 +4376,12 @@ class GlassCard(Gtk.Box):
             if darken:
                 snap.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(0, 0, vw, vh))
             snap.restore()
-        for tile in self.mirrors:
+        for tile in self.mirrors if self._upright or not self.edge_mirror else ():
             ok, p = self._where(tile)
             if ok and tile.get_mapped():
                 snap.save()
                 snap.translate(p)
-                self.draw_mirrored(snap, tile)
+                self.draw_mirrored(snap, tile, flip=not self._upright)
                 snap.restore()
         snap.restore()
 
@@ -4481,7 +4486,7 @@ class GlassCard(Gtk.Box):
         if self.lift:
             snap.restore()
 
-    def draw_mirrored(self, snap, tile) -> None:
+    def draw_mirrored(self, snap, tile, flip: bool = True) -> None:
         """A button seen through the glass upside down, as in a mirror: `tile` (its glass) where it is, the
         button on it flipped top to bottom. `snap` at the tile's corner."""
         tile.draw_glass(snap, shadow=False)
@@ -4495,8 +4500,11 @@ class GlassCard(Gtk.Box):
                 if paint is None:
                     paint = self._mirror_paints[child] = Gtk.WidgetPaintable.new(child)
                 snap.save()
-                snap.translate(Graphene.Point().init(cp.x, cp.y + ch))
-                snap.scale(1, -1)
+                if flip:
+                    snap.translate(Graphene.Point().init(cp.x, cp.y + ch))
+                    snap.scale(1, -1)
+                else:
+                    snap.translate(Graphene.Point().init(cp.x, cp.y))
                 paint.snapshot(snap, cw, ch)
                 snap.restore()
             child = child.get_next_sibling()
@@ -4540,7 +4548,42 @@ class GlassCard(Gtk.Box):
             self._behind(snap, w, h, self.mag, self.mag)
         else:
             self._lens(snap, w, h)
+        if self.edge_mirror:
+            self._mirror_edges(snap, w, h, rim)
         self._finish(snap, w, h, box, rr, rim)
+
+    EDGE_BAND = 0.9  # the mirrored band's depth, in rim widths (at least EDGE_MIN px, at most a quarter of it)
+    EDGE_MIN = 56
+    EDGE_ALPHA = 0.8  # how strongly the edge mirrors, right at the edge (fading to nothing inwards)
+
+    def _mirror_edges(self, snap, w: float, h: float, rim: float) -> None:
+        """Along the top and bottom edges, what lies just beyond each, mirrored about it: upside down, what's
+        closest to the edge closest to it, fading out inwards (a glass edge's reflection)."""
+        b = min(h / 4, max(rim * self.EDGE_BAND, self.EDGE_MIN))
+        if b <= 1:
+            return
+        self._upright = True
+        try:
+            for top in (True, False):
+                band = Graphene.Rect().init(0, 0 if top else h - b, w, b)
+                snap.push_mask(Gsk.MaskMode.ALPHA)
+                edge, inner = (0, b) if top else (h, h - b)
+                snap.append_linear_gradient(band, Graphene.Point().init(0, edge), Graphene.Point().init(0, inner),
+                                            [_stop(0.0, 255, 255, 255, self.EDGE_ALPHA),
+                                             _stop(0.6, 255, 255, 255, self.EDGE_ALPHA * 0.35),
+                                             _stop(1.0, 255, 255, 255, 0.0)])
+                snap.pop()
+                snap.push_clip(band)
+                snap.save()
+                # flipped about the edge: y = -t (beyond the top) lands at t, y = h + t at h - t
+                snap.translate(Graphene.Point().init(0, 0 if top else 2 * h))
+                snap.scale(1, -1)
+                self._behind(snap, w, h, 1.0, 1.0)
+                snap.restore()
+                snap.pop()
+                snap.pop()
+        finally:
+            self._upright = False
 
     def _lens_key(self, w: float, h: float):
         """What the lens shows depends on: which pictures, where they lie, the glass's size and shape."""
@@ -4807,7 +4850,7 @@ class MenuGlass(GlassCard):
         s = Gtk.Snapshot()
         s.scale(k, k)
         self.paint.snapshot(s, cw, ch)
-        for tile in self.mirrors:  # seen through it upside down
+        for tile in self.mirrors if not self.edge_mirror else ():  # seen through it upside down
             ok, tp = tile.compute_point(content, Graphene.Point().init(0, 0))
             if ok and tile.get_mapped():
                 s.save()
@@ -5214,7 +5257,8 @@ class Water:
             win.backdrop.watchers.append(g)
             win.cover.watchers.append(g)
         self.neck.depth = False  # water between the two: no shadow box of its own
-        body.mirrors = win.head_glass  # the top buttons seen through its glass upside down, like KVALITA's
+        body.mirrors = win.head_glass  # the top buttons mirrored in its top edge, upside down
+        body.edge_mirror = True  # its top and bottom edges mirror what lies beyond them
         # its own scrolling stays its own: not the window's volume
         block = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         block.connect("scroll", lambda *_: True)
@@ -5787,6 +5831,7 @@ class Window(Adw.ApplicationWindow):
         qglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
         qglass.radius = 16.0
         qglass.mirrors = [pill]  # the pill seen through its glass upside down
+        qglass.edge_mirror = True  # (mirrored in its bottom edge, with what lies beyond its edges)
         qglass.append(self.quality_fit)
         self.quality_pop = Gtk.Popover(child=qglass, has_arrow=False, position=Gtk.PositionType.TOP)
         self.quality_pop.add_css_class("glass-menu")
