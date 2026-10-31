@@ -3957,6 +3957,16 @@ row:hover .bob-arrow { animation: bob 900ms ease-in-out infinite; }
 """
 
 
+# The look's switchable effects (gear menu), set from the settings by Window.apply_look.
+EFFECTS = {"mirror": True, "shadows": True, "anim": True, "season": True}
+NO_SHADOW_CSS = """
+scale.vol-slider trough, scale.vol-slider slider { box-shadow: none; }
+.glass-disc image, .glass-head image, .vol-icon, button.quality-tab image { -gtk-icon-shadow: none; }
+"""
+NO_ANIM_CSS = """
+* { animation: none; }
+"""
+
 # While anything animates, the picture enhancing waits (App.anim_hold): smooth animations even on a slow chip.
 _ANIM_HOLD: list = [None]
 
@@ -4216,6 +4226,8 @@ class FlagLogo(Gtk.Widget):
         return self.size, self.size, -1, -1
 
     def _wave(self, on: bool) -> None:
+        if on and not EFFECTS["anim"]:
+            return  # animations off: the flag stays still
         self.hover = on
         if self.tick is None:
             anim_hold(True)
@@ -4504,6 +4516,9 @@ class GlassCard(Gtk.Box):
                     TEXT_MAP.update(key=key, cells=cells, busy=False, version=TEXT_MAP["version"] + 1)
                     for g in TEXT_MAP["waiting"]:
                         g.queue_draw()  # its lens built again, with the mirror where the lettering is
+                        root = g.get_root()
+                        if hasattr(root, "refresh_effects"):
+                            root.refresh_effects()
                     TEXT_MAP["waiting"] = []
                 return False
             GLib.idle_add(done)
@@ -4719,7 +4734,7 @@ class GlassCard(Gtk.Box):
         box = Graphene.Rect().init(0, 0, w, h)
         rr = self._rounded(0, 0, w, h, self.radius)
         rim = min(self.radius * self.wall, h / 2, w / 2)
-        if self.drop and shadow:  # the letters' shadow (down and left): a tight dark one and a soft one, 3D
+        if self.drop and shadow and EFFECTS["shadows"]:  # the letters' shadow (down and left): a tight dark one and a soft one, 3D
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.9), -1, 2, 0, 1)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.65), -2, 3, 0, 5)
         if self.depth and shadow:  # it floats above the cover: a wide soft shadow and a tight one where it nearly touches
@@ -4737,7 +4752,8 @@ class GlassCard(Gtk.Box):
 
     def _lens_key(self, w: float, h: float):
         """What the lens shows depends on: which pictures, where they lie, the glass's size and shape."""
-        key = [w, h, self.radius, self.mag, self.sharp_bars, TEXT_MAP["version"] if self.edge_mirror else 0]
+        key = [w, h, self.radius, self.mag, self.sharp_bars, self.edge_mirror,
+               TEXT_MAP["version"] if self.edge_mirror else 0]
         for view, _ in self.behind:
             for wdg in (view, view.get_parent()):
                 ok, p = self._where(wdg)
@@ -5139,6 +5155,22 @@ def season_today() -> tuple:
     return season, NEXT_SEASON[season], share
 
 
+SEASON_CZ = {"autumn": ("podzim", "podzimu", "listí"), "winter": ("zima", "zimy", "sněhové čepice, vločky a jinovatka"),
+             "spring": ("jaro", "jara", "květy, větvičky a tráva"), "summer": ("léto", "léta", "slunce, palmy, mušle a vlny")}
+
+
+def season_text() -> str:
+    if not EFFECTS["season"]:
+        return "Vypnuto: datum a čas jen v barvách měsíce"
+    season, nxt, share = season_today()
+    name, _, motifs = SEASON_CZ[season]
+    text = (f"Na písmenech dne, měsíce, roku a času, oříznuto do jejich tvaru; každý den trochu jinak · "
+            f"dnes: {name} ({motifs})")
+    if share > 0:
+        text += f", přidává se {round(share * 100)} % {SEASON_CZ[nxt][1]}"
+    return text
+
+
 class SeasonDecor:
     """Motifs for one line of letters (its ink box `w` x `h`), as a render node, cut to the letters by the caller."""
 
@@ -5484,6 +5516,8 @@ class ClockView(Gtk.Widget):
         # the season's motifs over the letters, cut to them (no shadow of their own: they lie on the letters)
         t = time.localtime()
         key = ((t.tm_year, t.tm_yday), tuple((round(ink.width), round(ink.height)) for _, ink in lays))
+        if not EFFECTS["season"]:
+            return
         if self._decor[0] != key:
             self._decor = (key, [SeasonDecor.build(n, ink.width, ink.height, c)
                                  for n, ((_, ink), c) in enumerate(zip(lays, day_colors(len(lays))))])
@@ -6245,6 +6279,17 @@ class Window(Adw.ApplicationWindow):
         style.set_active(self.app.fonts_ok and self.app.settings.get("font", "beat") == "beat")
         style.connect("notify::active", lambda r, _: self.app.set_look(font="beat" if r.get_active() else "default"))
         group.add(style)
+        self.fx_rows = {}
+        for key, title in (("mirror", "Odrazy písma na okrajích skla"), ("shadows", "Stíny tlačítek (3D)"),
+                           ("anim", "Animace"), ("season", "Ozdoby podle ročního období na datu a čase")):
+            row = Adw.SwitchRow(title=title, subtitle_lines=0)
+            if key == "shadows":
+                row.set_subtitle("Tlačítka, jejich ikony, pilulky a posuvník hlasitosti vrhají stín jako písmo "
+                                 "(dolů a doleva): víc vystupují; vypnuto: ploché")
+            row.set_active(self.app.settings.get("fx_" + key, True))
+            row.connect("notify::active", lambda r, _, k=key: self.app.set_look(**{"fx_" + k: r.get_active()}))
+            group.add(row)
+            self.fx_rows[key] = row
         shade = Adw.ActionRow(title="Ztmavení pozadí",
                               subtitle="Jak moc tmavé plochy za textem překryjí obal", subtitle_lines=0)
         self.shade_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
@@ -7331,12 +7376,48 @@ class Window(Adw.ApplicationWindow):
                f"rgba(0,0,0,{0.92 * k:.3f}) 0%, rgba(0,0,0,{0.75 * k:.3f}) 55%, rgba(0,0,0,0) 100%); }}\n")
         if a.settings.get("font", "beat") == "beat" and a.fonts_ok:
             css += BEAT_CSS
+        for name in EFFECTS:
+            EFFECTS[name] = a.settings.get("fx_" + name, True)
+        if not EFFECTS["shadows"]:
+            css += NO_SHADOW_CSS
+        if not EFFECTS["anim"]:
+            css += NO_ANIM_CSS
+        for w in getattr(self, "waters", []):
+            w.body.edge_mirror = EFFECTS["mirror"]
+        if getattr(self, "clock", None):
+            self.clock.queue_draw()
+        if getattr(self, "logo", None) and not EFFECTS["anim"]:
+            self.logo.hover = False
+        self.refresh_effects()
         self.look_css.load_from_data(css.encode())
         waters = [g for w in getattr(self, "waters", []) for g in (w.body, w.neck)]
         for card in (self.show_card, *self.discs, *self.head_glass, *waters):
             card.shade = k
             card.queue_draw()
+        if getattr(self, "quality_pill", None):
+            self.quality_pill.queue_draw()  # (its shadow on or off)
 
+    def refresh_effects(self) -> None:
+        """The effect switches' notes: what each does, and what it's doing now."""
+        for key, text in (("mirror", self.mirror_text), ("anim", self.app.anim_text), ("season", season_text)):
+            row = getattr(self, "fx_rows", {}).get(key)
+            if row:
+                t = text()
+                if row.get_subtitle() != t:
+                    row.set_subtitle(t)
+
+    def mirror_text(self) -> str:
+        if not EFFECTS["mirror"]:
+            return "Vypnuto: okraje panelů ⓘ a ⚙ jsou jen lupa a rybí oko"
+        what = "Horní a dolní okraj panelů ⓘ a ⚙ zrcadlí vzhůru nohama jen písmo těsně za nimi (třeba název na obalu); jinde jen lupa a rybí oko"
+        if TEXT_MAP["busy"]:
+            now = "hledá se písmo v obrázku…"
+        elif TEXT_MAP["key"] is None:
+            now = "písmo se hledá po otevření panelu"
+        else:
+            n = len(TEXT_MAP["cells"])
+            now = f"v tomto obrázku nalezeno písmo na {n} ploškách" if n else "v tomto obrázku žádné písmo nenalezeno"
+        return f"{what} · teď: {now}"
     def on_double(self, _gesture, n, x, y) -> None:
         if n != 2:
             return
@@ -7994,6 +8075,12 @@ class App(Adw.Application):
             self.win.enhance_note.set_text(self.notes_text())
         return GLib.SOURCE_REMOVE
 
+    def anim_text(self) -> str:
+        what = "Tlačítka pod myší pulzují, ozubené kolo tiká, logo vlaje, šipky poskakují"
+        if not self.settings.get("fx_anim", True):
+            return "Vypnuto: tlačítka a logo se pod myší nehýbou (méně práce pro GPU)"
+        return f"{what} · {self.frames_text()}"
+
     def frames_text(self) -> str:
         """How smooth the animations run on this screen: measured, the last one and the last 10 minutes."""
         if not self._frames:
@@ -8407,7 +8494,8 @@ class App(Adw.Application):
     def notes_text(self) -> str:
         """The gear menu's notes: the picture steps, and what the song recognition did last."""
         text = self.enhancer.notes()
-        text += f"\n• Animace: {self.frames_text()}"
+        if self.win:
+            GLib.idle_add(lambda: (self.win.refresh_effects(), False)[1])  # the animations' result is on its switch
         if self.settings.get("recognise", False):
             text += f"\n• Rozpoznávání skladeb (testování): {self.recognise_text}"
         return text
