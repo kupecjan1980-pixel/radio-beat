@@ -5329,7 +5329,7 @@ HOLIDAYS = {
     "music": ("Mezinárodní den hudby", "noty", lambda y: [(10, 1)], ("note", "note", "note"),
               ("#ffd54f", "#ffffff", "#e3051a", "#40c4ff"), None),
     "republic": ("Den vzniku Československa", "česká vlajka", lambda y: [(10, 28)], ("star",), ("#ffffff",), "cz"),
-    "halloween": ("Halloween", "dýně, netopýři, duchové a pavouci", lambda y: [(10, 31), (11, 1), (11, 2)],
+    "halloween": ("Halloween", "dýně, netopýři, duchové a pavouci", lambda y: [(10, 31)],
                   ("pumpkin", "pumpkin", "bat", "bat", "ghost", "spider", "web"),
                   ("#ff6d00", "#212121", "#ffffff", "#7c4dff", "#76ff03"), None),
     "dead": ("Dušičky a Día de los Muertos", "svíčky, lebky a měsíčky", lambda y: [(11, 1), (11, 2)],
