@@ -4820,10 +4820,26 @@ class GlassCard(Gtk.Box):
         if build["next"] >= len(rings):
             self._build = None
             self._lens_cache = (key, _opaque(build["tex"]) if build["tex"] else None)  # drawn every frame: opaque
+            self._lens_what = self._what_behind()
             return self._lens_cache[1]
         if self._build_tick is None:  # frames keep coming until it's built
             self._build_tick = self.add_tick_callback(self._build_step)
+        if self.edge_mirror and getattr(self, "_lens_what", None) != self._what_behind():
+            return None  # the last lens shows an earlier picture (and its mirror): the current one plainly meanwhile
         return self._lens_cache[1]
+
+    def _what_behind(self) -> tuple:
+        """Which pictures (and which lettering map) a lens shows."""
+        return tuple(id(v.pic) for v, _ in self.behind) + (TEXT_MAP["version"],)
+
+    def fresh(self) -> None:
+        """Forget the lens and its mirrored strips: drawn anew from what's behind now (a menu opening)."""
+        self._lens_cache = (None, None)
+        self._flat_cache = (None, None)
+        self._build = None
+        self._mirror_tex = None
+        self._lens_what = None
+        self.queue_draw()
 
     def _build_step(self, *_) -> bool:
         if self._build is None:
@@ -6785,6 +6801,7 @@ class Window(Adw.ApplicationWindow):
             if self._puddle_tick is None:
                 self._puddle_last = None
                 self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
+        water.body.fresh()  # never an earlier picture's lens or mirror while it opens: drawn anew
         water.show()
         if water is self.gear_water:  # from the top (a control taking the focus scrolled it a row down)
             GLib.idle_add(lambda: (self.menu_content.get_vadjustment().set_value(0), False)[1])
