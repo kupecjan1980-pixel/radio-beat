@@ -3915,6 +3915,10 @@ CSS = b"""
 .puddle button.puddle-tab { padding: 4px 14px; min-height: 0; border-radius: 999px; color: white;
                             background: none; box-shadow: none; font-weight: 700; }  /* the glass is the tab */
 .puddle button.puddle-tab:hover { background: rgba(255,255,255,0.10); }
+button.quality-tab { padding: 4px 14px; min-height: 0; border-radius: 999px; color: white; background: none;
+                     box-shadow: none; font-weight: 700; }  /* like the 'i' panel's tabs: the glass is the tab */
+button.quality-tab:hover { background: rgba(255,255,255,0.10); }
+button.quality-tab label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
 .puddle button.puddle-tab.on-air { background: none; }
 /* the tabs' cells light nothing of their own: only the tab, in its pill, like the round buttons */
 .puddle flowboxchild, .puddle flowboxchild:hover, .puddle flowboxchild:focus, .puddle flowboxchild:selected
@@ -5593,10 +5597,14 @@ class Window(Adw.ApplicationWindow):
                 disc.set_tooltip_text("Ztlumit")
             controls.append(disc)
         controls.append(self.vol)
-        inner.append(controls)
-        self.status = Gtk.Label(xalign=0)
+        # The status (paused, reconnecting, a HRÁLO song's quality) above the buttons, only when it says something:
+        # the buttons sit as far from the bottom edge as from the left one, the quality pill at the row's end.
+        self.status = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, visible=False)
         self.status.add_css_class("status")
+        self.status.connect("notify::label", lambda l, _: l.set_visible(bool(l.get_label())))
         inner.append(self.status)
+        controls.append(self._quality_pill(scrim))
+        inner.append(controls)
         overlay.add_overlay(scrim)
         # The time and date (in Czech, capitals: "8:50" over "PÁTEK 30. ŘÍJNA 2026") at the bottom right: below
         # the volume slider, right of the cover, against the screen's right edge, filling that room.
@@ -5626,40 +5634,6 @@ class Window(Adw.ApplicationWindow):
     def _settings_button(self) -> Gtk.Button:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)  # its room: Water.place
         group = Adw.PreferencesGroup()
-        # Quality: the stream now and a bobbing arrow; its list opens from the menu's left edge, glass like
-        # the menu, best sound first.
-        self.quality = Adw.ActionRow(title="Kvalita", activatable=True)
-        self.quality_now = Gtk.Label(xalign=1)
-        self.quality_now.add_css_class("dim-label")
-        arrow = Gtk.Image(icon_name="pan-down-symbolic")
-        arrow.add_css_class("bob-arrow")
-        self.quality.add_suffix(self.quality_now)
-        self.quality.add_suffix(arrow)
-        hold_while_hovered(self.quality)
-        self.quality_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.quality_list.add_css_class("boxed-list")
-        self.quality_list.connect("row-activated", self.on_quality)
-        head = Gtk.Label(label="Nejlepší zvuk nahoře", xalign=0, margin_start=12, margin_top=8, margin_bottom=4)
-        head.add_css_class("dim-label")
-        head.add_css_class("caption")
-        qbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_top=6, margin_bottom=6, margin_start=6,
-                       margin_end=6)
-        qbox.append(head)
-        qbox.append(self.quality_list)
-        # As wide as the menu (the notes wrap), however long they are.
-        self.quality_fit = Gtk.ScrolledWindow(child=qbox, hscrollbar_policy=Gtk.PolicyType.NEVER,
-                                              vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
-                                              hexpand=True)
-        qglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
-        qglass.radius = 16.0
-        qglass.append(self.quality_fit)
-        self.quality_pop = Gtk.Popover(child=qglass, has_arrow=False, position=Gtk.PositionType.BOTTOM)
-        self.quality_pop.add_css_class("glass-menu")
-        self.quality_pop.set_parent(self.quality)
-        self.quality_pop.connect("show", self._place_quality)
-        self.quality.connect("activated", lambda *_: self.quality_pop.popup())
-        self.fill_quality()
-        group.add(self.quality)
         auto = Adw.SwitchRow(title="Automatické spuštění",
                              subtitle="Po přihlášení hraje jako ikona v oznamovací oblasti", subtitle_lines=0)
         auto.set_active(autostart_on())
@@ -5771,6 +5745,47 @@ class Window(Adw.ApplicationWindow):
         btn.connect("clicked", lambda *_: self.toggle_water(self.gear_water))
         return btn
 
+    def _quality_pill(self, scrim) -> Gtk.Widget:
+        """Quality at the bottom right: a pill of glass like the 'i' panel's tabs. Its list opens upwards, glass
+        like the gear menu: what plays now (the codec and bitrate the stream sends), then the streams with their
+        notes, best sound first."""
+        self.quality_tab = Gtk.Button(label="KVALITA", has_frame=False)
+        self.quality_tab.add_css_class("quality-tab")
+        pill = self.quality_pill = PillGlass([(self.backdrop, 0.45), (self.cover, 0.0)], halign=Gtk.Align.END,
+                                             valign=Gtk.Align.CENTER)
+        pill.scrim, pill.mag, pill.concave, pill.depth = scrim, 1.3, True, False
+        pill.set_homogeneous(True)
+        pill.append(self.quality_tab)
+        self.backdrop.watchers.append(pill)
+        self.cover.watchers.append(pill)
+        hold_while_hovered(pill)
+        title = Gtk.Label(label="Kvalita", xalign=0, margin_start=12, margin_top=8)
+        title.add_css_class("heading")
+        self.quality_now = Gtk.Label(xalign=0, wrap=True, margin_start=12, margin_end=12)
+        head = Gtk.Label(label="Nejlepší zvuk nahoře", xalign=0, margin_start=12, margin_top=8, margin_bottom=4)
+        head.add_css_class("dim-label")
+        head.add_css_class("caption")
+        self.quality_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.quality_list.add_css_class("boxed-list")
+        self.quality_list.connect("row-activated", self.on_quality)
+        qbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=6, margin_bottom=6,
+                       margin_start=6, margin_end=6)
+        for w in (title, self.quality_now, head, self.quality_list):
+            qbox.append(w)
+        self.quality_fit = Gtk.ScrolledWindow(child=qbox, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                              vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                              hexpand=True)
+        qglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
+        qglass.radius = 16.0
+        qglass.append(self.quality_fit)
+        self.quality_pop = Gtk.Popover(child=qglass, has_arrow=False, position=Gtk.PositionType.TOP)
+        self.quality_pop.add_css_class("glass-menu")
+        self.quality_pop.set_parent(pill)
+        self.quality_pop.connect("show", self._place_quality)
+        self.quality_tab.connect("clicked", lambda *_: self.quality_pop.popup())
+        self.fill_quality()
+        return pill
+
     def fill_quality(self) -> None:
         while (row := self.quality_list.get_row_at_index(0)) is not None:
             self.quality_list.remove(row)
@@ -5783,7 +5798,20 @@ class Window(Adw.ApplicationWindow):
             if sid == now:
                 row.add_suffix(Gtk.Image(icon_name="object-select-symbolic"))
             self.quality_list.append(row)
-        self.quality_now.set_text(dict((s[0], s[1]) for s in self.app.streams)[now])
+        self._quality_text()
+
+    def _quality_text(self) -> None:
+        """The menu's first line: the stream chosen and what it sends now."""
+        a = self.app
+        ids = [s[0] for s in a.streams]
+        q = a.settings["quality"]
+        name = dict((s[0], s[1]) for s in a.streams)[q if q in ids else ids[0]]
+        live = " · ".join(p for p in (a.codec, f"{a.bitrate} kbps" if a.bitrate else None) if p)
+        text = f"Zvolený stream: {name}" + (f"\nPrávě přichází: {live}" if live else "")
+        if a.alt:
+            text += f"\nHraje záložní: {a.stream()[1]}"
+        if self.quality_now.get_text() != text:
+            self.quality_now.set_text(text)
 
     def on_quality(self, _list, row) -> None:
         self.quality_pop.popdown()
@@ -5792,11 +5820,12 @@ class Window(Adw.ApplicationWindow):
             self.fill_quality()
 
     def _place_quality(self, pop) -> None:
-        """Its left edge on the menu's, as wide as the menu, below the row."""
-        w = self.quality.get_width()
+        """Above the pill, its right edge on the pill's (the notes wrap)."""
+        pw = self.quality_pill.get_width()
+        w = max(pw, min(self.get_width() - 44, 460))
         self.quality_fit.set_size_request(w, -1)
         r = Gdk.Rectangle()
-        r.x, r.y, r.width, r.height = 0, self.quality.get_height(), w, 1
+        r.x, r.y, r.width, r.height = pw - w, 0, w, 1
         pop.set_pointing_to(r)
         GLib.idle_add(lambda: (pop.get_child().queue_draw(), False)[1])
 
@@ -5871,6 +5900,9 @@ class Window(Adw.ApplicationWindow):
             while c is not None:
                 stack.append(c)
                 c = c.get_next_sibling()
+        ok3, pill = self.quality_pill.compute_bounds(self)  # the quality pill at the slider's end: above it too
+        if ok3 and pill.get_height() > 0:
+            knob_top = min(knob_top, pill.get_y())
         room_w = int(W - self.CLOCK_GAP - (cover[2] + self.CLOCK_GAP))
         # above the slider's knob, below the top buttons (a little off both)
         ok_h, hb = self.header.compute_bounds(self)
@@ -6836,10 +6868,12 @@ class Window(Adw.ApplicationWindow):
         elif a.tries:
             self.status.set_text(f"Znovu se připojuje… ({a.stream()[1]})")
         else:
-            parts = [p for p in (a.codec, f"{a.bitrate} kbps" if a.bitrate else None) if p]
-            if a.alt:
-                parts.append(f"backup: {a.stream()[1]}")
-            self.status.set_text(" · ".join(parts) if parts else "Připojuje se…")
+            # (the codec and bitrate are in the quality menu now, bottom right)
+            self.status.set_text("" if a.codec or a.bitrate else "Připojuje se…")
+        self._quality_text()
+        tab = a.cz("KVALITA")
+        if self.quality_tab.get_label() != tab:
+            self.quality_tab.set_label(tab)
         self.update_note.set_text(a.update_text)
         self.update_btn.set_label("Aktualizovat" if a.update_ready else "Zkontrolovat")
         self.update_btn.set_sensitive(not a.update_busy)
