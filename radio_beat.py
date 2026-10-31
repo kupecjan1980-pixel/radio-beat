@@ -5832,7 +5832,8 @@ class Window(Adw.ApplicationWindow):
                                else "media-playback-start-symbolic")
         self._size_glass_button(play)
         play.btn.set_tooltip_text(t["note"] if mine else "Přehrát z YouTube (studiová verze, nejlepší kvalita)")
-        play.color = (227, 5, 26, 0.55)  # red like the radio's pause
+        # red like the radio's pause; paused, clear like its stop (the colours switched)
+        play.color = None if mine and state == "paused" else (227, 5, 26, 0.55)
         play.queue_draw()
 
     def track_changed(self) -> None:
