@@ -4105,6 +4105,13 @@ class CoverView(Gtk.Widget):
         self.anim.set_easing(Adw.Easing.EASE_IN_OUT_CUBIC)
         self.anim.play()
 
+    def morph(self, steps: int):
+        """(old picture, how far into the new one 0..1 in `steps` steps) while morphing, else (None, 1.0): the
+        glass in front shows the change at the same moment as the picture itself."""
+        if self.old is None or self.t >= 1.0 or self.pic is None:
+            return None, 1.0
+        return self.old, round(self.t * steps) / steps
+
     def _hold(self, on: bool) -> None:
         if on != self._holding:
             self._holding = on
@@ -4608,7 +4615,7 @@ class GlassCard(Gtk.Box):
         super().__init__(**kw)
         self.behind = behind  # [(CoverView, darken 0..1)], back to front
         self.radius = 28.0
-        self._blurred = (None, None)  # (key, texture): the blurred backdrop, made once per picture and size
+        self._blurred = []  # [(key, texture)]: the blurred backdrop, made once per picture and size (two morphing)
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
         self.tint = 0.34  # the dark tint over the glass (times shade)
         self.mag = self.MAG  # < 1: a concave lens (things look smaller)
@@ -4707,50 +4714,27 @@ class GlassCard(Gtk.Box):
             ok, p = self._where(view)
             if not pic or not ok:
                 continue
+            old, t = self._morph(view)  # (the picture morphing into a new one: the glass shows it as it is)
             vw, vh = view.get_width(), view.get_height()
             if view.has_css_class("backdrop") and self.sharp_bars:
                 # Sharp: the cover filling the window (what the bars are a blur of), zoomed like them.
                 ok, p = self._where(view.get_parent())
                 if ok:
-                    snap.save()
-                    snap.translate(p)
-                    snap.translate(Graphene.Point().init(vw / 2, vh / 2))
-                    snap.scale(BACKDROP_SCALE * 1.3, BACKDROP_SCALE * 1.3)  # past the window's edges too
-                    snap.translate(Graphene.Point().init(-vw / 2, -vh / 2))
-                    view.draw(snap, pic, vw, vh)
-                    snap.restore()
-                    snap.save()
-                    snap.translate(p)
-                    snap.translate(Graphene.Point().init(vw / 2, vh / 2))
-                    snap.scale(BACKDROP_SCALE, BACKDROP_SCALE)
-                    snap.translate(Graphene.Point().init(-vw / 2, -vh / 2))
-                    view.draw(snap, pic, vw, vh)
-                    snap.restore()
+                    self._mixed(snap, old, t, pic, lambda q: self._sharp(snap, view, q, p, vw, vh))
                     if darken:
                         snap.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(p.x, p.y, vw, vh))
                 continue
             if view.has_css_class("backdrop"):
                 # The blurred bars beside the cover: blurred here too, like around the card, and bent like
                 # the cover (thick glass all over, just blurry there).
-                tex = self._backdrop(view, pic, vw, vh, darken)
                 # Where it sits before its CSS zoom (the parent's origin): the texture has the zoom in it.
                 ok, p = self._where(view.get_parent())
-                if tex and ok:
-                    # past the window's edges too (glass near them bends what lies beyond): the blur mirrored at
-                    # each edge, seamless (a stretched copy left a seam the lens repeated in rings)
-                    for mx in (-1, 0, 1):
-                        for my in (-1, 0, 1):
-                            # a mirror copy: flipped about the window's edge it touches
-                            snap.save()
-                            snap.translate(Graphene.Point().init(p.x + (2 * vw if mx == 1 else 0),
-                                                                 p.y + (2 * vh if my == 1 else 0)))
-                            snap.scale(-1 if mx else 1, -1 if my else 1)
-                            snap.append_texture(tex, Graphene.Rect().init(0, 0, vw, vh))
-                            snap.restore()
+                if ok:
+                    self._mixed(snap, old, t, pic, lambda q: self._blurry(snap, view, q, p, vw, vh, darken))
                 continue
             snap.save()
             snap.translate(p)
-            view.draw(snap, pic, vw, vh)
+            self._mixed(snap, old, t, pic, lambda q: view.draw(snap, q, vw, vh))
             if darken:
                 snap.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(0, 0, vw, vh))
             snap.restore()
@@ -4764,6 +4748,54 @@ class GlassCard(Gtk.Box):
                 self.draw_mirrored(snap, tile)
                 snap.restore()
         snap.restore()
+
+    def _morph(self, view):
+        """(old picture, mix 0..1) of a view morphing into a new picture, else (None, 1.0); in steps the lens can
+        keep up with: smooth on the GPU, else just halfway (the layers take frames to build)."""
+        if not hasattr(view, "morph"):
+            return None, 1.0
+        return view.morph(24 if EFFECTS["gpu"] and GPU.ok else 2)
+
+    @staticmethod
+    def _mixed(snap, old, t: float, pic, draw) -> None:
+        """draw(picture): the old picture cross-faded into the new one at t, or just the new one."""
+        if old is None or t >= 1.0:
+            draw(pic)
+            return
+        if t <= 0.0:
+            draw(old)
+            return
+        snap.push_cross_fade(t)
+        draw(old)
+        snap.pop()
+        draw(pic)
+        snap.pop()
+
+    @staticmethod
+    def _sharp(snap, view, pic, p, vw: float, vh: float) -> None:
+        """The cover filling the window (sharp), zoomed like the bars, and past the window's edges too."""
+        for zoom in (BACKDROP_SCALE * 1.3, BACKDROP_SCALE):
+            snap.save()
+            snap.translate(p)
+            snap.translate(Graphene.Point().init(vw / 2, vh / 2))
+            snap.scale(zoom, zoom)
+            snap.translate(Graphene.Point().init(-vw / 2, -vh / 2))
+            view.draw(snap, pic, vw, vh)
+            snap.restore()
+
+    def _blurry(self, snap, view, pic, p, vw: float, vh: float, darken: float) -> None:
+        """The blurred bars, and past the window's edges (glass near them bends what lies beyond) the blur
+        mirrored at each edge, seamless (a stretched copy left a seam the lens repeated in rings)."""
+        tex = self._backdrop(view, pic, vw, vh, darken)
+        if not tex:
+            return
+        for mx in (-1, 0, 1):
+            for my in (-1, 0, 1):
+                snap.save()  # a mirror copy: flipped about the window's edge it touches
+                snap.translate(Graphene.Point().init(p.x + (2 * vw if mx == 1 else 0), p.y + (2 * vh if my == 1 else 0)))
+                snap.scale(-1 if mx else 1, -1 if my else 1)
+                snap.append_texture(tex, Graphene.Rect().init(0, 0, vw, vh))
+                snap.restore()
 
     def _mirror_edges(self, snap, w: float, h: float) -> None:
         """Above the top edge and below the bottom one, as far as the rim reaches: what lies there flipped
@@ -4916,8 +4948,9 @@ class GlassCard(Gtk.Box):
         """The backdrop as the window shows it (blurred, darkened, a bit enlarged), as a texture: drawn once,
         not once per lens layer."""
         key = (id(pic), vw, vh, darken)
-        if self._blurred[0] == key:
-            return self._blurred[1]
+        for k, t in self._blurred:
+            if k == key:
+                return t
         native = self.get_native()
         if not native or vw <= 0 or vh <= 0:
             return None
@@ -4935,7 +4968,8 @@ class GlassCard(Gtk.Box):
         if node is None:
             return None
         tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, vw, vh))
-        self._blurred = (key, tex)
+        self._blurred = [e for e in self._blurred if e[0][0] in (id(getattr(view, "pic", None)),
+                                                                  id(getattr(view, "old", None)))][-2:] + [(key, tex)]
         return tex
 
     def _ring_r(self, d: float, w: float, h: float) -> float:
@@ -5082,7 +5116,8 @@ class GlassCard(Gtk.Box):
             for wdg in (view, view.get_parent()):
                 ok, p = self._where(wdg)
                 key += [round(p.x, 1), round(p.y, 1)] if ok else [None]
-            key += [id(view.pic), view.get_width(), view.get_height()]
+            old, t = self._morph(view)
+            key += [id(view.pic), view.get_width(), view.get_height(), id(old), t]
         for tile in self.mirrors:
             ok, p = self._where(tile)
             key += [round(p.x, 1), round(p.y, 1), tile.get_mapped()] if ok else [None]
@@ -5195,7 +5230,8 @@ class GlassCard(Gtk.Box):
 
     def _what_behind(self) -> tuple:
         """Which pictures (and which lettering map) a lens shows."""
-        return tuple(id(v.pic) for v, _ in self.behind) + (TEXT_MAP["version"],)
+        return tuple((id(v.pic), id(self._morph(v)[0]), self._morph(v)[1]) for v, _ in self.behind) + \
+            (TEXT_MAP["version"],)
 
     def fresh(self) -> None:
         """Forget the lens and its mirrored strips: drawn anew from what's behind now (a menu opening)."""
