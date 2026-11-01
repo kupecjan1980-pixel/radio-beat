@@ -5564,8 +5564,11 @@ def season_text(clock_bytes: int = None) -> str:
 class SeasonDecor:
     """Motifs for one line of letters (its ink box `w` x `h`), as a render node, cut to the letters by the caller."""
 
+    DENSITY = 6.5  # motifs per (half a line's height) squared of the letters' own area: they cover the letters
+
     @staticmethod
-    def build(line: int, w: float, h: float, base: Gdk.RGBA = None):
+    def build(line: int, w: float, h: float, base: Gdk.RGBA = None, inside=None):
+        """`inside(x, y)`: whether a point is on a letter; the motifs go there (none wasted on the gaps)."""
         season, nxt, share = season_today()
         t = time.localtime()
         rng = random.Random((t.tm_year * 1000 + t.tm_yday) * 7 + line)
@@ -5589,7 +5592,11 @@ class SeasonDecor:
             D._grass(s, rng, w, h)
         # motifs no bigger on the big day number than on the other lines (more of them there instead)
         ref = min(h, 100.0)
-        n = max(5, min(90, int(1.4 * w * h / (0.5 * ref) ** 2 * rng.uniform(0.85, 1.15))))
+        fill = 1.0
+        if inside is not None:  # how much of the line's box the letters cover
+            pts = [(w * (i + 0.5) / 24, h * (j + 0.5) / 24) for i in range(24) for j in range(24)]
+            fill = max(0.05, sum(inside(x, y) for x, y in pts) / len(pts))
+        n = max(8, min(260, int(D.DENSITY * fill * w * h / (0.5 * ref) ** 2 * rng.uniform(0.9, 1.1))))
 
         def lum(c):
             return 0.3 * c.red + 0.59 * c.green + 0.11 * c.blue
@@ -5602,7 +5609,10 @@ class SeasonDecor:
         for _ in range(n):
             sea = rng.choice(pool) if pool else (nxt if rng.random() < share else season)
             kind = rng.choice(SEASON_KINDS[sea])
-            x, y = rng.uniform(-0.1 * h, w + 0.1 * h), rng.uniform(-0.1 * h, 1.1 * h)
+            for _try in range(12):  # on a letter (or near enough, its edge cut by the letter)
+                x, y = rng.uniform(-0.05 * ref, w + 0.05 * ref), rng.uniform(-0.05 * ref, h + 0.05 * ref)
+                if inside is None or inside(x, y):
+                    break
             size = ref * rng.uniform(0.28, 0.7)
             color = pick(sea)
             s.save()
@@ -6436,8 +6446,9 @@ class ClockView(Gtk.Widget):
         if not EFFECTS["season"]:
             return
         if self._decor[0] != key:
-            self._decor = (key, [self._as_texture(SeasonDecor.build(n + self.SEED, ink.width, ink.height, c), ink)
-                                 for n, (_, ink), c in zip(self.order, lays, self._colors())])
+            self._decor = (key, [self._as_texture(SeasonDecor.build(n + self.SEED, ink.width, ink.height, c,
+                                                                    self._letters(lay, ink)), ink)
+                                 for n, (lay, ink), c in zip(self.order, lays, self._colors())])
         y = 0.0
         for (lay, ink), node in zip(lays, self._decor[1]):
             snap.save()
@@ -6454,6 +6465,35 @@ class ClockView(Gtk.Widget):
             snap.restore()
             y += ink.height + gap
 
+
+    def _letters(self, lay, ink):
+        """Whether a point of a line's ink box lies on its letters: the layout rendered small once, its alpha
+        read back (a little grown, so motifs at the edges count)."""
+        native = self.get_native()
+        if not native or ink.width < 1 or ink.height < 1:
+            return None
+        q = min(1.0, 160.0 / max(ink.width, ink.height))
+        W, H = max(1, int(ink.width * q)), max(1, int(ink.height * q))
+        s = Gtk.Snapshot()
+        s.scale(q, q)
+        s.translate(Graphene.Point().init(-ink.x, -ink.y))
+        s.append_layout(lay, _rgba(255, 255, 255, 1))
+        node = s.to_node()
+        if node is None:
+            return None
+        d = Gdk.TextureDownloader.new(native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, W, H)))
+        d.set_format(Gdk.MemoryFormat.R8G8B8A8)
+        data, stride = d.download_bytes()
+        data = data.get_data()
+
+        def inside(x, y):
+            cx, cy = int(x * q), int(y * q)
+            for dx, dy in ((0, 0), (2, 0), (-2, 0), (0, 2), (0, -2)):
+                px, py = cx + dx, cy + dy
+                if 0 <= px < W and 0 <= py < H and data[py * stride + px * 4 + 3] > 100:
+                    return True
+            return False
+        return inside
 
     def _colors(self) -> list:
         """Each line's color from the month's palette, by which line it is (not where it lands)."""
