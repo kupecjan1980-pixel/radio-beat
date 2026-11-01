@@ -13,6 +13,10 @@ so (autostart_full); --hidden (a restart after an update while the window was cl
 icon.
 """
 
+# The version, as in Handheld Control: 1.MINOR.PATCH, the patch one up with every change pushed, the minor one up
+# (patch back to 0) with a bigger new feature; each one a git tag and a GitHub release vX.Y.Z.
+APP_VERSION = "1.0.0"
+
 import collections
 import ctypes
 import glob
@@ -274,7 +278,7 @@ def update_status() -> tuple[bool | None, str]:
         # not an installed copy (no VERSION: run from the source folder): never replaced by an update
         return False, "Běží ze složky se zdrojáky: sám se neaktualizuje"
     if mine == sha:
-        return False, f"Aktuální ({info['committer']['date'][:10]})"
+        return False, f"Verze {APP_VERSION}: aktuální ({info['committer']['date'][:10]})"
     # Only forwards: GitHub's commit must come after the installed one (a newer local build stays).
     if re.fullmatch(r"[0-9a-f]{7,40}", mine):
         try:
@@ -286,8 +290,23 @@ def update_status() -> tuple[bool | None, str]:
         except (OSError, ValueError, KeyError):
             return None, "GitHub nedostupný"
         if status in ("behind", "identical"):
-            return False, "Aktuální (novější než na GitHubu)" if status == "behind" else "Aktuální"
-    return True, f"Nová verze z {info['committer']['date'][:10]}:\n{info['message'].splitlines()[0]}"
+            return False, (f"Verze {APP_VERSION}: aktuální (novější než na GitHubu)" if status == "behind"
+                           else f"Verze {APP_VERSION}: aktuální")
+    theirs = remote_version(sha)
+    return True, (f"Nová verze {theirs or ''} z {info['committer']['date'][:10]} (teď {APP_VERSION}):\n"
+                  f"{info['message'].splitlines()[0]}").replace("verze  z", "verze z")
+
+
+def remote_version(sha: str) -> str:
+    """APP_VERSION of GitHub's commit `sha` (only the file's start fetched), or ''."""
+    try:
+        req = urllib.request.Request(f"https://raw.githubusercontent.com/{REPO}/{sha}/radio_beat.py",
+                                     headers={"User-Agent": UA, "Range": "bytes=0-4095"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            m = re.search(r'^APP_VERSION = "([0-9.]+)"', r.read().decode(errors="replace"), re.M)
+        return m.group(1) if m else ""
+    except (OSError, ValueError):
+        return ""
 
 
 def run_update() -> str | None:
@@ -3268,7 +3287,10 @@ class Enhancer:
         if vulkan:
             dev = f"vulkan=vk:{self.gpu_index}" if self.gpu_index is not None else "vulkan=vk"
             cmd += ["-init_hw_device", dev, "-filter_hw_device", "vk"]
-        cmd += inputs + ["-vf", vf, "-frames:v", "1"] + (["-q:v", "2"] if jpeg else []) + [out]
+        # PNGs between the steps (in /tmp) lightly compressed: the same pixels in half the time (the default
+        # level's single-threaded compressing was most of a step's time; the sharpening itself is ~0.1 s)
+        png = ["-compression_level", "1"] if out.endswith(".png") else []
+        cmd += inputs + ["-vf", vf, "-frames:v", "1"] + (["-q:v", "2"] if jpeg else []) + png + [out]
         # Its own handle: the start-up tests run alongside the worker; self.proc is for stopping it.
         proc = self.proc = self._spawn(cmd)
         _, err = proc.communicate()
@@ -9433,7 +9455,7 @@ class App(Adw.Application):
         self.alt = 0  # streams moved on from the chosen one (backup servers)
         self.last_reconnect = 0.0
         self.quitting = False
-        self.update_text = "Zatím nezkontrolováno"
+        self.update_text = f"Verze {APP_VERSION} · zatím nezkontrolováno"
         self.update_ready = False
         self.update_busy = False
         for name, which in (("info", "info_water"), ("settings", "gear_water")):
@@ -10928,7 +10950,7 @@ def start_log() -> None:
         return True
 
     GLib.timeout_add_seconds(3600, trim)
-    print(f"--- Rádio Beat start (pid {os.getpid()}{', ' + rev if rev else ''}, {HERE})", file=sys.stderr)
+    print(f"--- Rádio Beat {APP_VERSION} start (pid {os.getpid()}{', ' + rev if rev else ''}, {HERE})", file=sys.stderr)
     layers = [os.path.join(d, "vulkan", "implicit_layer.d")
               for d in [GLib.get_user_data_dir(), *GLib.get_system_data_dirs(), "/etc"]]
     if any(glob.glob(os.path.join(d, "*LSFG*")) for d in layers):
