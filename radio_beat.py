@@ -6374,6 +6374,7 @@ class ClockView(Gtk.Widget):
         super().__init__(**kw)
         self.texts = ("",) * len(self.FONTS)
         self.order = []  # the lines drawn (with text), top to bottom: their indexes in texts
+        self.sx = 1.0  # the letters stretched wider (the names: to fill their room)
         self.room = (0, 0)
         self.lays = None
         self.colon = True  # the time's colon blinks: a second on, a second off
@@ -6430,43 +6431,45 @@ class ClockView(Gtk.Widget):
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
         snap.push_shadow([shadow])
-        y, sy = 0.0, getattr(self, "sy", 1.0)
+        y, sx, sy = 0.0, self.sx, getattr(self, "sy", 1.0)
         for (lay, ink), color in zip(lays, self._colors()):
             snap.save()
             snap.translate(Graphene.Point().init(0, y * sy))
-            snap.scale(1.0, sy)
-            snap.translate(Graphene.Point().init((w - ink.width) / 2 - ink.x, -ink.y))
+            snap.scale(sx, sy)
+            snap.translate(Graphene.Point().init((w / sx - ink.width) / 2 - ink.x, -ink.y))
             snap.append_layout(lay, color)
             snap.restore()
             y += ink.height + gap
         snap.pop()
         # the season's motifs over the letters, cut to them (no shadow of their own: they lie on the letters)
         t = time.localtime()
-        key = ((t.tm_year, t.tm_yday), tuple((round(ink.width), round(ink.height)) for _, ink in lays))
+        key = ((t.tm_year, t.tm_yday), tuple((round(ink.width * sx), round(ink.height * sy)) for _, ink in lays))
         if not EFFECTS["season"]:
             return
         if self._decor[0] != key:
-            self._decor = (key, [self._as_texture(SeasonDecor.build(n + self.SEED, ink.width, ink.height, c,
-                                                                    self._letters(lay, ink)), ink)
-                                 for n, (lay, ink), c in zip(self.order, lays, self._colors())])
+            # built at the size they're seen (the letters stretched to fill the room, the pictures not)
+            self._decor = (key, [self._as_texture(
+                SeasonDecor.build(n + self.SEED, ink.width * sx, ink.height * sy, c, self._letters(lay, ink, sx, sy)),
+                ink.width * sx, ink.height * sy) for n, (lay, ink), c in zip(self.order, lays, self._colors())])
         y = 0.0
         for (lay, ink), node in zip(lays, self._decor[1]):
             snap.save()
             snap.translate(Graphene.Point().init(0, y * sy))
-            snap.scale(1.0, sy)
-            snap.translate(Graphene.Point().init((w - ink.width) / 2 - ink.x, -ink.y))
+            snap.scale(sx, sy)
+            snap.translate(Graphene.Point().init((w / sx - ink.width) / 2 - ink.x, -ink.y))
             snap.push_mask(Gsk.MaskMode.ALPHA)
             snap.append_layout(lay, _rgba(255, 255, 255, 1))
             snap.pop()
             if node is not None:
                 snap.translate(Graphene.Point().init(ink.x, ink.y))
-                snap.append_texture(node, Graphene.Rect().init(0, 0, ink.width, ink.height))
+                snap.scale(1 / sx, 1 / sy)
+                snap.append_texture(node, Graphene.Rect().init(0, 0, ink.width * sx, ink.height * sy))
             snap.pop()
             snap.restore()
             y += ink.height + gap
 
 
-    def _letters(self, lay, ink):
+    def _letters(self, lay, ink, sx=1.0, sy=1.0):
         """Whether a point of a line's ink box lies on its letters: the layout rendered small once, its alpha
         read back (a little grown, so motifs at the edges count)."""
         native = self.get_native()
@@ -6486,8 +6489,8 @@ class ClockView(Gtk.Widget):
         data, stride = d.download_bytes()
         data = data.get_data()
 
-        def inside(x, y):
-            cx, cy = int(x * q), int(y * q)
+        def inside(x, y):  # (x, y) as seen: stretched by sx, sy
+            cx, cy = int(x / sx * q), int(y / sy * q)
             for dx, dy in ((0, 0), (2, 0), (-2, 0), (0, 2), (0, -2)):
                 px, py = cx + dx, cy + dy
                 if 0 <= px < W and 0 <= py < H and data[py * stride + px * 4 + 3] > 100:
@@ -6500,7 +6503,7 @@ class ClockView(Gtk.Widget):
         cols = day_colors(len(self.ORDER) + 1)
         return [cols[(i + self.SEED) % len(cols)] for i in self.order]
 
-    def _as_texture(self, node, ink):
+    def _as_texture(self, node, w, h):
         """A line's decorations rendered once (a day) into a texture at the screen's scale: drawn from it every
         second (the colon), and its memory known."""
         native = self.get_native()
@@ -6511,8 +6514,7 @@ class ClockView(Gtk.Widget):
         s = Gtk.Snapshot()
         s.scale(k, k)
         s.append_node(node)
-        return native.get_renderer().render_texture(s.to_node(), Graphene.Rect().init(0, 0, ink.width * k,
-                                                                                      ink.height * k))
+        return native.get_renderer().render_texture(s.to_node(), Graphene.Rect().init(0, 0, w * k, h * k))
 
     def decor_bytes(self) -> int:
         return sum(tex_bytes(t) for t in self._decor[1])
@@ -6526,6 +6528,23 @@ class NamesView(ClockView):
     ORDER = (0,)
     DAY_LINE = None
     SEED = 7
+
+    def set_room(self, w: int, h: int, texts: tuple) -> None:
+        """The whole room filled, as the song info and the date: as tall as the room, then stretched as wide
+        (or, a long name, as wide, then stretched as tall)."""
+        if (w, h) == self.room and texts == self.texts and self.lays:
+            return
+        self.room, self.texts = (w, h), texts
+        self.order = [0] if texts and texts[0] else []
+        if not self.order:
+            self.lays = None
+            return
+        ink = self._layout(0, 100)[1]
+        lay, ink = self._layout(0, 100 * min(w / max(1, ink.width), h / max(1, ink.height)))
+        self.sx, self.sy = w / max(1, ink.width), h / max(1, ink.height)
+        self.lays = ([(lay, ink)], 0.0)
+        self.set_size_request(w, h)
+        self.queue_draw()
 
 
 class InfoStack(Gtk.Widget):
