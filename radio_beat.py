@@ -4487,6 +4487,7 @@ void main() {
         except Exception as e:  # no libepoxy, no GL, an old GPU: the layers as before
             cls.why = f"nedostupné ({e})"
             cls.ok = False
+        print("Rádio Beat: GPU sklo:", "zapnuto," if cls.ok else "", cls.why, file=sys.stderr)
         return cls.ok
 
     @classmethod
@@ -10597,5 +10598,63 @@ class App(Adw.Application):
         return False
 
 
+LOG = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "radio-beat",
+                   "radio-beat.log")
+
+
+class _Stamped:
+    """stderr with the time at the start of each line (what the app itself writes)."""
+
+    def __init__(self, out):
+        self.out, self.fresh = out, True
+
+    def write(self, text):
+        for part in text.splitlines(keepends=True):
+            if self.fresh:
+                self.out.write(time.strftime("%Y-%m-%d %H:%M:%S "))
+            self.out.write(part)
+            self.fresh = part.endswith("\n")
+        self.out.flush()
+        return len(text)
+
+    def __getattr__(self, name):
+        return getattr(self.out, name)
+
+
+def start_log() -> None:
+    """Errors and warnings into LOG (kept to ~2 MB, the one before as .1): Python's and also GTK's, GLib's
+    and mpv's (stderr itself points there unless started from a terminal, which keeps seeing them)."""
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        if os.path.exists(LOG) and os.path.getsize(LOG) > 2_000_000:
+            os.replace(LOG, LOG + ".1")
+        f = open(LOG, "a", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    if sys.stderr is not None and sys.stderr.isatty():  # in a terminal: there and in the file
+        term = sys.stderr
+
+        class Both:
+            def write(self, t):
+                term.write(t)
+                return f.write(t)
+
+            def flush(self):
+                term.flush()
+                f.flush()
+
+        sys.stderr = _Stamped(Both())
+    else:
+        os.dup2(f.fileno(), 2)  # C libraries (GTK, GLib, mpv) write to fd 2 directly
+        sys.stderr = _Stamped(f)
+    try:
+        with open(os.path.join(HERE, "VERSION")) as v:
+            rev = v.read().strip()[:7]
+    except OSError:
+        rev = ""
+    print(f"--- Rádio Beat start (pid {os.getpid()}{', ' + rev if rev else ''}, {HERE})", file=sys.stderr)
+
+
 if __name__ == "__main__":
+    start_log()
     sys.exit(App().run(sys.argv))
