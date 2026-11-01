@@ -5329,11 +5329,16 @@ HOLIDAYS = {
     "music": ("Mezinárodní den hudby", "noty", lambda y: [(10, 1)], ("note", "note", "note"),
               ("#ffd54f", "#ffffff", "#e3051a", "#40c4ff"), None),
     "republic": ("Den vzniku Československa", "česká vlajka", lambda y: [(10, 28)], ("star",), ("#ffffff",), "cz"),
-    "halloween": ("Halloween", "dýně, netopýři, duchové a pavouci", lambda y: [(10, 31)],
+    # Halloween runs on into Všech svatých and Dušičky (1–2 Nov), together with them and Día de los Muertos
+    "halloween": ("Halloween", "dýně, netopýři, duchové a pavouci", lambda y: [(10, 31), (11, 1), (11, 2)],
                   ("pumpkin", "pumpkin", "bat", "bat", "ghost", "spider", "web"),
                   ("#ff6d00", "#212121", "#ffffff", "#7c4dff", "#76ff03"), None),
-    "dead": ("Dušičky a Día de los Muertos", "svíčky, lebky a měsíčky", lambda y: [(11, 1), (11, 2)],
-             ("candle", "skull", "blossom", "blossom"), ("#ff9100", "#ffd54f", "#e040fb", "#ffffff", "#ff1744"), None),
+    "dusicky": ("Dušičky", "hřbitovní lampičky, svíčky, věnce a chryzantémy", lambda y: [(11, 1), (11, 2)],
+                ("gravelight", "gravelight", "candle", "wreath", "mum"),
+                ("#d50000", "#ffd54f", "#ffffff", "#ffb300", "#b71c1c"), None),
+    "dead": ("Día de los Muertos", "calaveras, cempasúchil a papel picado", lambda y: [(11, 1), (11, 2)],
+             ("calavera", "calavera", "marigold", "marigold", "papel", "skull"),
+             ("#ff9100", "#ffd54f", "#e040fb", "#00e5ff", "#ff1744", "#76ff03"), None),
     "freedom": ("Den boje za svobodu a demokracii", "česká vlajka a svíčky", lambda y: [(11, 17)], ("candle",),
                 ("#ffffff", "#ffd54f"), "cz"),
     "thanks": ("Den díkůvzdání (USA)", "dýně a listí", lambda y: [_nth_weekday(y, 11, 3, 4)],
@@ -5359,7 +5364,7 @@ HOLIDAYS = {
 }
 HOLIDAY_PERIODS = {"advent"}  # whole stretches: mixed with the season, not instead of it
 UPRIGHT = {"palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
-           "skull", "gift", "crown", "broom", "guitar", "mimosa"}
+           "skull", "gift", "crown", "broom", "guitar", "mimosa", "gravelight", "calavera", "papel", "mum"}
 
 
 def holidays_today() -> list:
@@ -5937,6 +5942,106 @@ class SeasonDecor:
         SeasonDecor._poly(s, [(0, R * 0.05), (-R * 0.07, R * 0.2), (R * 0.07, R * 0.2)], _hex("#212121"))
         for k in range(-2, 3):
             SeasonDecor._line(s, [(k * R * 0.1, R * 0.38), (k * R * 0.1, R * 0.58)], max(0.6, size * 0.015), _hex("#424242"))
+
+    @staticmethod
+    def _gravelight(s, rng, size, color, _sea):
+        """A Czech grave lamp: red glass cup with a gold lid and a glow inside."""
+        D = SeasonDecor
+        W, H = size * 0.36, size * 0.5
+        glass = _hex(rng.choice(("#d50000", "#b71c1c", "#e53935", "#ff6f00")), 0.93)
+        D._dot(s, 0, 0, size * 0.42, _hex("#ffab00", 0.22))
+        D._poly(s, [(-W * 0.4, -H * 0.4), (W * 0.4, -H * 0.4), (W * 0.5, H * 0.5), (-W * 0.5, H * 0.5)], glass)
+        D._dot(s, 0, H * 0.05, W * 0.28, _hex("#ffe082", 0.85))
+        D._dot(s, 0, H * 0.05, W * 0.12, _hex("#ffffff", 0.95))
+        gold = _hex("#ffc107", 0.97)
+        D._poly(s, [(-W * 0.5, -H * 0.4), (W * 0.5, -H * 0.4), (W * 0.3, -H * 0.6), (-W * 0.3, -H * 0.6)], gold)
+        D._poly(s, [(-W * 0.08, -H * 0.6), (W * 0.08, -H * 0.6), (W * 0.05, -H * 0.78), (-W * 0.05, -H * 0.78)], gold)
+        D._poly(s, [(-W * 0.55, H * 0.5), (W * 0.55, H * 0.5), (W * 0.55, H * 0.6), (-W * 0.55, H * 0.6)], gold)
+
+    @staticmethod
+    def _wreath(s, rng, size, color, _sea):
+        """A spruce wreath with a few red berries and a ribbon."""
+        D = SeasonDecor
+        R = size * 0.38
+        for k in range(16):
+            a = 2 * math.pi * k / 16 + rng.uniform(-0.1, 0.1)
+            D._dot(s, R * math.cos(a), R * math.sin(a), size * 0.11,
+                   _hex(rng.choice(("#1b5e20", "#2e7d32", "#33691e")), 0.95))
+        for k in range(5):
+            a = rng.uniform(0, 2 * math.pi)
+            D._dot(s, R * math.cos(a), R * math.sin(a), size * 0.045, _hex("#e53935", 0.97))
+        ribbon = _hex(rng.choice(("#c62828", "#6a1b9a", "#f5f5f5")), 0.95)
+        D._poly(s, [(0, R), (-size * 0.12, R + size * 0.3), (-size * 0.04, R + size * 0.28)], ribbon)
+        D._poly(s, [(0, R), (size * 0.12, R + size * 0.3), (size * 0.04, R + size * 0.28)], ribbon)
+        D._dot(s, 0, R, size * 0.06, ribbon)
+
+    @staticmethod
+    def _mum(s, rng, size, color, _sea):
+        """A chrysanthemum: rings of thin petals."""
+        D = SeasonDecor
+        R = size / 2
+        c = _hex(rng.choice(("#fff8e1", "#ffd54f", "#ffb300", "#f48fb1", "#ce93d8")), 0.95)
+        for ring, (r, n) in enumerate(((R * 0.85, 18), (R * 0.6, 14), (R * 0.38, 10))):
+            col = c if ring % 2 == 0 else D._darker(c, 0.85)
+            for k in range(n):
+                a = 2 * math.pi * (k + ring * 0.5) / n
+                D._line(s, [(0, 0), (r * math.cos(a), r * math.sin(a))], max(0.8, size * 0.07), col)
+        D._dot(s, 0, 0, R * 0.16, _hex("#f9a825", 0.97))
+
+    @staticmethod
+    def _marigold(s, rng, size, color, _sea):
+        """Cempasúchil: a round, ruffled orange pompom."""
+        D = SeasonDecor
+        R = size / 2
+        base = rng.choice(("#ff9100", "#ff6d00", "#ffab00", "#ffc400"))
+        for ring, (r, n) in enumerate(((R * 0.75, 12), (R * 0.52, 9), (R * 0.3, 6))):
+            for k in range(n):
+                a = 2 * math.pi * (k + ring * 0.37) / n
+                D._dot(s, r * math.cos(a), r * math.sin(a), R * (0.3 - ring * 0.05),
+                       D._darker(_hex(base, 0.96), 1.0 - 0.12 * ((k + ring) % 2)))
+        D._dot(s, 0, 0, R * 0.18, _hex("#e65100", 0.97))
+
+    @staticmethod
+    def _calavera(s, rng, size, color, _sea):
+        """A sugar skull: white, flower eyes, painted forehead and stitched smile."""
+        D = SeasonDecor
+        R = size / 2
+        white = _hex("#fafafa", 0.97)
+        D._dot(s, 0, -R * 0.1, R * 0.6, white)
+        D._poly(s, [(-R * 0.35, R * 0.25), (R * 0.35, R * 0.25), (R * 0.27, R * 0.68), (-R * 0.27, R * 0.68)], white)
+        bright = ("#e040fb", "#00e5ff", "#ff1744", "#76ff03", "#ffd600", "#ff9100")
+        for x in (-R * 0.24, R * 0.24):
+            ring = _hex(rng.choice(bright), 0.97)
+            for k in range(6):
+                a = 2 * math.pi * k / 6
+                D._dot(s, x + R * 0.12 * math.cos(a), -R * 0.1 + R * 0.12 * math.sin(a), R * 0.07, ring)
+            D._dot(s, x, -R * 0.1, R * 0.11, _hex("#212121"))
+        D._poly(s, [(0, R * 0.08), (-R * 0.06, R * 0.22), (R * 0.06, R * 0.22)], _hex("#212121"))
+        D._dot(s, 0, -R * 0.5, R * 0.1, _hex(rng.choice(bright), 0.97))  # forehead flower
+        for a in (-0.6, 0.6):
+            D._dot(s, R * 0.25 * math.sin(a) * 1.4, -R * 0.45, R * 0.05, _hex(rng.choice(bright), 0.95))
+        smile = _hex("#212121", 0.9)
+        D._line(s, [(-R * 0.28, R * 0.45), (R * 0.28, R * 0.45)], max(0.6, size * 0.02), smile)
+        for k in range(-3, 4):
+            D._line(s, [(k * R * 0.08, R * 0.38), (k * R * 0.08, R * 0.52)], max(0.6, size * 0.015), smile)
+
+    @staticmethod
+    def _papel(s, rng, size, color, _sea):
+        """Papel picado: a bright tissue flag on a string, with cut-out holes."""
+        D = SeasonDecor
+        W, H = size * 0.6, size * 0.7
+        paper = _hex(rng.choice(("#e040fb", "#00e5ff", "#ff1744", "#76ff03", "#ffd600", "#ff9100")), 0.9)
+        D._line(s, [(-W * 0.8, -H / 2), (W * 0.8, -H / 2)], max(0.7, size * 0.02), _hex("#fafafa", 0.8))
+        pts = [(-W / 2, -H / 2), (W / 2, -H / 2), (W / 2, H * 0.35)]
+        for k in range(5, -1, -1):  # zigzag bottom edge
+            pts.append((-W / 2 + W * k / 5 - W / 10, H * (0.5 if k % 2 else 0.35)) if 0 < k < 5 else
+                       (-W / 2 + W * k / 5, H * 0.35))
+        D._poly(s, pts, paper)
+        cut = D._darker(paper, 0.55)
+        D._dot(s, 0, -H * 0.05, W * 0.14, cut)
+        for k in range(6):
+            a = 2 * math.pi * k / 6
+            D._dot(s, W * 0.25 * math.cos(a), -H * 0.05 + W * 0.25 * math.sin(a), W * 0.05, cut)
 
     @staticmethod
     def _tree(s, rng, size, color, _sea):
