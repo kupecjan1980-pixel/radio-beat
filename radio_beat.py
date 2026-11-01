@@ -5473,8 +5473,55 @@ class MenuGlass(GlassCard):
         snap.translate(Graphene.Point().init(w / 2, h / 2))
         snap.scale(sx, sy)
         snap.translate(Graphene.Point().init(-w / 2, -h / 2))
-        snap.append_texture(self._tex, Graphene.Rect().init(p.x, p.y, content.get_width(), content.get_height()))
+        win = Graphene.Rect().init(p.x, p.y, content.get_width(), content.get_height())
+        self._window(snap, win)
+        if self.edge_mirror and self._flat_mirror:  # (GPU only: the rings would draw them thousands of times)
+            self._mirror_sides(snap, w, h, win)
         snap.restore()
+
+    def _window(self, snap, win) -> None:
+        """The window's picture; with edge mirrors also mirrored past its edges (the rim near the screen's edge
+        shows no emptiness)."""
+        if not (self.edge_mirror and self._flat_mirror):
+            snap.append_texture(self._tex, win)
+            return
+        x, y, ww, wh = win.get_x(), win.get_y(), win.get_width(), win.get_height()
+        for mx in (-1, 0, 1):
+            for my in (-1, 0, 1):
+                snap.save()
+                snap.translate(Graphene.Point().init(x + (2 * ww if mx == 1 else 0), y + (2 * wh if my == 1 else 0)))
+                snap.scale(-1 if mx else 1, -1 if my else 1)
+                snap.append_texture(self._tex, Graphene.Rect().init(0, 0, ww, wh))
+                snap.restore()
+
+    def _mirror_sides(self, snap, w: float, h: float, win) -> None:
+        """Beyond each of its four edges, as far as the rim reaches: what lies there flipped within that strip,
+        so the rim shows what's closest to the edge right at it, upside down (left and right: mirrored side to
+        side), further things further in: a mirror at every edge (the song info, the date and time, the
+        slider and the line under it). Faded out towards the edge, where the rim turns see-through."""
+        bx, by = self._edge_reach_x + 2, self._edge_reach + 2
+        if bx <= 2 or by <= 2:
+            return
+        sides = (  # strip, flip (sx, sy) and offset, gradient from its far side to its near one
+            (Graphene.Rect().init(-bx, -by, w + 2 * bx, by), (1, -1, 0, -by), (0, -by), (0, 0)),
+            (Graphene.Rect().init(-bx, h, w + 2 * bx, by), (1, -1, 0, 2 * h + by), (0, h + by), (0, h)),
+            (Graphene.Rect().init(-bx, 0, bx, h), (-1, 1, -bx, 0), (-bx, 0), (0, 0)),
+            (Graphene.Rect().init(w, 0, bx, h), (-1, 1, 2 * w + bx, 0), (w + bx, 0), (w, 0)),
+        )
+        for rect, (fx, fy, ox, oy), far, near in sides:
+            snap.push_clip(rect)
+            snap.push_mask(Gsk.MaskMode.ALPHA)
+            snap.append_linear_gradient(rect, Graphene.Point().init(*far), Graphene.Point().init(*near),
+                                        [_stop(0.0, 255, 255, 255, 1.0), _stop(0.45, 255, 255, 255, 1.0),
+                                         _stop(1.0, 255, 255, 255, 0.0)])
+            snap.pop()
+            snap.save()
+            snap.translate(Graphene.Point().init(ox, oy))  # flipped within the strip: x -> ox - x, y -> oy - y
+            snap.scale(fx, fy)
+            self._window(snap, win)
+            snap.restore()
+            snap.pop()
+            snap.pop()
 
     def _window_changed(self, *_) -> None:
         self._tex_version += 1
@@ -7603,10 +7650,17 @@ class Window(Adw.ApplicationWindow):
         overlay.add_overlay(self.names)
         # the mouse on the date, time or names: what day it is, in a glass box beside them
         self.day_text = Gtk.Label(xalign=0, wrap=True, max_width_chars=46, use_markup=True, margin_top=10,
-                                  margin_bottom=10, margin_start=14, margin_end=14)
+                                  margin_bottom=10, margin_start=14, margin_end=14, valign=Gtk.Align.CENTER,
+                                  vexpand=True, hexpand=True)
         dglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
         dglass.radius = 16.0
-        dglass.append(self.day_text)
+        # over the cover, filling it: a thick edge like the panels', mirroring what lies beyond each edge
+        dglass.curve, dglass.wall, dglass.reach, dglass.shine = 3.0, 2.8, 0.9, True
+        dglass.edge_mirror = True
+        # (its natural size the box's, not the text's on one line: the popover takes its child's natural size)
+        self.day_fit = Gtk.ScrolledWindow(child=self.day_text, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                          vscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, vexpand=True)
+        dglass.append(self.day_fit)
         self.day_pop = Gtk.Popover(child=dglass, has_arrow=False, position=Gtk.PositionType.LEFT, autohide=False,
                                    can_focus=False)
         self.day_pop.add_css_class("glass-menu")
@@ -7902,16 +7956,101 @@ class Window(Adw.ApplicationWindow):
         self._day_show(self.clock)
         GLib.timeout_add_seconds(self.DAY_AUTO[1], lambda: (self._day_on or self.day_pop.popdown(), False)[1])
 
+    DAY_GAP = 18  # the day's box keeps this far inside the cover's edges and above the slider
+
+    def _day_area(self):
+        """(x, y, w, h) in the window for the day's box: inside the cover, a gap from each of its edges, above
+        the volume slider (and the quality pill); None when there's no cover or too little of it."""
+        cover = self.cover_rect()
+        if not cover:
+            return None
+        g = self.DAY_GAP
+        left, top = max(0, cover[0]) + g, max(0, cover[1]) + g
+        right, bottom = min(self.get_width(), cover[2]) - g, min(self.get_height(), cover[3]) - g
+        for w in (self.vol, self.quality_pill):
+            ok, b = w.compute_bounds(self)
+            if ok and w.get_mapped() and b.get_y() > top and b.get_x() < right and b.get_x() + b.get_width() > left:
+                bottom = min(bottom, b.get_y() - g)
+        if right - left < 200 or bottom - top < 120:
+            return None
+        return left, top, right - left, bottom - top
+
+    def _day_fit(self, w: int, h: int) -> None:
+        """The day's text as big as fits the box (wrapped to its width), between half and three times."""
+        lab = self.day_text
+        tw = w - lab.get_margin_start() - lab.get_margin_end() - 2 * 16
+        th = h - lab.get_margin_top() - lab.get_margin_bottom() - 2 * 8
+        lo, hi = 0.5, 3.0
+        for _ in range(12):  # (a binary search over the scale)
+            f = (lo + hi) / 2
+            attrs = Pango.AttrList()
+            attrs.insert(Pango.attr_scale_new(f))
+            lab.set_attributes(attrs)
+            if lab.measure(Gtk.Orientation.VERTICAL, max(1, tw))[0] <= th:
+                lo = f
+            else:
+                hi = f
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_scale_new(lo))
+        lab.set_attributes(attrs)
+
     def _day_show(self, view) -> None:
         self.day_text.set_markup(day_summary())
-        ok, b = view.compute_bounds(self.clock)  # where it is, in the clock (the box's parent)
-        if ok:
-            r = Gdk.Rectangle()
-            r.x, r.y, r.width, r.height = round(b.get_x()) - 12, round(b.get_y()), 1, max(1, round(b.get_height()))
-            self.day_pop.set_pointing_to(r)
+        area = self._day_area()
+        glass = self.day_pop.get_child()
+        if area:  # over the cover, filling it
+            x, y, w, h = (round(v) for v in area)
+            glass.set_size_request(w, h)
+            self.day_fit.set_propagate_natural_width(False)
+            self.day_fit.set_propagate_natural_height(False)
+            self.day_fit.set_size_request(w, h)
+            glass.radius = 28 * max(1.0, self._scale)  # the panels' corners
+            self.day_text.set_max_width_chars(-1)
+            self._day_fit(w, h)
+            self.day_pop.set_position(Gtk.PositionType.BOTTOM)
+            ok, at = self.compute_point(self.clock, Graphene.Point().init(x, y))
+            if ok:
+                r = Gdk.Rectangle()
+                r.x, r.y, r.width, r.height = round(at.x), round(at.y) - 1, w, 1
+                self.day_pop.set_pointing_to(r)
+        else:  # no cover: beside the date and time as before
+            glass.set_size_request(-1, -1)
+            self.day_fit.set_size_request(-1, -1)
+            self.day_fit.set_propagate_natural_width(True)
+            self.day_fit.set_propagate_natural_height(True)
+            glass.radius = 16.0
+            self.day_text.set_max_width_chars(46)
+            self.day_text.set_attributes(None)
+            self.day_pop.set_position(Gtk.PositionType.LEFT)
+            ok, b = view.compute_bounds(self.clock)  # where it is, in the clock (the box's parent)
+            if ok:
+                r = Gdk.Rectangle()
+                r.x, r.y, r.width, r.height = round(b.get_x()) - 12, round(b.get_y()), 1, max(1, round(b.get_height()))
+                self.day_pop.set_pointing_to(r)
         self.day_pop.get_child().fresh()  # never an earlier picture behind it
+        if not area:
+            self.day_pop.set_offset(0, 0)
         self.day_pop.popup()
         GLib.idle_add(lambda: (self.day_pop.get_child().queue_draw(), False)[1])
+        if area:
+            GLib.idle_add(self._day_true, area)
+
+    def _day_true(self, area) -> bool:
+        """The popover puts its box a few px off where it was pointed (a gap of its own, the theme's): measured
+        once shown and moved by that, so it keeps exactly the gaps from the cover's edges and the slider."""
+        glass, content = self.day_pop.get_child(), self.get_content()
+        ok, p = glass._where(content) if content and self.day_pop.get_visible() else (False, None)
+        ok_c, cp = content.compute_point(glass.win, Graphene.Point().init(0, 0)) if ok else (False, None)
+        if not ok_c:
+            return False
+        dx, dy = round(area[0] - (cp.x - p.x)), round(area[1] - (cp.y - p.y))
+        if dx or dy:
+            ox, oy = self.day_pop.get_offset()
+            self.day_pop.set_offset(ox + dx, oy + dy)
+            self.day_pop.present()
+            glass.fresh()
+            glass.queue_draw()
+        return False
 
     def _place_status(self, top: float = None, stop: float = None) -> None:
         """The status under the volume slider (below its knob, `top`), centred on it, from its start to its end
