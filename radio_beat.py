@@ -13,9 +13,10 @@ so (autostart_full); --hidden (a restart after an update while the window was cl
 icon.
 """
 
-# The version, as in Handheld Control: 1.MINOR.PATCH, the patch one up with every change pushed, the minor one up
-# (patch back to 0) with a bigger new feature; each one a git tag and a GitHub release vX.Y.Z.
-APP_VERSION = "1.0.0"
+# The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
+# (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
+# numbered the same way afterwards (CHANGELOG.md).
+APP_VERSION = "0.23.14"
 
 import collections
 import ctypes
