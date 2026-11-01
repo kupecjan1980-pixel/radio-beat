@@ -7978,8 +7978,9 @@ class Window(Adw.ApplicationWindow):
     def _day_fit(self, w: int, h: int) -> None:
         """The day's text as big as fits the box (wrapped to its width), between half and three times."""
         lab = self.day_text
-        tw = w - lab.get_margin_start() - lab.get_margin_end() - 2 * 16
-        th = h - lab.get_margin_top() - lab.get_margin_bottom() - 2 * 8
+        r = self.day_fit.get_margin_start()  # (the glass's corner radius on every side)
+        tw = w - lab.get_margin_start() - lab.get_margin_end() - 2 * r - 4
+        th = h - lab.get_margin_top() - lab.get_margin_bottom() - 2 * r
         lo, hi = 0.5, 3.0
         for _ in range(12):  # (a binary search over the scale)
             f = (lo + hi) / 2
@@ -7994,6 +7995,16 @@ class Window(Adw.ApplicationWindow):
         attrs.insert(Pango.attr_scale_new(lo))
         lab.set_attributes(attrs)
 
+    def _day_margins(self, glass: int, tb: int, lr: int) -> None:
+        """The day text's borders: `glass` px around its scroller, tb/lr px around the label itself."""
+        for f in (self.day_fit.set_margin_top, self.day_fit.set_margin_bottom, self.day_fit.set_margin_start,
+                  self.day_fit.set_margin_end):
+            f(glass)
+        self.day_text.set_margin_top(tb)
+        self.day_text.set_margin_bottom(tb)
+        self.day_text.set_margin_start(lr)
+        self.day_text.set_margin_end(lr)
+
     def _day_show(self, view) -> None:
         self.day_text.set_markup(day_summary())
         area = self._day_area()
@@ -8001,10 +8012,13 @@ class Window(Adw.ApplicationWindow):
         if area:  # over the cover, filling it
             x, y, w, h = (round(v) for v in area)
             glass.set_size_request(w, h)
+            glass.radius = 28 * max(1.0, self._scale)  # the panels' corners
+            # the text within the rectangle joining the corners' circle centers, as in the ⓘ panel
+            r = int(glass.radius)
+            self._day_margins(r, 0, 0)
             self.day_fit.set_propagate_natural_width(False)
             self.day_fit.set_propagate_natural_height(False)
-            self.day_fit.set_size_request(w, h)
-            glass.radius = 28 * max(1.0, self._scale)  # the panels' corners
+            self.day_fit.set_size_request(w - 2 * r, h - 2 * r)
             self.day_text.set_max_width_chars(-1)
             self._day_fit(w, h)
             self.day_pop.set_position(Gtk.PositionType.BOTTOM)
@@ -8016,6 +8030,7 @@ class Window(Adw.ApplicationWindow):
         else:  # no cover: beside the date and time as before
             glass.set_size_request(-1, -1)
             self.day_fit.set_size_request(-1, -1)
+            self._day_margins(0, 10, 14)
             self.day_fit.set_propagate_natural_width(True)
             self.day_fit.set_propagate_natural_height(True)
             glass.radius = 16.0
