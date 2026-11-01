@@ -6561,6 +6561,7 @@ class InfoStack(Gtk.Widget):
              ("Oswald", Pango.Weight.NORMAL, 13, 0.8), ("Oswald", Pango.Weight.NORMAL, 10.5, 1.0))
     GAP_IN, GAP_OUT = 0.04, 0.07  # between a part's lines, between the parts (of the width)
     STRETCH = 2.0  # at most this much taller than their font makes them, to fill the room's height
+    ROW_MAX = 1.6  # a row no taller than this many times its part's usual line height
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -6657,7 +6658,12 @@ class InfoStack(Gtk.Widget):
                     y += gout - gin
                 for row in rows:
                     lay, ink = self._lay(row, part, 100)
-                    lay, ink = self._lay(row, part, 100 * w * shrink / max(1, ink.width) * 0.98)
+                    pt = 100 * w * shrink / max(1, ink.width) * 0.98
+                    # a short row ("1", "Help!") as wide as the room would be a giant: no taller than a bit
+                    # over its part's usual line (as the clock's one-digit day), narrower instead
+                    cap = self.PARTS[part][2] * scale * shrink * self.ROW_MAX
+                    pt = min(pt, 100 * cap / max(1, ink.height))
+                    lay, ink = self._lay(row, part, pt)
                     out.append((lay, ink, y, self.PARTS[part][3]))
                     y += ink.height + gin
             return out, y - gin if out else 0.0
