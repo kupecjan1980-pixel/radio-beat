@@ -6522,6 +6522,61 @@ class ClockView(Gtk.Widget):
         return sum(tex_bytes(t) for t in self._decor[1])
 
 
+class FitText(Gtk.Widget):
+    """One line of small text (the status) as big as fits its room, no bigger than MAX_PT, in the middle of it."""
+
+    MAX_PT = 13.0
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.text, self.room, self.lay = "", (0, 0), None
+
+    def set_text(self, text: str) -> None:
+        if text != self.text:
+            self.text, self.lay = text, None
+            self.set_visible(bool(text) and self.get_visible())
+            self._fit()
+
+    def set_room(self, w: int, h: int) -> None:
+        if (w, h) != self.room or self.lay is None:
+            self.room = (w, h)
+            self._fit()
+
+    def _fit(self) -> None:
+        w, h = self.room
+        if not self.text or w < 1 or h < 1:
+            return
+        lay = self.create_pango_layout(self.text)
+
+        def size(pt):
+            attrs = Pango.AttrList()
+            attrs.insert(Pango.attr_size_new(int(pt * Pango.SCALE)))
+            lay.set_attributes(attrs)
+            return lay.get_pixel_extents()[1]
+        ink = size(100)
+        pt = min(self.MAX_PT, 100 * 0.97 * min(w / max(1, ink.width), h / max(1, ink.height)))
+        for _ in range(4):  # small sizes aren't quite in proportion (hinting): measured again until it fits
+            ink = size(pt)
+            if ink.width <= w and ink.height <= h:
+                break
+            pt *= 0.97 * min(w / max(1, ink.width), h / max(1, ink.height))
+        self.lay = lay
+        self.set_size_request(w, h)
+        self.queue_draw()
+
+    def do_snapshot(self, snap) -> None:
+        if not self.lay:
+            return
+        w, h = self.room
+        ink = self.lay.get_pixel_extents()[1]
+        shadow = Gsk.Shadow()
+        shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 1, 2
+        snap.push_shadow([shadow])
+        snap.translate(Graphene.Point().init((w - ink.width) / 2 - ink.x, (h - ink.height) / 2 - ink.y))
+        snap.append_layout(self.lay, _rgba(255, 255, 255, 0.8))
+        snap.pop()
+
+
 class NamesView(ClockView):
     """Whose name day it is ("FELIX", "BRONISLAV / BRONISLAVA"), one line in the clock's letters, as wide as its
     room: below the volume slider and the quality pill, above the screen's bottom edge."""
@@ -6662,9 +6717,11 @@ class InfoStack(Gtk.Widget):
                     # a short row ("1", "Help!") as wide as the room would be a giant: no taller than a bit
                     # over its part's usual line (as the clock's one-digit day), narrower instead
                     cap = self.PARTS[part][2] * scale * shrink * self.ROW_MAX
+                    capped = pt > 100 * cap / max(1, ink.height)
                     pt = min(pt, 100 * cap / max(1, ink.height))
                     lay, ink = self._lay(row, part, pt)
-                    out.append((lay, ink, y, self.PARTS[part][3]))
+                    x = (w - ink.width) / 2 if capped else 0.0  # (a capped one in the middle)
+                    out.append((lay, ink, y, self.PARTS[part][3], x))
                     y += ink.height + gin
             return out, y - gin if out else 0.0
 
@@ -6696,9 +6753,9 @@ class InfoStack(Gtk.Widget):
                 glow.color, glow.dx, glow.dy, glow.radius = _rgba(255, 255, 255, a * self.flash), 0, 0, radius
                 shadows.append(glow)
         snap.push_shadow(shadows)
-        for lay, ink, y, alpha in self.lines:
+        for lay, ink, y, alpha, x in self.lines:
             snap.save()
-            snap.translate(Graphene.Point().init(0, y * self.sy))
+            snap.translate(Graphene.Point().init(x, y * self.sy))
             snap.scale(1.0, self.sy)
             snap.translate(Graphene.Point().init(-ink.x, -ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, alpha))
@@ -7207,10 +7264,10 @@ class Window(Adw.ApplicationWindow):
         controls.append(self.vol)
         # The status (paused, reconnecting, a HRÁLO song's quality) above the buttons, only when it says something:
         # the buttons sit as far from the bottom edge as from the left one, the quality pill at the row's end.
-        self.status = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, visible=False)
-        self.status.add_css_class("status")
-        self.status.connect("notify::label", lambda l, _: l.set_visible(bool(l.get_label())))
-        inner.append(self.status)
+        # (its text; drawn by status_view under the volume slider, centred, fitted to the room there)
+        self.status = Gtk.Label(visible=False)
+        self.status.connect("notify::label", lambda l, _: (self.status_view.set_text(l.get_label()),
+                                                            GLib.idle_add(self._place_clock)))
         controls.append(self._quality_pill(scrim))
         inner.append(controls)
         overlay.add_overlay(scrim)
@@ -7225,6 +7282,9 @@ class Window(Adw.ApplicationWindow):
         self.clock.set_cursor(Gdk.Cursor.new_from_name("pointer"))
         self.clock.set_visible(False)
         overlay.add_overlay(self.clock)
+        # the status (paused, reconnecting, a HRÁLO song's quality and video) under the volume slider, centred
+        self.status_view = FitText(halign=Gtk.Align.START, valign=Gtk.Align.END, can_target=False, visible=False)
+        overlay.add_overlay(self.status_view)
         # whose name day it is, below the volume slider and the quality pill (a click: the same as on the date)
         self.names = NamesView(halign=Gtk.Align.END, valign=Gtk.Align.END, visible=False)
         click = Gtk.GestureClick()
@@ -7544,6 +7604,29 @@ class Window(Adw.ApplicationWindow):
         self.day_pop.popup()
         GLib.idle_add(lambda: (self.day_pop.get_child().queue_draw(), False)[1])
 
+    def _place_status(self, top: float = None, stop: float = None) -> None:
+        """The status under the volume slider (below its knob, `top`), centred on it, from its start to its end
+        or to `stop` (where the names begin), as big as fits, touching nothing."""
+        sv, H = self.status_view, self.get_height()
+        ok, vb = self.vol.compute_bounds(self)
+        if not ok or not sv.text:
+            sv.set_visible(False)
+            return
+        if top is None:
+            top = vb.get_y() + vb.get_height() / 2 + 12  # (the knob's bottom, about)
+        x0 = vb.get_x() + 8
+        x1 = vb.get_x() + vb.get_width() - 8
+        if stop is not None:
+            x1 = min(x1, stop - 12)
+        sh = int(min(H - top - 2 * self.CLOCK_PAD, 40))
+        if x1 - x0 < 60 or sh < 8:
+            sv.set_visible(False)
+            return
+        sv.set_room(int(x1 - x0), sh)
+        sv.set_margin_start(int(x0))
+        sv.set_margin_bottom(int((H - top - sh) / 2))
+        sv.set_visible(True)
+
     CLOCK_GAP = 22  # from the screen's right edge (as the song info from its left)
     CLOCK_PAD = 6  # off the volume slider's knob and the screen's bottom
 
@@ -7569,6 +7652,7 @@ class Window(Adw.ApplicationWindow):
         if not cover or not ok or not getattr(self, "_clock_texts", None):
             self.clock.set_visible(False)
             self.names.set_visible(False)
+            self._place_status()
             return False
         # just below the slider's knob (the slider widget itself is taller than what's drawn of it)
         top = vol.get_y() + vol.get_height()
@@ -7604,6 +7688,7 @@ class Window(Adw.ApplicationWindow):
         if room_w < 60 or room_h < 40:
             self.clock.set_visible(False)
             self.names.set_visible(False)
+            self._place_status()
             return False
         self.clock.set_room(room_w, room_h, self._clock_texts)
         self.clock.set_margin_end(self.CLOCK_GAP)
@@ -7614,6 +7699,7 @@ class Window(Adw.ApplicationWindow):
         if ok3 and pill.get_height() > 0:
             under = max(under, pill.get_y() + pill.get_height())
         names_h = int(H - under - 2 * self.CLOCK_PAD)
+        self._place_status(top, cover[2] + self.CLOCK_GAP if self._names_text and names_h >= 12 else None)
         if self._names_text and names_h >= 12:
             self.names.set_room(room_w, names_h, (self._names_text,))
             self.names.set_margin_end(self.CLOCK_GAP)
