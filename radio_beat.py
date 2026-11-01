@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.24.0"
+APP_VERSION = "0.24.1"
 
 import collections
 import ctypes
@@ -3450,7 +3450,7 @@ SHARE_NAME = re.compile(r"^[0-9a-f]{40}\.(jpg|txt)$")
 SHARE_MAX = 40 << 20  # bytes a picture may have
 # The shared database over the internet (radio_beat_hub.py, run on one computer behind a tunnel): every Rádio Beat
 # swaps pictures, plays and track info with it, wherever it is. On the computer running it: straight to it.
-HUB_URL = ""  # public address (https://…), set once the tunnel is up; settings "hub_url" overrides
+HUB_URL = "https://ryzen7030pro.tail326f7d.ts.net"  # public address (Tailscale Funnel); settings "hub_url" overrides
 HUB_LOCAL = "http://127.0.0.1:48766"
 HUB_LIKE = 40  # a picture from the hub is used only if it looks like the original (mean difference of 16x16, 0-255)
 

@@ -4,6 +4,7 @@
 
 ## 0.24 — Sdílení přes internet (společný server)
 
+- **0.24.1** (2026-11-01) Adresa společného serveru (https://ryzen7030pro.tail326f7d.ts.net, Tailscale Funnel): sdílení přes internet zapnuto pro všechna Rádia Beat; server neomezuje aplikaci na svém počítači, ostatní adresy až 3000 požadavků za 10 min
 - **0.24.0** (2026-11-01) Společný server (radio_beat_hub.py, hub-setup.sh): vylepšené obrázky, hrané skladby a údaje o skladbách sdílené přes internet mezi všemi Rádii Beat; obrázky ze serveru se před prvním použitím porovnají s originálem
 
 ## 0.23 — Sklo počítané grafickou kartou (shader)

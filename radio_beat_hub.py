@@ -32,7 +32,7 @@ PAGE = 2000  # rows per answer
 SAME = 1800  # s: the same song this close in time is the same play (as the app's History.SAME)
 COVER_HOSTS = re.compile(r"^https://([a-z0-9-]+\.)*(dzcdn\.net|mzstatic\.com|ytimg\.com|deezer\.com|"
                          r"apple\.com|googleusercontent\.com|radiobeat\.cz)/", re.I)
-RATE = (600, 600)  # requests per address in this many seconds at most (an app's round is a few dozen)
+RATE = (3000, 600)  # requests per address in this many seconds at most (a first upload sends ~1000 pictures)
 
 
 class Hub:
@@ -197,6 +197,9 @@ def serve(hub: Hub, port: int) -> None:
                     or self.client_address[0]).strip()
 
         def _allowed(self) -> bool:
+            if self.client_address[0] == "127.0.0.1" and not (self.headers.get("X-Forwarded-For")
+                                                              or self.headers.get("Cf-Connecting-IP")):
+                return True  # the app on this computer itself (straight, not through the tunnel)
             now = time.monotonic()
             with hits_lock:
                 q = hits[self._who()]
