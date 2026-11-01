@@ -5495,6 +5495,9 @@ class MenuGlass(GlassCard):
                 snap.append_texture(self._tex, Graphene.Rect().init(0, 0, ww, wh))
                 snap.restore()
 
+    BOTTOM_STRETCH = 2.2  # the bottom edge's mirror: what's below drawn this much taller (the slider is thin)
+    BOTTOM_GAIN = 1.35  # and this much brighter
+
     def _mirror_sides(self, snap, w: float, h: float, win) -> None:
         """Beyond each of its four edges, as far as the rim reaches: what lies there flipped within that strip,
         so the rim shows what's closest to the edge right at it, upside down (left and right: mirrored side to
@@ -5503,14 +5506,18 @@ class MenuGlass(GlassCard):
         bx, by = self._edge_reach_x + 2, self._edge_reach + 2
         if bx <= 2 or by <= 2:
             return
-        sides = (  # strip, flip (sx, sy) and offset, gradient from its far side to its near one
-            (Graphene.Rect().init(-bx, -by, w + 2 * bx, by), (1, -1, 0, -by), (0, -by), (0, 0)),
-            (Graphene.Rect().init(-bx, h, w + 2 * bx, by), (1, -1, 0, 2 * h + by), (0, h + by), (0, h)),
-            (Graphene.Rect().init(-bx, 0, bx, h), (-1, 1, -bx, 0), (-bx, 0), (0, 0)),
-            (Graphene.Rect().init(w, 0, bx, h), (-1, 1, 2 * w + bx, 0), (w + bx, 0), (w, 0)),
+        g = self.BOTTOM_STRETCH  # below: the thin slider (and the line under it) stretched, to be seen
+        sides = (  # strip, flip (sx, sy) and offset, gradient from its far side to its near one, brighter
+            (Graphene.Rect().init(-bx, -by, w + 2 * bx, by), (1, -1, 0, -by), (0, -by), (0, 0), 1.0),
+            (Graphene.Rect().init(-bx, h, w + 2 * bx, by), (1, -g, 0, h + by + g * h), (0, h + by), (0, h),
+             self.BOTTOM_GAIN),
+            (Graphene.Rect().init(-bx, 0, bx, h), (-1, 1, -bx, 0), (-bx, 0), (0, 0), 1.0),
+            (Graphene.Rect().init(w, 0, bx, h), (-1, 1, 2 * w + bx, 0), (w + bx, 0), (w, 0), 1.0),
         )
-        for rect, (fx, fy, ox, oy), far, near in sides:
+        for rect, (fx, fy, ox, oy), far, near, gain in sides:
             snap.push_clip(rect)
+            if gain != 1.0:
+                snap.push_color_matrix(Graphene.Matrix().init_scale(gain, gain, gain), Graphene.Vec4().init(0, 0, 0, 0))
             snap.push_mask(Gsk.MaskMode.ALPHA)
             snap.append_linear_gradient(rect, Graphene.Point().init(*far), Graphene.Point().init(*near),
                                         [_stop(0.0, 255, 255, 255, 1.0), _stop(0.45, 255, 255, 255, 1.0),
@@ -5522,6 +5529,8 @@ class MenuGlass(GlassCard):
             self._window(snap, win)
             snap.restore()
             snap.pop()
+            if gain != 1.0:
+                snap.pop()
             snap.pop()
 
     def _window_changed(self, *_) -> None:
