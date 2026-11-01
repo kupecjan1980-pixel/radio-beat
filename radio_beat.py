@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.23.15"
+APP_VERSION = "0.24.0"
 
 import collections
 import ctypes
@@ -2492,6 +2492,7 @@ class Enhancer:
         self.cache_used = self.cache_allowed = -1  # bytes (counted at start, then kept up to date)
         self.on_gone = None  # called with each picture the cache lets go (CacheShare: not fetched back)
         self.fetch = None  # asks the other computers for a picture before making it (CacheShare): who gave it
+        self.verify = None  # (name, source bytes, path) -> a picture from the internet hub looks like the original
         self.watches: list[GpuWatch] = []  # the GPU watched during the job's steps
         self.sizes: dict[str, list] = {}  # kind -> [original bytes, enhanced bytes or None while working]
         threading.Thread(target=self._trim, daemon=True).start()
@@ -2920,7 +2921,8 @@ class Enhancer:
         # Enhanced before (the AI's final picture is kept): shown at once, even before the GPU test is done, and
         # not made again.
         hit = self._cache_path(key, size, ai=True)
-        if kind != "icon" and os.path.exists(hit) and self._jpeg_ok(hit) and self._not_black(hit):
+        if kind != "icon" and os.path.exists(hit) and self._jpeg_ok(hit) and self._not_black(hit) \
+                and (not self.verify or self.verify(os.path.basename(hit), data, hit)):
             self._used(hit)
             with open(hit, "rb") as f:
                 pic = f.read()
@@ -3021,6 +3023,8 @@ class Enhancer:
         fetched = None
         if not self.light and self.fetch and not os.path.exists(cached):
             fetched = self.fetch(os.path.basename(cached))  # another computer may have made it already
+        if os.path.exists(cached) and self.verify and not self.verify(os.path.basename(cached), data, cached):
+            pass  # from the internet hub and not like the original: deleted, made here
         if os.path.exists(cached):
             if self._jpeg_ok(cached) and self._not_black(cached):  # black ones came from the GPU giving up
                 self._used(cached)
@@ -3444,6 +3448,11 @@ SHARE_SCREEN = (3840, 2160)  # pictures enhanced for at least this (App.enhance_
 SHARE_EVERY = 600
 SHARE_NAME = re.compile(r"^[0-9a-f]{40}\.(jpg|txt)$")
 SHARE_MAX = 40 << 20  # bytes a picture may have
+# The shared database over the internet (radio_beat_hub.py, run on one computer behind a tunnel): every Rádio Beat
+# swaps pictures, plays and track info with it, wherever it is. On the computer running it: straight to it.
+HUB_URL = ""  # public address (https://…), set once the tunnel is up; settings "hub_url" overrides
+HUB_LOCAL = "http://127.0.0.1:48766"
+HUB_LIKE = 40  # a picture from the hub is used only if it looks like the original (mean difference of 16x16, 0-255)
 
 
 class CacheShare:
@@ -3474,6 +3483,15 @@ class CacheShare:
             self.gone = set()
         enhancer.on_gone = self._let_go
         enhancer.fetch = self.fetch
+        enhancer.verify = self.verify
+        self.hub_url = ""  # (App sets it from the settings)
+        self.hub_text = ""
+        self.unverified_path = os.path.join(DATA_DIR, "hub-unverified.json")  # pictures from the hub not yet checked
+        try:
+            with open(self.unverified_path) as f:
+                self.unverified = set(json.load(f))
+        except (OSError, ValueError):
+            self.unverified = set()
         try:
             with open(os.path.join(DATA_DIR, "share-id")) as f:
                 self.id = f.read().strip()
@@ -3874,6 +3892,11 @@ class CacheShare:
         return nets
 
     def _round(self) -> None:
+        try:
+            self._hub_round()
+        except Exception as e:  # never the LAN's end
+            self.hub_text = f"Internet: selhalo ({e})"
+            GLib.idle_add(lambda: (self.on_status(), False)[1])
         self.peers = self._find()
         if not self.peers:
             self._say(f"V této síti zatím žádný další počítač s Rádiem Beat (hledá každých {SHARE_EVERY // 60} min)")
@@ -3922,6 +3945,162 @@ class CacheShare:
                       f"{plays}")
         if self.got:
             self.enh._trim()
+
+    # --- the shared database over the internet (radio_beat_hub.py) ----------------------------------------------
+    def _hub_base(self) -> str | None:
+        """Where the hub is: on this computer straight to it, else its public address; None: none."""
+        try:
+            with socket.create_connection(("127.0.0.1", 48766), timeout=0.3):
+                return HUB_LOCAL
+        except OSError:
+            pass
+        return (self.hub_url or HUB_URL).rstrip("/") or None
+
+    def _hub(self, base: str, path: str, data: bytes | None = None, timeout: float = 30):
+        req = urllib.request.Request(base + path, data=data, method="PUT" if data is not None else "GET",
+                                     headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+
+    def _save_unverified(self) -> None:
+        try:
+            with open(self.unverified_path + ".part", "w") as f:
+                json.dump(sorted(self.unverified), f)
+            os.replace(self.unverified_path + ".part", self.unverified_path)
+        except OSError:
+            pass
+
+    def _hub_round(self) -> None:
+        """Pictures, plays and track info both ways with the hub; each kind from where it got to last time (the
+        hub numbers what it takes: nothing another computer sent late is missed)."""
+        base = self._hub_base()
+        if not base:
+            self.hub_text = ""
+            return
+        m = self.marks.setdefault("hub", {})
+        for k in ("files", "plays", "info", "files_out", "plays_out", "info_out"):
+            m.setdefault(k, 0)
+        got = gave = plays_in = plays_out = info_in = info_out = 0
+        stats = json.loads(self._hub(base, "/radio-beat/v1/hello", timeout=10))
+        # pictures from the hub (checked against the original before first use: anyone can send it pictures)
+        while self.on:
+            page = json.loads(self._hub(base, f"/radio-beat/v1/list?since={m['files']}"))
+            mine = self._names()
+            for name in sorted(page.get("files", []), key=lambda n: n.endswith(".txt")):
+                if name in mine or name in self.gone or (name.endswith(".jpg") and not self._room(0)):
+                    continue
+                if name.endswith(".txt") and name[:-4] + ".jpg" not in self._names():
+                    continue
+                try:
+                    if self._store(name, self._hub(base, f"/radio-beat/v1/file/{name}", timeout=60)) \
+                            and name.endswith(".jpg"):
+                        got += 1
+                        self.unverified.add(name)
+                except OSError:
+                    continue
+            m["files"] = page.get("next", m["files"])
+            self._save_marks()
+            if not page.get("more"):
+                break
+        self._save_unverified()
+        # pictures made here, the hub doesn't have yet (newest last; from the hub or unchecked: not sent back)
+        def mtime(n):
+            try:
+                return os.path.getmtime(os.path.join(UPSCALED_DIR, n))
+            except OSError:
+                return 0.0
+        todo = sorted(((mtime(n), n) for n in self._names() if n not in self.unverified),
+                      key=lambda x: (x[0], x[1].endswith(".txt")))
+        for t, name in todo:
+            if not self.on or t <= m["files_out"]:
+                continue
+            try:
+                with open(os.path.join(UPSCALED_DIR, name), "rb") as f:
+                    self._hub(base, f"/radio-beat/v1/file/{name}", f.read(), timeout=120)
+                gave += name.endswith(".jpg")
+            except urllib.error.HTTPError as e:
+                if e.code == 507:  # the hub is full
+                    break
+            except OSError:
+                break  # gone for now: from here next round
+            m["files_out"] = t
+        self._save_marks()
+        if self.history:
+            # plays: ours up (by when they were played), the hub's down (by its numbering)
+            while self.on and (rows := self.history.export(m["plays_out"])):
+                self._hub(base, "/radio-beat/v1/plays", json.dumps(rows).encode(), timeout=60)
+                plays_out += len(rows)
+                m["plays_out"] = rows[-1][0]
+            while self.on:
+                page = json.loads(self._hub(base, f"/radio-beat/v1/plays?since={m['plays']}", timeout=60))
+                plays_in += self.history.merge(page.get("plays") or [])
+                m["plays"] = page.get("next", m["plays"])
+                if not page.get("more"):
+                    break
+            # track info the same way
+            while self.on and (rows := self.history.info_export(m["info_out"])):
+                self._hub(base, "/radio-beat/v1/songinfo", json.dumps(rows).encode(), timeout=60)
+                info_out += len(rows)
+                m["info_out"] = rows[-1][5]
+            while self.on:
+                page = json.loads(self._hub(base, f"/radio-beat/v1/songinfo?since={m['info']}", timeout=60))
+                info_in += self.history.info_merge(page.get("songs") or [])
+                m["info"] = page.get("next", m["info"])
+                if not page.get("more"):
+                    break
+            self._save_marks()
+        self.got += got
+        self.info_in += info_in
+        where = "na tomto počítači" if base == HUB_LOCAL else base.split("//", 1)[-1]
+        self.hub_text = (f"Internet ({where}) v {time.strftime('%H:%M')}: obrázky {got} staženo, {gave} odesláno; "
+                         f"hrané skladby {plays_in} nových, {plays_out} odesláno; údaje o skladbách {info_in} nových, "
+                         f"{info_out} odesláno · na serveru {obrazku(stats.get('pictures', 0))} "
+                         f"({_size(stats.get('bytes', 0))}), {stats.get('plays', 0)} hraných skladeb, "
+                         f"{stats.get('songs', 0)} skladeb s údaji")
+        GLib.idle_add(lambda: (self.on_status(), False)[1])
+        if got:
+            self.enh._trim()
+
+    def _save_marks(self) -> None:
+        try:
+            with open(self.marks_path + ".part", "w") as f:
+                json.dump(self.marks, f)
+            os.replace(self.marks_path + ".part", self.marks_path)
+        except OSError:
+            pass
+
+    def verify(self, name: str, source: bytes, path: str) -> bool:
+        """A picture from the hub, before its first use: does it look like the original (a small, rough
+        comparison)? If not, it's deleted and not taken again; the picture is enhanced here instead."""
+        if name not in self.unverified:
+            return True
+        ok = False
+        try:
+            from gi.repository import GdkPixbuf
+
+            def tiny(data: bytes):
+                loader = GdkPixbuf.PixbufLoader()
+                loader.write(data)
+                loader.close()
+                pb = loader.get_pixbuf().scale_simple(16, 16, GdkPixbuf.InterpType.BILINEAR)
+                px, n, st = pb.get_pixels(), pb.get_n_channels(), pb.get_rowstride()
+                return [px[y * st + x * n + c] for y in range(16) for x in range(16) for c in range(3)]
+            with open(path, "rb") as f:
+                a, b = tiny(source), tiny(f.read())
+            ok = sum(abs(x - y) for x, y in zip(a, b)) / len(a) < HUB_LIKE
+        except Exception:
+            ok = False
+        self.unverified.discard(name)
+        self._save_unverified()
+        if not ok:
+            for p in (path, path[:-4] + ".txt"):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            self._let_go(name)
+            print(f"Rádio Beat: obrázek ze serveru {name} neodpovídá originálu: zahozen", file=sys.stderr)
+        return ok
 
 
 # --- window ---------------------------------------------------------------------
@@ -9425,6 +9604,7 @@ class App(Adw.Application):
         self.refined = None  # (before, after) of the last enhancing step: redrawn in, not morphed
         self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
         self.share = CacheShare(self.enhancer, self._share_changed, self.db)
+        self.share.hub_url = self.settings.get("hub_url", "")
         self.db.on_play = lambda: GLib.idle_add(lambda: (self.win and self.win.played_new(), False)[1])
         self.share.set_on(self.settings.get("share", True))
         if self.settings.get("npu", False):
@@ -9643,6 +9823,9 @@ class App(Adw.Application):
             return False
         # Start the new version once this one is gone (same app id), then quit; with the window only if it was up.
         shown = self.win is not None and self.win.get_visible()
+        # the shared server too, on the computer running it (nothing happens elsewhere)
+        subprocess.Popen(["systemctl", "--user", "try-restart", "radio-beat-hub.service"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.Popen(["sh", "-c", f"sleep 2; exec {launcher()}{'' if shown else ' --hidden'}"],
                          start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -10678,9 +10861,9 @@ class App(Adw.Application):
             self.win.share_row.set_subtitle(GLib.markup_escape_text(self.share_status()))
 
     def share_status(self) -> str:
-        return ("Každý počítač s Rádiem Beat v této síti má stejné vylepšené obrázky (každý svou kopii, nic "
-                f"dvakrát): co udělá jeden, mají i ostatní. {self.share.text} "
-                f"{self.share.port_note}").strip()
+        return ("Každý počítač s Rádiem Beat v této síti i přes internet (společný server) má stejné vylepšené obrázky, "
+                "hrané skladby a údaje o skladbách (každý svou kopii): co udělá jeden, mají i ostatní. "
+                f"{self.share.text} {self.share.hub_text} {self.share.port_note}").strip()
 
     def enhance_px(self) -> tuple[int, int] | None:
         """The screen size pictures are enhanced for: at least 4K, so every computer makes (and shares) the same

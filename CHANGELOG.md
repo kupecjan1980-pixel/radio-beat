@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.24 — Sdílení přes internet (společný server)
+
+- **0.24.0** (2026-11-01) Společný server (radio_beat_hub.py, hub-setup.sh): vylepšené obrázky, hrané skladby a údaje o skladbách sdílené přes internet mezi všemi Rádii Beat; obrázky ze serveru se před prvním použitím porovnají s originálem
+
 ## 0.23 — Sklo počítané grafickou kartou (shader)
 
 - **0.23.15** (2026-11-01) Poslední vylepšený obrázek: k výsledné velikosti i celková doba vylepšení (výsledný 480 KB / 1:20), u obrázků z mezipaměti „(z mezipaměti)“
