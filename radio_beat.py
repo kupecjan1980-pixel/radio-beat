@@ -4898,6 +4898,29 @@ class GlassCard(Gtk.Box):
                 st.translate(Graphene.Point().init(-x0, -y0))
                 rect = Graphene.Rect().init(x0, y0, sw, b)
                 st.push_clip(rect)
+
+                def span_mask():  # only where the lettering is, its ends soft
+                    st.push_mask(Gsk.MaskMode.ALPHA)
+                    for xa, xb in spans:
+                        soft = (TEXT_CELL / TEXT_Q) * 0.8
+                        st.append_linear_gradient(Graphene.Rect().init(xa, y0, xb - xa, b),
+                                                  Graphene.Point().init(xa, 0), Graphene.Point().init(xb, 0),
+                                                  [_stop(0.0, 255, 255, 255, 0.0),
+                                                   _stop(min(0.45, soft / (xb - xa)), 255, 255, 255, 1.0),
+                                                   _stop(max(0.55, 1 - soft / (xb - xa)), 255, 255, 255, 1.0),
+                                                   _stop(1.0, 255, 255, 255, 0.0)])
+                    st.pop()
+
+                # under it, what's inside the glass mirrored at its edge (continuous with it there): the lettering
+                # beyond the edge is seen only mirrored, never also as it is (an unmirrored ghost through the fade)
+                edge = 0.0 if y0 < 0 else h
+                span_mask()
+                st.save()
+                st.translate(Graphene.Point().init(0, 2 * edge))  # y -> 2*edge - y
+                st.scale(1, -1)
+                self._behind_pictures(st, w, h)
+                st.restore()
+                st.pop()
                 # fading out towards the glass's edge side, where the rim turns from mirror to see-through: no
                 # hard line between the two
                 far_y, near_y = (y0, y0 + b) if y0 < 0 else (y0 + b, y0)
@@ -4906,16 +4929,7 @@ class GlassCard(Gtk.Box):
                                           [_stop(0.0, 255, 255, 255, 1.0), _stop(0.45, 255, 255, 255, 1.0),
                                            _stop(1.0, 255, 255, 255, 0.0)])
                 st.pop()
-                st.push_mask(Gsk.MaskMode.ALPHA)  # only where the lettering is, its ends soft
-                for xa, xb in spans:
-                    soft = (TEXT_CELL / TEXT_Q) * 0.8
-                    st.append_linear_gradient(Graphene.Rect().init(xa, y0, xb - xa, b),
-                                              Graphene.Point().init(xa, 0), Graphene.Point().init(xb, 0),
-                                              [_stop(0.0, 255, 255, 255, 0.0),
-                                               _stop(min(0.45, soft / (xb - xa)), 255, 255, 255, 1.0),
-                                               _stop(max(0.55, 1 - soft / (xb - xa)), 255, 255, 255, 1.0),
-                                               _stop(1.0, 255, 255, 255, 0.0)])
-                st.pop()
+                span_mask()
                 st.save()
                 st.translate(Graphene.Point().init(0, 2 * y0 + b))  # y -> 2*y0 + b - y: flipped within it
                 st.scale(1, -1)
@@ -5552,6 +5566,17 @@ class MenuGlass(GlassCard):
         )
         for rect, (fx, fy, ox, oy), far, near, gain in sides:
             snap.push_clip(rect)
+            # under it, the glass's inside mirrored at this edge (continuous with it there): what lies beyond the
+            # edge is seen only mirrored, never also as it is (an unmirrored ghost through the fade)
+            snap.save()
+            if fx < 0:  # left or right: x -> 2*edge - x
+                snap.translate(Graphene.Point().init(0.0 if rect.get_x() < 0 else 2 * w, 0))
+                snap.scale(-1, 1)
+            else:  # above or below: y -> 2*edge - y
+                snap.translate(Graphene.Point().init(0, 0.0 if rect.get_y() < 0 else 2 * h))
+                snap.scale(1, -1)
+            self._window(snap, win)
+            snap.restore()
             if gain != 1.0:
                 snap.push_color_matrix(Graphene.Matrix().init_scale(gain, gain, gain), Graphene.Vec4().init(0, 0, 0, 0))
             snap.push_mask(Gsk.MaskMode.ALPHA)
