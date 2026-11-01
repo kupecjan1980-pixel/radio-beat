@@ -6405,12 +6405,10 @@ class ClockView(Gtk.Widget):
         gap = max(4.0, w * self.GAP)
         lays = [self._fit(i, w, 10000) for i in self.order]
         gaps = (len(lays) - 1) * gap
-        tall = sum(ink.height for _, ink in lays)
-        if tall + gaps > h:  # too tall for the room: all smaller, as much
-            k = max(0.05, (h - gaps) / max(1, tall))
-            lays = [self._fit(i, w * k, 10000) for i in self.order]
         total = sum(ink.height for _, ink in lays) + gaps
-        self.sy = min(InfoStack.STRETCH, h / total) if 0 < total < h else 1.0  # taller to fill the room
+        # the whole room filled, as the song info: every line as wide as the room, all of them squeezed lower
+        # (too tall) or stretched taller (too short) together until they fill its height
+        self.sy = h / total if total > 0 else 1.0
         self.lays = (lays, gap)
         self.set_size_request(w, int(total * self.sy) + 1)
         self.queue_draw()
@@ -7611,7 +7609,7 @@ class Window(Adw.ApplicationWindow):
             under = max(under, pill.get_y() + pill.get_height())
         names_h = int(H - under - 2 * self.CLOCK_PAD)
         if self._names_text and names_h >= 12:
-            self.names.set_room(room_w, names_h, (self._names_text,), self.clock.lines_width())
+            self.names.set_room(room_w, names_h, (self._names_text,))
             self.names.set_margin_end(self.CLOCK_GAP)
             self.names.set_margin_bottom(self.CLOCK_PAD)
             self.names.set_visible(True)
