@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.23.14"
+APP_VERSION = "0.23.15"
 
 import collections
 import ctypes
@@ -2924,7 +2924,7 @@ class Enhancer:
             self._used(hit)
             with open(hit, "rb") as f:
                 pic = f.read()
-            self.sizes[kind] = [len(data), None, len(pic)]
+            self.sizes[kind] = [len(data), None, len(pic), None, None]  # (no time: from the cache)
             done(pic)
             try:
                 with open(hit[:-4] + ".txt") as f:
@@ -2989,7 +2989,8 @@ class Enhancer:
         self.model = ESR_MODEL_ART if kind in ("logo", "icon") else ESR_MODEL
         same = size == (w0, h0)  # big enough already: no upscaling
         orig = _size(len(data))
-        self.sizes[kind] = [len(data), None, None]  # source, fast enhanced (the first step shown), final
+        # source, fast enhanced (the first step shown), final; when it began, how long it took in all
+        self.sizes[kind] = [len(data), None, None, time.monotonic(), None]
         if same:
             scr = f"obrazovku {screen[0]}×{screen[1]} px" if screen else "obrazovku"
             head = f"{what}: původně {w0}×{h0} px ({orig}), zvětšovat netřeba (dost velký na {scr})"
@@ -3003,9 +3004,11 @@ class Enhancer:
             # each step: what, how long, where, and the size it left: "sharpened 0.4 s on CPU (3.9 MB)"
             if steps and not steps[-1].endswith(")"):
                 steps[-1] += f" ({_size(len(pic))})"
-            got = sizes.setdefault(kind, [len(data), None, None])
+            got = sizes.setdefault(kind, [len(data), None, None, None, None])
             if final:
                 got[2] = len(pic)
+                if got[3] is not None:
+                    got[4] = time.monotonic() - got[3]
             elif got[1] is None:
                 got[1] = len(pic)
             if kind != "icon" or final:
@@ -3023,7 +3026,7 @@ class Enhancer:
                 self._used(cached)
                 with open(cached, "rb") as f:
                     pic = f.read()
-                self.sizes[kind] = [len(data), None, len(pic)]
+                self.sizes[kind] = [len(data), None, len(pic), None, None]  # (no time: from the cache)
                 emit(pic, True)
                 try:
                     with open(cached[:-4] + ".txt") as f:
@@ -3357,14 +3360,19 @@ class Enhancer:
             pass
 
     def size_text(self, kind: str) -> str:
-        src, fast, final = (self.sizes.get(kind) or [None, None, None])[:3]
+        src, fast, final, began, took = ((self.sizes.get(kind) or []) + [None] * 5)[:5]
         if not src:
             return ""
         parts = [f"původní {_size(src)}"]
         if fast:  # no first pass (from the cache, or a picture big enough already): left out
             parts.append(f"rychle vylepšený {_size(fast)}")
         parts.append(f"výsledný {_size(final) if final is not None else '…'}")
-        return "Velikost: " + " / ".join(parts)
+        text = "Velikost: " + " / ".join(parts)
+        if took is not None:  # how long it took in all, from the picture's arrival to the final one (1:20)
+            text += f" / {int(took) // 60}:{int(took) % 60:02d}"
+        elif final is not None and began is None:
+            text += " (z mezipaměti)"
+        return text
 
     shared_counts: dict = {}  # the other computers' names -> (pictures there, pictures both have together)
 

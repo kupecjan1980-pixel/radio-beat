@@ -4,6 +4,7 @@
 
 ## 0.23 — Sklo počítané grafickou kartou (shader)
 
+- **0.23.15** (2026-11-01) Poslední vylepšený obrázek: k výsledné velikosti i celková doba vylepšení (výsledný 480 KB / 1:20), u obrázků z mezipaměti „(z mezipaměti)“
 - **0.23.14** (2026-11-01) Číslování verzí jako u Handheld Control, i zpětně pro všechny dřívější verze (tento seznam); rychlejší kroky vylepšování obrázků
 - **0.23.13** (2026-11-01, `631b0ee`) v1.0.0: version numbering as in HHC; faster enhancer steps (light PNG compression)
 - **0.23.12** (2026-11-01, `fb38d9e`) Edge mirrors: no unmirrored ghost beyond the edges
