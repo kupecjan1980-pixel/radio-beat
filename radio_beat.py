@@ -6469,6 +6469,10 @@ class ClockView(Gtk.Widget):
             y += ink.height + gap
 
 
+    def lines_width(self) -> float:
+        """How wide its lines are drawn (the widest)."""
+        return max((ink.width * self.sx for _, ink in self.lays[0]), default=0.0) if self.lays else 0.0
+
     def _letters(self, lay, ink, sx=1.0, sy=1.0):
         """Whether a point of a line's ink box lies on its letters: the layout rendered small once, its alpha
         read back (a little grown, so motifs at the edges count)."""
@@ -6529,19 +6533,21 @@ class NamesView(ClockView):
     DAY_LINE = None
     SEED = 7
 
-    def set_room(self, w: int, h: int, texts: tuple) -> None:
+    def set_room(self, w: int, h: int, texts: tuple, width: float = None) -> None:
         """The whole room filled, as the song info and the date: as tall as the room, then stretched as wide
-        (or, a long name, as wide, then stretched as tall)."""
-        if (w, h) == self.room and texts == self.texts and self.lays:
+        (or, a long name, as wide, then stretched as tall). `width`: as wide as that (the date's lines above),
+        in the middle of the room."""
+        width = min(w, width or w)
+        if (w, h, width) == self.room + (getattr(self, "_width", None),) and texts == self.texts and self.lays:
             return
-        self.room, self.texts = (w, h), texts
+        self.room, self.texts, self._width = (w, h), texts, width
         self.order = [0] if texts and texts[0] else []
         if not self.order:
             self.lays = None
             return
         ink = self._layout(0, 100)[1]
-        lay, ink = self._layout(0, 100 * min(w / max(1, ink.width), h / max(1, ink.height)))
-        self.sx, self.sy = w / max(1, ink.width), h / max(1, ink.height)
+        lay, ink = self._layout(0, 100 * min(width / max(1, ink.width), h / max(1, ink.height)))
+        self.sx, self.sy = width / max(1, ink.width), h / max(1, ink.height)
         self.lays = ([(lay, ink)], 0.0)
         self.set_size_request(w, h)
         self.queue_draw()
@@ -7605,7 +7611,7 @@ class Window(Adw.ApplicationWindow):
             under = max(under, pill.get_y() + pill.get_height())
         names_h = int(H - under - 2 * self.CLOCK_PAD)
         if self._names_text and names_h >= 12:
-            self.names.set_room(room_w, names_h, (self._names_text,))
+            self.names.set_room(room_w, names_h, (self._names_text,), self.clock.lines_width())
             self.names.set_margin_end(self.CLOCK_GAP)
             self.names.set_margin_bottom(self.CLOCK_PAD)
             self.names.set_visible(True)
