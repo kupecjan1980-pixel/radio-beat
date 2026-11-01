@@ -7508,6 +7508,22 @@ class Window(Adw.ApplicationWindow):
         if not self._day_on:
             self.day_pop.popdown()
             return
+        self._day_show(view)
+
+    DAY_AUTO = (20, 15)  # by itself once an hour: at :20 (well away from the panel's tours at :00 and :30), 15 s
+
+    def _day_auto(self) -> None:
+        """The day's box shown by itself for a while; not while a panel or menu is open, a tour runs, the clock's
+        hidden or the mouse is already on it."""
+        if not hasattr(self, "quality_pop") or not hasattr(self, "_tour"):
+            return  # (still being built)
+        if (not self.get_visible() or not self.clock.get_visible() or self._tour is not None
+                or any(w.open for w in self.waters) or self._day_on or self.quality_pop.get_visible()):
+            return
+        self._day_show(self.clock)
+        GLib.timeout_add_seconds(self.DAY_AUTO[1], lambda: (self._day_on or self.day_pop.popdown(), False)[1])
+
+    def _day_show(self, view) -> None:
         self.day_text.set_markup(day_summary())
         ok, b = view.compute_bounds(self.clock)  # where it is, in the clock (the box's parent)
         if ok:
@@ -7531,6 +7547,10 @@ class Window(Adw.ApplicationWindow):
             self._place_clock()
         self.clock.colon = now.tm_sec % 2 == 0
         self.clock.queue_draw()
+        hour = (now.tm_yday, now.tm_hour)
+        if now.tm_min == self.DAY_AUTO[0] and getattr(self, "_day_auto_hour", None) != hour:
+            self._day_auto_hour = hour
+            self._day_auto()
         return GLib.SOURCE_CONTINUE
 
     def _place_clock(self) -> bool:
@@ -7848,6 +7868,7 @@ class Window(Adw.ApplicationWindow):
             if self._puddle_tick is None:
                 self._puddle_last = None
                 self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
+        self.day_pop.popdown()  # the day's box makes way
         water.body.fresh()  # never an earlier picture's lens or mirror while it opens: drawn anew
         self.refresh_effects()
         GLib.timeout_add_seconds(3, lambda: (self.refresh_effects(), False)[1])  # the strips' memory, once built
