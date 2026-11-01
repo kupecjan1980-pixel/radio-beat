@@ -3925,6 +3925,7 @@ scale.vol-slider slider { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px
 .show-card { padding: 0; }
 .show-pic { border-radius: 10px; }
 .on-air { background: #E3051A; color: white; border-radius: 999px; padding: 1px 8px; font-weight: 800; }
+.day-head { background: #E3051A; color: white; border-radius: 999px; padding: 1px 10px; font-weight: 800; }
 .show-title { font-weight: 700; }
 .show-sub { opacity: 0.8; }
 .show-next { opacity: 0.7; }
@@ -5851,38 +5852,42 @@ STATE_ABOUT = {
 }
 
 
-def day_summary() -> str:
-    """The hover box's text (Pango markup, Czech): the date, the name day, the state holiday and special days
-    with a word on each, the international days, and what's on the letters."""
+def day_summary() -> list:
+    """The hover box's text (Czech) as (kind, Pango markup) pieces, kind "head" (a headline: a red pill, like ON
+    AIR) or "text": the date, the name day, the state holiday and special days with a word on each, the
+    international days, and what's on the letters."""
     t = time.localtime()
     esc = GLib.markup_escape_text
     d = day_cz(t)
-    out = [f"<b><big>{DAYS[t.tm_wday].capitalize()} {t.tm_mday}. {MONTHS[t.tm_mon - 1]} {t.tm_year}</big></b>"]
+    out = [("head", f"{DAYS[t.tm_wday].capitalize()} {t.tm_mday}. {MONTHS[t.tm_mon - 1]} {t.tm_year}")]
     names = [n.strip() for n in d.get("names", "").split(",") if n.strip()]
     if names:
-        out.append(f"Jmeniny {'má' if len(names) == 1 else 'mají'}: <b>{esc(' a '.join(names))}</b>")
+        out.append(("text", f"Jmeniny {'má' if len(names) == 1 else 'mají'}: <b>{esc(' a '.join(names))}</b>"))
     if d.get("state"):
-        out.append(f"\n<b>Státní svátek: {esc(d['state'])}</b>")
+        out.append(("head", f"Státní svátek: {esc(d['state'])}"))
         if d["state"] in STATE_ABOUT:
-            out.append(esc(STATE_ABOUT[d["state"]]))
+            out.append(("text", esc(STATE_ABOUT[d["state"]])))
     for h in holidays_today():
         if d.get("state") and HOLIDAYS[h][5] == "cz":
             continue  # the state holiday said it already
-        out.append(f"\n<b>{esc(HOLIDAYS[h][0])}</b>")
-        if h in HOLIDAY_ABOUT:
-            out.append(esc(HOLIDAY_ABOUT[h]))
+        out.append(("head", esc(HOLIDAYS[h][0])))
+        about = [esc(HOLIDAY_ABOUT[h])] if h in HOLIDAY_ABOUT else []
         if EFFECTS.get("season"):
-            out.append(f"<i>Na písmenech: {esc(HOLIDAYS[h][1])}</i>")
+            about.append(f"<i>Na písmenech: {esc(HOLIDAYS[h][1])}</i>")
+        if about:
+            out.append(("text", "\n".join(about)))
     days = d.get("days") or []
     if days:
-        out.append("\n<b>Mezinárodní a významné dny</b>")
+        out.append(("head", "Mezinárodní a významné dny"))
+        rows = []
         for name, by, since in days:
             more = ", ".join(p for p in (f"vyhlásil(a) {by}" if by else "", f"od {since}" if since else "") if p)
-            out.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else ""))
+            rows.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else ""))
+        out.append(("text", "\n".join(rows)))
     if not holidays_today() and EFFECTS.get("season"):
         season = season_today()[0]
-        out.append(f"\n<i>Na písmenech: {esc(SEASON_CZ[season][2])} ({SEASON_CZ[season][0]})</i>")
-    return "\n".join(out)
+        out.append(("text", f"<i>Na písmenech: {esc(SEASON_CZ[season][2])} ({SEASON_CZ[season][0]})</i>"))
+    return out
 
 
 for _hid, _h in HOLIDAYS.items():  # each day's motifs and colors, like a season's
@@ -7350,7 +7355,7 @@ BEAT_CSS = """
 .song, .show-title { font-family: "Anton"; font-weight: 400; letter-spacing: 0.02em; }
 .artist { font-family: "Oswald"; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
 .album, .facts, .status, .show-sub, .show-next { font-family: "Oswald"; font-weight: 400; letter-spacing: 0.02em; }
-.on-air { font-family: "Oswald"; font-weight: 700; letter-spacing: 0.08em; }
+.on-air, .day-head { font-family: "Oswald"; font-weight: 700; letter-spacing: 0.08em; }
 .gear-menu label { font-family: "Oswald"; font-weight: 400; letter-spacing: 0.03em; }
 .gear-menu row .title { font-weight: 600; }
 """
@@ -7649,9 +7654,10 @@ class Window(Adw.ApplicationWindow):
         self.names.set_cursor(Gdk.Cursor.new_from_name("pointer"))
         overlay.add_overlay(self.names)
         # the mouse on the date, time or names: what day it is, in a glass box beside them
-        self.day_text = Gtk.Label(xalign=0, wrap=True, max_width_chars=46, use_markup=True, margin_top=10,
-                                  margin_bottom=10, margin_start=14, margin_end=14, valign=Gtk.Align.CENTER,
-                                  vexpand=True, hexpand=True)
+        # its text: headlines in red pills (like ON AIR), each followed by its text (labels made per showing)
+        self.day_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=10, margin_bottom=10,
+                                margin_start=14, margin_end=14, valign=Gtk.Align.CENTER, vexpand=True, hexpand=True)
+        self._day_labels = []
         dglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
         dglass.radius = 16.0
         # over the cover, filling it: a thick edge like the panels', mirroring what lies beyond each edge
@@ -7976,24 +7982,51 @@ class Window(Adw.ApplicationWindow):
         return left, top, right - left, bottom - top
 
     def _day_fit(self, w: int, h: int) -> None:
-        """The day's text as big as fits the box (wrapped to its width), between half and three times."""
-        lab = self.day_text
+        """The day's text as big as fits the box (wrapped to its width), between 0.3 and three times."""
+        box = self.day_text
         r = self.day_fit.get_margin_start()  # (the glass's corner radius on every side)
-        tw = w - lab.get_margin_start() - lab.get_margin_end() - 2 * r - 4
-        th = h - lab.get_margin_top() - lab.get_margin_bottom() - 2 * r
-        lo, hi = 0.5, 3.0
+        tw = w - box.get_margin_start() - box.get_margin_end() - 2 * r - 4
+        th = h - box.get_margin_top() - box.get_margin_bottom() - 2 * r
+        lo, hi = 0.3, 3.0
         for _ in range(12):  # (a binary search over the scale)
             f = (lo + hi) / 2
-            attrs = Pango.AttrList()
-            attrs.insert(Pango.attr_scale_new(f))
-            lab.set_attributes(attrs)
-            if lab.measure(Gtk.Orientation.VERTICAL, max(1, tw))[0] <= th:
+            self._day_scale(f)
+            if (box.measure(Gtk.Orientation.HORIZONTAL, -1)[0] <= tw  # (the headlines, on one line, fit across)
+                    and box.measure(Gtk.Orientation.VERTICAL, max(1, tw))[0] <= th):
                 lo = f
             else:
                 hi = f
-        attrs = Pango.AttrList()
-        attrs.insert(Pango.attr_scale_new(lo))
-        lab.set_attributes(attrs)
+        self._day_scale(lo)
+
+    def _day_scale(self, f) -> None:
+        """All the day's labels at `f` times their size (None: as they are); the gaps before headlines too."""
+        attrs = None
+        if f is not None:
+            attrs = Pango.AttrList()
+            attrs.insert(Pango.attr_scale_new(f))
+        for lab in self._day_labels:
+            lab.set_attributes(attrs)
+            if lab.has_css_class("day-head") and lab.get_prev_sibling() is not None:
+                lab.set_margin_top(round(10 * (f or 1.0)))
+
+    def _day_fill(self) -> None:
+        """The day's pieces as labels: headlines in red pills, the rest wrapped text."""
+        while (c := self.day_text.get_first_child()) is not None:
+            self.day_text.remove(c)
+        self._day_labels = []
+        for kind, markup in day_summary():
+            lab = Gtk.Label(label=markup, use_markup=True, wrap=True, xalign=0)
+            if kind == "head":
+                lab.add_css_class("day-head")
+                lab.set_halign(Gtk.Align.START)  # the pill as wide as its words
+                lab.set_wrap(False)  # on one line (wrapped, Pango broke it a pixel short of its own width)
+                if self._day_labels:
+                    lab.set_margin_top(10)
+            else:
+                lab.set_halign(Gtk.Align.FILL)
+                lab.set_margin_top(2)
+            self.day_text.append(lab)
+            self._day_labels.append(lab)
 
     def _day_margins(self, glass: int, tb: int, lr: int) -> None:
         """The day text's borders: `glass` px around its scroller, tb/lr px around the label itself."""
@@ -8006,7 +8039,7 @@ class Window(Adw.ApplicationWindow):
         self.day_text.set_margin_end(lr)
 
     def _day_show(self, view) -> None:
-        self.day_text.set_markup(day_summary())
+        self._day_fill()
         area = self._day_area()
         glass = self.day_pop.get_child()
         if area:  # over the cover, filling it
@@ -8019,7 +8052,6 @@ class Window(Adw.ApplicationWindow):
             self.day_fit.set_propagate_natural_width(False)
             self.day_fit.set_propagate_natural_height(False)
             self.day_fit.set_size_request(w - 2 * r, h - 2 * r)
-            self.day_text.set_max_width_chars(-1)
             self._day_fit(w, h)
             self.day_pop.set_position(Gtk.PositionType.BOTTOM)
             ok, at = self.compute_point(self.clock, Graphene.Point().init(x, y))
@@ -8034,8 +8066,10 @@ class Window(Adw.ApplicationWindow):
             self.day_fit.set_propagate_natural_width(True)
             self.day_fit.set_propagate_natural_height(True)
             glass.radius = 16.0
-            self.day_text.set_max_width_chars(46)
-            self.day_text.set_attributes(None)
+            for lab in self._day_labels:
+                if not lab.has_css_class("day-head"):
+                    lab.set_max_width_chars(46)
+            self._day_scale(None)
             self.day_pop.set_position(Gtk.PositionType.LEFT)
             ok, b = view.compute_bounds(self.clock)  # where it is, in the clock (the box's parent)
             if ok:
