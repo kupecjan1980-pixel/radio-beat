@@ -7170,7 +7170,8 @@ class Water:
             win.cover.watchers.append(g)
         self.neck.depth = False  # water between the two: no shadow box of its own
         body.edge_mirror = True  # its top and bottom edges mirror what lies beyond them, upside down
-        body.mirrors = win.head_glass  # the top buttons seen through its glass upside down, like KVALITA's
+        # the top buttons and the quality pill (AAC 128 kbps) seen through its glass upside down, like KVALITA's
+        body.mirrors = [*win.head_glass, win.quality_pill]
         # its own scrolling stays its own: not the window's volume
         block = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         block.connect("scroll", lambda *_: True)
@@ -7207,6 +7208,9 @@ class Water:
         height = int(max(220, min(H * 0.75, H - top - 20)))
         cover = win.cover_rect()
         ok_v, vb = win.vol.compute_bounds(win)
+        ok_p, pb = win.quality_pill.compute_bounds(win)
+        if ok_v and ok_p and pb.get_y() < vb.get_y():  # the pill stands taller than the slider: above it too
+            vb = pb  # (just past the glass's bottom edge, its rim mirrors it upside down)
         beside = bool(cover and W - cover[0] - 2 * gap >= 150)
         if beside and ok_v and vb.get_y() - gap - top >= 200:
             height = int(vb.get_y() - gap - top)
