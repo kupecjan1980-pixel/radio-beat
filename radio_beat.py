@@ -10603,6 +10603,9 @@ LOG = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.lo
                    "radio-beat.log")
 
 
+LOG_MAX = 200_000_000  # bytes: then it starts afresh, the previous one kept as .1
+
+
 class _Stamped:
     """stderr with the time at the start of each line (what the app itself writes)."""
 
@@ -10623,11 +10626,11 @@ class _Stamped:
 
 
 def start_log() -> None:
-    """Errors and warnings into LOG (kept to ~2 MB, the one before as .1): Python's and also GTK's, GLib's
+    """Errors and warnings into LOG (kept to LOG_MAX, the one before as .1): Python's and also GTK's, GLib's
     and mpv's (stderr itself points there unless started from a terminal, which keeps seeing them)."""
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
-        if os.path.exists(LOG) and os.path.getsize(LOG) > 2_000_000:
+        if os.path.exists(LOG) and os.path.getsize(LOG) > LOG_MAX:
             os.replace(LOG, LOG + ".1")
         f = open(LOG, "a", buffering=1, encoding="utf-8", errors="replace")
     except OSError:
@@ -10653,6 +10656,16 @@ def start_log() -> None:
             rev = v.read().strip()[:7]
     except OSError:
         rev = ""
+    def trim():  # running for weeks: checked every hour too
+        try:
+            if os.fstat(f.fileno()).st_size > LOG_MAX:
+                shutil.copyfile(LOG, LOG + ".1")
+                os.ftruncate(f.fileno(), 0)  # (opened for appending: writing goes on from the start)
+        except OSError:
+            pass
+        return True
+
+    GLib.timeout_add_seconds(3600, trim)
     print(f"--- Rádio Beat start (pid {os.getpid()}{', ' + rev if rev else ''}, {HERE})", file=sys.stderr)
 
 
