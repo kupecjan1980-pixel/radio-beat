@@ -4030,7 +4030,7 @@ def app_memory() -> str:
 
 
 # The look's switchable effects (gear menu), set from the settings by Window.apply_look.
-EFFECTS = {"mirror": True, "shadows": True, "anim": True, "season": True}
+EFFECTS = {"mirror": True, "shadows": True, "anim": True, "season": True, "gpu": True}
 NO_SHADOW_CSS = """
 scale.vol-slider trough, scale.vol-slider slider { box-shadow: none; }
 .glass-disc image, .glass-head image, .vol-icon, button.quality-tab image { -gtk-icon-shadow: none; }
@@ -4339,6 +4339,250 @@ class FlagLogo(Gtk.Widget):
             snap.restore()
 
 
+# The glass drawn by the graphics card in one pass: a small OpenGL shader works out, for every pixel, which point
+# behind the glass it shows (fish-eye, magnifier, the rim's bend), from one picture of what's behind uploaded
+# when that changes. GTK draws with thousands of ring layers otherwise. OpenGL through libepoxy (which GTK
+# itself uses: nothing to install); OpenGL ES 3 or desktop OpenGL 3.3, any GPU of the last ten years. Anything
+# failing: the ring layers, as before.
+def gpu_text() -> str:
+    if not EFFECTS["gpu"]:
+        return ("Vypnuto: lupa, rybí oko a zrcadlení na okrajích skel se skládají postaru z tisíců soustředných "
+                "vrstev (GTK): pomaleji, velké panely ⓘ a ⚙ se dokreslují postupně, dýchání tlačítek hrubší")
+    if GPU.ok is False:
+        return f"Nedostupné: {GPU.why} · skla se skládají z vrstev postaru"
+    st = GPU.stats
+    what = ("Zapnuto: lupu, rybí oko, ohyb okraje a zrcadlení u okrajů všech skel (panely ⓘ a ⚙, menu Kvalita, "
+            "karta pořadu, kulatá tlačítka, pilulky, záložky) počítá grafická karta jedním průchodem (OpenGL "
+            "shader) pro každý pixel, místo tisíců vrstev: hned hotové, hladké bez prstenců, plynulé i na 4K a "
+            "165 Hz; obraz za sklem se do karty nahraje jen když se změní")
+    if not GPU.ok:
+        return what + " · spustí se s prvním sklem"
+    per = st["ms"] / st["frames"] if st["frames"] else 0.0
+    mem = st["live_bytes"] + sum(GPU.sources.values())
+    return (f"{what} · {GPU.why} · teď: {st['frames']} výpočtů čočky ({per:.2f} ms), obraz za sklem nahrán "
+            f"{st['uploads']}× ({mem_text(st['upload_bytes'])} celkem) · paměť: GPU {mem_text(mem)}")
+
+
+class GPU:
+    ok = None  # None: not tried yet; False: not available (the layers instead)
+    why = ""  # what failed, for the effect's note
+    ctx = None
+    stats = {"frames": 0, "uploads": 0, "upload_bytes": 0, "ms": 0.0, "live": 0, "live_bytes": 0}
+    _gl = None
+    _prog = None
+    _loc = {}
+    _vao = 0
+    _fbo = 0
+    _free = []  # output textures GTK has let go of: (id, w, h), drawn into again
+    sources = {}  # uploaded pictures: id -> bytes
+    _SIGS = {
+        "glGenTextures": (None, "i", "p"), "glDeleteTextures": (None, "i", "p"), "glBindTexture": (None, "u", "u"),
+        "glTexImage2D": (None, "u", "i", "i", "i", "i", "i", "u", "u", "p"), "glTexParameteri": (None, "u", "u", "i"),
+        "glGenerateMipmap": (None, "u"), "glPixelStorei": (None, "u", "i"),
+        "glGenFramebuffers": (None, "i", "p"), "glBindFramebuffer": (None, "u", "u"),
+        "glFramebufferTexture2D": (None, "u", "u", "u", "u", "i"), "glCheckFramebufferStatus": ("u", "u"),
+        "glViewport": (None, "i", "i", "i", "i"), "glCreateShader": ("u", "u"),
+        "glShaderSource": (None, "u", "i", "p", "p"), "glCompileShader": (None, "u"),
+        "glGetShaderiv": (None, "u", "u", "p"), "glGetShaderInfoLog": (None, "u", "i", "p", "s"),
+        "glCreateProgram": ("u",), "glAttachShader": (None, "u", "u"), "glLinkProgram": (None, "u"),
+        "glGetProgramiv": (None, "u", "u", "p"), "glUseProgram": (None, "u"),
+        "glGetUniformLocation": ("i", "u", "s"), "glUniform1i": (None, "i", "i"), "glUniform1f": (None, "i", "f"),
+        "glUniform2f": (None, "i", "f", "f"), "glUniform4f": (None, "i", "f", "f", "f", "f"),
+        "glActiveTexture": (None, "u"), "glGenVertexArrays": (None, "i", "p"), "glBindVertexArray": (None, "u"),
+        "glDrawArrays": (None, "u", "i", "i"), "glFinish": (None,), "glGetError": ("u",),
+        "glDisable": (None, "u"), "glGetString": ("s", "u"),
+    }
+    VS = """
+out vec2 uv;
+void main() {
+    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    uv = p;
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}"""
+    # (rows: the uploaded picture's first row is its top, and so is the output's: uv.y 0 at the top for both)
+    FS = """
+in vec2 uv;
+out vec4 color;
+uniform sampler2D src;
+uniform vec2 size;     // the glass (logical px)
+uniform vec4 box;      // where the picture of what's behind lies, in the glass's coordinates
+uniform float radius, mag, rx, ry, depth, curve;
+float ring_r(float d) {  // a ring's corners, d in from the edge (as GlassCard._ring_r)
+    return max(0.0, min(max(radius - d, radius * 0.6 + d * 0.9), min(size.x - 2.0 * d, size.y - 2.0 * d) * 0.5));
+}
+float outside(vec2 p, float d) {  // > 0: p outside the ring d in from the edge
+    float r = ring_r(d);
+    vec2 q = abs(p - size * 0.5) - (size * 0.5 - d) + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+void main() {
+    vec2 p = uv * size;
+    float lo = 0.0, hi = min(size.x, size.y) * 0.5;  // how deep inside the glass p is: the deepest ring holding it
+    for (int i = 0; i < 18; i++) {
+        float m = (lo + hi) * 0.5;
+        if (outside(p, m) <= 0.0) lo = m; else hi = m;
+    }
+    float b = lo < depth ? pow(1.0 - lo / depth, curve) : 0.0;  // 1 at the edge, 0 from depth inwards
+    vec2 s = vec2(mag + (rx - mag) * b, mag + (ry - mag) * b);
+    vec2 c = size * 0.5;
+    color = texture(src, (c + (p - c) / s - box.xy) / box.zw);
+}"""
+
+    @classmethod
+    def start(cls) -> bool:
+        if cls.ok is not None:
+            return cls.ok
+        cls.ok = False
+        if os.environ.get("RADIO_BEAT_GPU") == "0":
+            cls.why = "vypnuto proměnnou RADIO_BEAT_GPU=0"
+            return False
+        try:
+            lib = ctypes.CDLL("libepoxy.so.0")
+            kinds = {"i": ctypes.c_int, "u": ctypes.c_uint, "f": ctypes.c_float, "p": ctypes.c_void_p,
+                     "s": ctypes.c_char_p, None: None}
+            gl = types_ns()
+            for name, sig in cls._SIGS.items():
+                ptr = ctypes.c_void_p.in_dll(lib, "epoxy_" + name).value
+                setattr(gl, name, ctypes.CFUNCTYPE(kinds[sig[0]], *(kinds[k] for k in sig[1:]))(ptr))
+            cls._gl = gl
+            ctx = Gdk.Display.get_default().create_gl_context()
+            ctx.realize()
+            ctx.make_current()
+            es = ctx.get_use_es()
+            major, minor = ctx.get_version()
+            if (major, minor) < ((3, 0) if es else (3, 3)):
+                raise RuntimeError(f"OpenGL {'ES ' if es else ''}{major}.{minor} je moc staré")
+            head = "#version 300 es\nprecision highp float;\n" if es else "#version 330 core\n"
+            prog = gl.glCreateProgram()
+            for kind, src in ((0x8B31, cls.VS), (0x8B30, cls.FS)):
+                sh = gl.glCreateShader(kind)
+                text = ctypes.c_char_p((head + src).encode())
+                gl.glShaderSource(sh, 1, ctypes.byref(text), None)
+                gl.glCompileShader(sh)
+                done = ctypes.c_int()
+                gl.glGetShaderiv(sh, 0x8B81, ctypes.byref(done))
+                if not done.value:
+                    log = ctypes.create_string_buffer(2048)
+                    gl.glGetShaderInfoLog(sh, 2048, None, log)
+                    raise RuntimeError(log.value.decode(errors="replace").strip())
+                gl.glAttachShader(prog, sh)
+            gl.glLinkProgram(prog)
+            done = ctypes.c_int()
+            gl.glGetProgramiv(prog, 0x8B82, ctypes.byref(done))
+            if not done.value:
+                raise RuntimeError("shader se nepodařilo slinkovat")
+            cls._prog = prog
+            cls._loc = {n: gl.glGetUniformLocation(prog, n.encode())
+                        for n in ("src", "size", "box", "radius", "mag", "rx", "ry", "depth", "curve")}
+            vao, fbo = ctypes.c_uint(), ctypes.c_uint()
+            gl.glGenVertexArrays(1, ctypes.byref(vao))
+            gl.glGenFramebuffers(1, ctypes.byref(fbo))
+            cls._vao, cls._fbo = vao.value, fbo.value
+            cls.ctx = ctx
+            cls.ok = True
+            name = (gl.glGetString(0x1F01) or b"").decode(errors="replace")  # GL_RENDERER: which GPU
+            name = re.sub(r"\s*\(.*$", "", name).strip()  # (without the driver's details)
+            cls.why = f"{name or 'GPU'}, OpenGL {'ES ' if es else ''}{major}.{minor}"
+        except Exception as e:  # no libepoxy, no GL, an old GPU: the layers as before
+            cls.why = f"nedostupné ({e})"
+            cls.ok = False
+        return cls.ok
+
+    @classmethod
+    def upload(cls, tex, old: int = 0) -> int:
+        """A GdkTexture (what's behind) into a GL texture with mipmaps (the rim squeezes it): its id."""
+        gl = cls._gl
+        cls.ctx.make_current()
+        d = Gdk.TextureDownloader.new(tex)
+        d.set_format(Gdk.MemoryFormat.R8G8B8A8_PREMULTIPLIED)
+        data, stride = d.download_bytes()
+        w, h = tex.get_width(), tex.get_height()
+        buf = data.get_data()
+        tid = ctypes.c_uint(old)
+        if not old:
+            gl.glGenTextures(1, ctypes.byref(tid))
+        gl.glBindTexture(0x0DE1, tid.value)
+        gl.glPixelStorei(0x0CF5, 4)  # UNPACK_ALIGNMENT
+        gl.glPixelStorei(0x0CF2, stride // 4)  # UNPACK_ROW_LENGTH
+        gl.glTexImage2D(0x0DE1, 0, 0x8058, w, h, 0, 0x1908, 0x1401, ctypes.c_char_p(buf))
+        gl.glPixelStorei(0x0CF2, 0)
+        gl.glGenerateMipmap(0x0DE1)
+        for pname, val in ((0x2801, 0x2703), (0x2800, 0x2601), (0x2802, 0x812F), (0x2803, 0x812F)):
+            gl.glTexParameteri(0x0DE1, pname, val)  # trilinear, clamped at the edges
+        cls.stats["uploads"] += 1
+        cls.stats["upload_bytes"] += w * h * 4
+        cls.sources[tid.value] = w * h * 4 * 4 // 3  # (with its mipmaps)
+        return tid.value
+
+    @classmethod
+    def forget(cls, tid: int) -> None:
+        if tid and cls.ok:
+            cls.ctx.make_current()
+            cls._gl.glDeleteTextures(1, ctypes.byref(ctypes.c_uint(tid)))
+            cls.sources.pop(tid, None)
+
+    @classmethod
+    def lens(cls, src: int, pw: int, ph: int, u: dict):
+        """The lens (uniforms `u`) drawn from texture `src` into a pw x ph texture, as a GdkTexture."""
+        gl = cls._gl
+        t = time.perf_counter()
+        cls.ctx.make_current()
+        out = next((f for f in cls._free if f[1:] == (pw, ph)), None)
+        if out:
+            cls._free.remove(out)
+        while len(cls._free) > 6:  # sizes no longer drawn (a resized window): their memory back
+            old, ow, oh = cls._free.pop(0)
+            gl.glDeleteTextures(1, ctypes.byref(ctypes.c_uint(old)))
+            cls.stats["live"] -= 1
+            cls.stats["live_bytes"] -= ow * oh * 4
+            tid = out[0]
+            gl.glBindTexture(0x0DE1, tid)
+        else:
+            c = ctypes.c_uint()
+            gl.glGenTextures(1, ctypes.byref(c))
+            tid = c.value
+            gl.glBindTexture(0x0DE1, tid)
+            gl.glTexImage2D(0x0DE1, 0, 0x8058, pw, ph, 0, 0x1908, 0x1401, None)
+            gl.glTexParameteri(0x0DE1, 0x2801, 0x2601)
+            gl.glTexParameteri(0x0DE1, 0x2800, 0x2601)
+            cls.stats["live"] += 1
+            cls.stats["live_bytes"] += pw * ph * 4
+        gl.glBindFramebuffer(0x8D40, cls._fbo)
+        gl.glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, tid, 0)
+        gl.glViewport(0, 0, pw, ph)
+        gl.glDisable(0x0BE2)  # (no blending: the output is the picture)
+        gl.glUseProgram(cls._prog)
+        gl.glActiveTexture(0x84C0)
+        gl.glBindTexture(0x0DE1, src)
+        L = cls._loc
+        gl.glUniform1i(L["src"], 0)
+        gl.glUniform2f(L["size"], u["w"], u["h"])
+        gl.glUniform4f(L["box"], *u["box"])
+        for n in ("radius", "mag", "rx", "ry", "depth", "curve"):
+            gl.glUniform1f(L[n], u[n])
+        gl.glBindVertexArray(cls._vao)
+        gl.glDrawArrays(0x0004, 0, 3)
+        gl.glBindFramebuffer(0x8D40, 0)
+        gl.glFinish()  # done before GTK reads it (it may in another context)
+        b = Gdk.GLTextureBuilder()
+        b.set_context(cls.ctx)
+        b.set_id(tid)
+        b.set_width(pw)
+        b.set_height(ph)
+        b.set_format(Gdk.MemoryFormat.R8G8B8A8_PREMULTIPLIED)
+        tex = b.build(lambda *_: cls._free.append((tid, pw, ph)), tid)  # (let go by GTK: drawn into again)
+        if tex is None:
+            raise RuntimeError("GTK nepřijal texturu")
+        cls.stats["frames"] += 1
+        cls.stats["ms"] += (time.perf_counter() - t) * 1000
+        return tex
+
+
+def types_ns():
+    import types
+    return types.SimpleNamespace()
+
+
 class GlassCard(Gtk.Box):
     """A liquid-glass panel: what's behind it (the backdrop and the cover) is
     not blurred but refracted, like through a lens: sharp and true in the
@@ -4397,6 +4641,8 @@ class GlassCard(Gtk.Box):
         self._edge_reach_x = 0.0
         self._mirror_tex = None  # the mirrored strips, rendered once per lens build (drawn by every ring)
         self._mirror_paints = {}
+        self._gpu = {}  # the GPU lens: its uploaded picture of what's behind, its last output and what made it
+        self._flat_mirror = False  # the mirrored strips drawn into the flat picture (the GPU lens bends it all)
 
     PULSE = 0.2  # how much more it magnifies at the top of a breath
     LIFT = 0.04  # and how much bigger the whole card gets then (outline, text and all), like the buttons' pump
@@ -4503,7 +4749,7 @@ class GlassCard(Gtk.Box):
             if darken:
                 snap.append_color(_rgba(0, 0, 0, darken), Graphene.Rect().init(0, 0, vw, vh))
             snap.restore()
-        if self.edge_mirror and sy < 1 and not getattr(self, "_mirroring", False):
+        if self.edge_mirror and (sy < 1 or self._flat_mirror) and not getattr(self, "_mirroring", False):
             self._mirror_edges(snap, w, h)  # (only rings squeezing it in see beyond the edges)
         for tile in self.mirrors:
             ok, p = self._where(tile)
@@ -4813,7 +5059,8 @@ class GlassCard(Gtk.Box):
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
         snap.push_rounded_clip(rr)
-        tex = self._lens_texture(w, h) if self.cache_lens else None
+        gpu = self._gpu_lens(w, h) if EFFECTS["gpu"] and GPU.start() else None
+        tex = gpu or (self._lens_texture(w, h) if self.cache_lens else None)
         if tex:
             snap.append_texture(tex, box)
         elif self.cache_lens:  # its first texture still being built: plainly magnified meanwhile
@@ -4900,6 +5147,47 @@ class GlassCard(Gtk.Box):
             return None  # the last lens shows an earlier picture (and its mirror): the current one plainly meanwhile
         return self._lens_cache[1]
 
+    def _gpu_lens(self, w: float, h: float):
+        """The lens worked out by the graphics card (GPU): what's behind as one picture (uploaded when it
+        changes), bent in one pass; drawn again only when the glass, its magnification or the picture change."""
+        try:
+            native = self.get_native()
+            if not native:
+                return None
+            surf = native.get_surface()
+            k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+            lens = min(h / 2, w / 2, self.lens_max) if not self.band else min(self.band, h / 2, w / 2)
+            most = lens * (self.reach if not self.band else 0.9)
+            rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)
+            self._edge_reach, self._edge_reach_x = most, w / 2 * (1 / rx - 1)
+            self._flat_mirror = self.edge_mirror
+            try:
+                flat = self._flat(w, h, rx, ry)
+            finally:
+                self._flat_mirror = False
+            if not flat:
+                return None
+            ftex, box = flat
+            g = self._gpu
+            if g.get("flat") is not ftex:
+                old = g.get("src", 0)
+                if old and g.get("size") != (ftex.get_width(), ftex.get_height()):
+                    GPU.forget(old)
+                    old = 0
+                g.update(src=GPU.upload(ftex, old), flat=ftex, size=(ftex.get_width(), ftex.get_height()), out=None)
+            key = (w, h, k, self.radius, round(self.mag, 4), rx, ry, self.curve, lens, box.get_x(), box.get_y())
+            if g.get("key") != key or g.get("out") is None:
+                u = {"w": w, "h": h, "box": (box.get_x(), box.get_y(), box.get_width(), box.get_height()),
+                     "radius": self.radius, "mag": self.mag, "rx": rx, "ry": ry, "depth": lens * 0.75,
+                     "curve": self.curve}
+                g["out"] = GPU.lens(g["src"], max(1, round(w * k)), max(1, round(h * k)), u)
+                g["key"] = key
+            return g["out"]
+        except Exception as e:  # the layers from now on
+            GPU.ok, GPU.why = False, f"selhalo ({e})"
+            print("Rádio Beat: GPU sklo vypnuto:", e, file=sys.stderr)
+            return None
+
     def _what_behind(self) -> tuple:
         """Which pictures (and which lettering map) a lens shows."""
         return tuple(id(v.pic) for v, _ in self.behind) + (TEXT_MAP["version"],)
@@ -4911,6 +5199,7 @@ class GlassCard(Gtk.Box):
         self._build = None
         self._mirror_tex = None
         self._lens_what = None
+        self._gpu.update(flat=None, out=None)
         self.queue_draw()
 
     def _build_step(self, *_) -> bool:
@@ -4995,7 +5284,8 @@ class GlassCard(Gtk.Box):
         """(texture, where) of what's behind the glass, as far out as its edge squeezes in (rx, ry), at the
         screen's scale times the middle's magnification: as sharp as the layers drawn one by one."""
         lk = self._lens_key(w, h)
-        key = (lk[:3] + lk[4:], rx, ry, bool(self.pulse_tick))  # not the magnification: it breathes
+        key = (lk[:3] + lk[4:], rx, ry, bool(self.pulse_tick), self._flat_mirror,
+               getattr(self, "_tex_version", None))  # not the magnification: it breathes
         if self._flat_cache[0] == key:
             return self._flat_cache[1]
         native = self.get_native()
@@ -5097,6 +5387,9 @@ class MenuGlass(GlassCard):
         self.tint = 0.42  # a little darker than the show card: the menu's small text stays readable
         self.sharp_bars = True
         self.depth = False  # the popup's own shadow does it
+        self._tex_version = 0  # the window's content changed this many times (a new picture of it then)
+        self._tex_key = None
+        self.connect("unmap", lambda *_: setattr(self, "_tex", None))  # (closed: its picture let go)
 
     def _where(self, widget):
         pop = self.get_native()
@@ -5123,7 +5416,7 @@ class MenuGlass(GlassCard):
         if self.paint is None:
             self.paint = Gtk.WidgetPaintable.new(content)
             # the window changed (a new cover, a new song): the menu shows it
-            self.paint.connect("invalidate-contents", lambda *_: self.get_mapped() and self.queue_draw())
+            self.paint.connect("invalidate-contents", self._window_changed)
         cw, ch = content.get_width(), content.get_height()
         if cw <= 0 or ch <= 0:
             return None
@@ -5179,11 +5472,18 @@ class MenuGlass(GlassCard):
         snap.append_texture(self._tex, Graphene.Rect().init(p.x, p.y, content.get_width(), content.get_height()))
         snap.restore()
 
+    def _window_changed(self, *_) -> None:
+        self._tex_version += 1
+        if self.get_mapped():
+            self.queue_draw()
+
     def do_snapshot(self, snap) -> None:
         self.shade = 1.0  # always readable, whatever Background shade is
-        self._tex = self._window_texture()
+        content = self.win.get_content()
+        key = (self._tex_version, content.get_width() if content else 0, content.get_height() if content else 0)
+        if self._tex is None or self._tex_key != key:  # the window as it is now (only when it changed)
+            self._tex, self._tex_key = self._window_texture(), key
         GlassCard.do_snapshot(self, snap)
-        self._tex = None
 
 
 # The clock's lines in the month's colors (autumn ones in October and November, frost in winter, blossom in
@@ -7391,7 +7691,8 @@ class Window(Adw.ApplicationWindow):
         group.add(style)
         self.fx_rows = {}
         for key, title in (("mirror", "Odrazy písma na okrajích skla"), ("shadows", "Stíny tlačítek (3D)"),
-                           ("anim", "Animace"), ("season", "Ozdoby podle ročního období na datu a čase")):
+                           ("anim", "Animace"), ("season", "Ozdoby podle ročního období na datu a čase"),
+                           ("gpu", "Sklo počítané grafickou kartou (shader)")):
             row = Adw.SwitchRow(title=title, subtitle_lines=0)
             row.set_active(self.app.settings.get("fx_" + key, True))
             row.connect("notify::active", lambda r, _, k=key: self.app.set_look(**{"fx_" + k: r.get_active()}))
@@ -8594,7 +8895,7 @@ class Window(Adw.ApplicationWindow):
                 row.set_active(EFFECTS[key])  # changed elsewhere (a click on the date and time)
         for key, text in (("mirror", self.mirror_text), ("anim", self.app.anim_text),
                           ("season", lambda: season_text(self.clock.decor_bytes() if getattr(self, "clock", None) else None)),
-                          ("shadows", self.shadow_text)):
+                          ("shadows", self.shadow_text), ("gpu", gpu_text)):
             row = getattr(self, "fx_rows", {}).get(key)
             if row:
                 t = text()
