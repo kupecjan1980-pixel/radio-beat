@@ -4483,6 +4483,7 @@ void main() {
             name = (gl.glGetString(0x1F01) or b"").decode(errors="replace")  # GL_RENDERER: which GPU
             name = re.sub(r"\s*\(.*$", "", name).strip()  # (without the driver's details)
             cls.why = f"{name or 'GPU'}, OpenGL {'ES ' if es else ''}{major}.{minor}"
+            cls.name = cls.why  # (kept for a retry after a failure)
         except Exception as e:  # no libepoxy, no GL, an old GPU: the layers as before
             cls.why = f"nedostupné ({e})"
             cls.ok = False
@@ -4535,6 +4536,7 @@ void main() {
             gl.glDeleteTextures(1, ctypes.byref(ctypes.c_uint(old)))
             cls.stats["live"] -= 1
             cls.stats["live_bytes"] -= ow * oh * 4
+        if out:  # one GTK let go of, the same size: drawn into again
             tid = out[0]
             gl.glBindTexture(0x0DE1, tid)
         else:
@@ -8868,6 +8870,8 @@ class Window(Adw.ApplicationWindow):
             css += BEAT_CSS
         for name in EFFECTS:
             EFFECTS[name] = a.settings.get("fx_" + name, True)
+        if not EFFECTS["gpu"] and GPU.ctx is not None and GPU.ok is False:
+            GPU.ok, GPU.why = True, getattr(GPU, "name", GPU.why)  # it started once and failed while drawing: switching it off and on tries again
         if not EFFECTS["shadows"]:
             css += NO_SHADOW_CSS
         if not EFFECTS["anim"]:
