@@ -10667,6 +10667,14 @@ def start_log() -> None:
 
     GLib.timeout_add_seconds(3600, trim)
     print(f"--- Rádio Beat start (pid {os.getpid()}{', ' + rev if rev else ''}, {HERE})", file=sys.stderr)
+    layers = [os.path.join(d, "vulkan", "implicit_layer.d")
+              for d in [GLib.get_user_data_dir(), *GLib.get_system_data_dirs(), "/etc"]]
+    if any(glob.glob(os.path.join(d, "*LSFG*")) for d in layers):
+        print("Pozn.: lsfg-vk (Lossless Scaling, generování snímků do her) je nainstalované jako vrstva Vulkanu. "
+              "Hlášku „Loader Message: … Failed to find 'vkGetInstanceProcAddr' in layer … liblsfg-vk-layer.so … "
+              "Skipping layer“ níže vypíše GTK: nová verze lsfg-vk se připojí jen k programům ze svého nastavení, "
+              "Rádio Beat mezi nimi není, tak ji Vulkan přeskočí. Neškodí, nic nechybí; necháno tak.",
+              file=sys.stderr)
 
 
 if __name__ == "__main__":
