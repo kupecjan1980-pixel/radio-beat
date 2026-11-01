@@ -17,6 +17,7 @@ import collections
 import ctypes
 import glob
 import html
+import itertools
 import json
 import math
 import os
@@ -5380,6 +5381,159 @@ def holidays_today() -> list:
     return out
 
 
+# The Czech calendar (days_cz.json, gathered from penize.cz): each day's name day, its state holiday and the
+# international and other notable days on it (who declared them, since when). Easter's holidays move: computed.
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "days_cz.json"), encoding="utf-8") as _f:
+        DAYS_CZ = json.load(_f)
+except (OSError, ValueError):
+    DAYS_CZ = {}
+
+
+def day_cz(t=None) -> dict:
+    """Today's entry of the Czech calendar: {"names", "state", "days": [[name, declared by, since]]}."""
+    t = t or time.localtime()
+    d = dict(DAYS_CZ.get(f"{t.tm_mon:02d}-{t.tm_mday:02d}", {}))
+    e = _easter(t.tm_year)
+    for shift, name in ((-2, "Velký pátek"), (1, "Velikonoční pondělí")):
+        if _shift(t.tm_year, e, shift) == (t.tm_mon, t.tm_mday):
+            d["state"] = name
+    return d
+
+
+def name_day() -> str:
+    """Whose name day it is, in capitals: "FELIX", "BRONISLAV / BRONISLAVA"; "" when nobody's."""
+    names = [n.strip() for n in day_cz().get("names", "").split(",") if n.strip()]
+    return " / ".join(names).upper()
+
+
+def special_day_name() -> str:
+    """The day's name for the clock: the state holiday, else the special days the letters are dressed for,
+    else the first international day; "" on an ordinary day."""
+    d = day_cz()
+    if d.get("state"):
+        return d["state"]
+    days = holidays_today()
+    themed = [HOLIDAYS[h][0] for h in days if h not in HOLIDAY_PERIODS] or [HOLIDAYS[h][0] for h in days]
+    if themed:
+        return " · ".join(themed)
+    return d["days"][0][0] if d.get("days") else ""
+
+
+def balanced_rows(text: str, most: int = 20) -> list:
+    """A long name in two or three rows as even as can be (at spaces; between names when it can), a short one
+    as it is."""
+    words = text.split()
+    if len(text) <= most or len(words) < 2:
+        return [text] if text else []
+    n = min(3, len(words), -(-len(text) // (most + 4)))
+
+    def join(a, b):  # a dot between names at a break goes
+        return " ".join(words[a:b]).strip(" ·")
+    best = None
+    for cuts in itertools.combinations(range(1, len(words)), n - 1):
+        edges = (0,) + cuts + (len(words),)
+        rows = [join(a, b) for a, b in zip(edges, edges[1:])]
+        dots = sum("·" not in (words[c - 1], words[c]) for c in cuts)  # breaks not between names
+        score = (max(map(len, rows)) + 6 * dots if "·" in text else max(map(len, rows)))
+        if all(rows) and (best is None or score < best[0]):
+            best = (score, rows)
+    return best[1] if best else [text]
+
+
+# What each special day is, in brief (the hover box over the date)
+HOLIDAY_ABOUT = {
+    "newyear": "První den roku: přání, předsevzetí a dozvuky silvestrovských ohňostrojů.",
+    "kings": "Svátek Tří králů (Kašpar, Melichar, Baltazar) končí Vánoce; koledníci píšou na dveře K+M+B.",
+    "radio": "Den vyhlášený UNESCO (2011) na počest rádia: od 13. února 1946 vysílá rozhlas OSN.",
+    "valentine": "Svátek zamilovaných podle sv. Valentina: přáníčka, srdíčka a květiny.",
+    "carnival": "Masopust (končí úterkem před Popeleční středou): průvody masek, zabijačky a veselí před půstem.",
+    "women": "Mezinárodní den žen (OSN od 1977), u nás s karafiáty a mimózami.",
+    "pi": "14. 3. jako 3,14: den matematiky, koláčů (pie) a narozenin Alberta Einsteina.",
+    "patrick": "Svátek patrona Irska: zelená, trojlístky a irská hudba po celém světě.",
+    "easter": "Velikonoce, svátky jara a zmrtvýchvstání Krista: kraslice, pomlázka a beránek.",
+    "earth": "Den Země (od 1970) připomíná ochranu přírody a planety.",
+    "witches": "Filipojakubská noc: pálí se čarodějnice a ohně mají zahnat zlé síly.",
+    "may": "Lásky čas: polibek pod rozkvetlou třešní (a Svátek práce).",
+    "starwars": "„May the 4th be with you“: den fanoušků Hvězdných válek.",
+    "victory": "Konec 2. světové války v Evropě (8. května 1945).",
+    "mothers": "Druhá květnová neděle patří maminkám: květiny a díky.",
+    "children": "Mezinárodní den dětí: hry, výlety a dárky pro děti.",
+    "fathers": "Třetí červnová neděle patří tátům.",
+    "cyril": "Příchod věrozvěstů Cyrila a Metoděje na Velkou Moravu (863): písmo a křesťanství.",
+    "hus": "Mistr Jan Hus byl upálen v Kostnici 6. července 1415 pro své učení.",
+    "july4": "Den nezávislosti USA (1776): přehlídky, grilování a ohňostroje.",
+    "rock": "Světový den rocku: na počest koncertu Live Aid 13. července 1985.",
+    "wenceslas": "Svatý Václav, patron české země, zavražděn ve Staré Boleslavi (935).",
+    "music": "Mezinárodní den hudby (UNESCO, od 1975).",
+    "republic": "Vznik samostatného Československa 28. října 1918.",
+    "halloween": "Předvečer Všech svatých: vydlabané dýně, kostýmy a „koledu, nebo vám něco provedu“. "
+                 "U nás svítí od 31. října do Dušiček.",
+    "dusicky": "Všech svatých (1. 11.) a Památka zesnulých (2. 11.): svíčky, věnce a chryzantémy na hrobech blízkých.",
+    "dead": "Mexický Den mrtvých (1.–2. 11.): oltáře ofrendas, cukrové lebky, měsíčky cempasúchil a papel "
+            "picado vítají duše předků domů. Na seznamu UNESCO.",
+    "freedom": "17. listopad 1939 a 1989: studenti proti nacismu a sametová revoluce.",
+    "thanks": "Den díkůvzdání v USA (čtvrtý čtvrtek v listopadu): krocan, dýňový koláč a rodina.",
+    "nicholas": "Mikulášská nadílka: Mikuláš, anděl a čert chodí za dětmi.",
+    "advent": "Čtyři týdny před Vánoci: věnec se svíčkami, kalendáře a těšení.",
+    "christmas": "Vánoce: Štědrý den, stromeček, dárky a koledy.",
+    "silvester": "Poslední den roku: oslavy, přípitek o půlnoci a ohňostroje.",
+    "cny": "Čínský (lunární) nový rok, Svátek jara: draci, lampiony a červené obálky.",
+    "diwali": "Indický svátek světel: lampičky dijá, ohňostroje a sladkosti.",
+    "hanukkah": "Židovský svátek světel: osm dní se zapaluje svíce chanukije.",
+}
+STATE_ABOUT = {
+    "Nový rok a Den obnovy samostatného českého státu": "Od 1. ledna 1993 samostatná Česká republika.",
+    "Velký pátek": "Den ukřižování Krista; státní svátek od 2016.",
+    "Velikonoční pondělí": "Pomlázka, koledníci a kraslice.",
+    "Svátek práce": "Mezinárodní svátek pracujících (od 1890).",
+    "Den vítězství": "Konec 2. světové války v Evropě (8. května 1945).",
+    "Den slovanských věrozvěstů Cyrila a Metoděje": "Příchod Cyrila a Metoděje na Velkou Moravu (863).",
+    "Den upálení mistra Jana Husa": "Jan Hus upálen v Kostnici (1415).",
+    "Den české státnosti": "Svatý Václav, patron české země (zavražděn 935).",
+    "Den vzniku samostatného československého státu": "Vznik Československa 28. října 1918.",
+    "Den boje za svobodu a demokracii a Mezinárodní den studentstva":
+        "17. listopad 1939 (uzavření vysokých škol nacisty) a 1989 (začátek sametové revoluce).",
+    "Štědrý den": "Večeře s kaprem, stromeček a dárky od Ježíška.",
+    "1. svátek vánoční": "Boží hod vánoční, narození Krista.",
+    "2. svátek vánoční": "Svatý Štěpán: koledy a návštěvy.",
+}
+
+
+def day_summary() -> str:
+    """The hover box's text (Pango markup, Czech): the date, the name day, the state holiday and special days
+    with a word on each, the international days, and what's on the letters."""
+    t = time.localtime()
+    esc = GLib.markup_escape_text
+    d = day_cz(t)
+    out = [f"<b><big>{DAYS[t.tm_wday].capitalize()} {t.tm_mday}. {MONTHS[t.tm_mon - 1]} {t.tm_year}</big></b>"]
+    names = [n.strip() for n in d.get("names", "").split(",") if n.strip()]
+    if names:
+        out.append(f"Jmeniny {'má' if len(names) == 1 else 'mají'}: <b>{esc(' a '.join(names))}</b>")
+    if d.get("state"):
+        out.append(f"\n<b>Státní svátek: {esc(d['state'])}</b>")
+        if d["state"] in STATE_ABOUT:
+            out.append(esc(STATE_ABOUT[d["state"]]))
+    for h in holidays_today():
+        if d.get("state") and HOLIDAYS[h][5] == "cz":
+            continue  # the state holiday said it already
+        out.append(f"\n<b>{esc(HOLIDAYS[h][0])}</b>")
+        if h in HOLIDAY_ABOUT:
+            out.append(esc(HOLIDAY_ABOUT[h]))
+        if EFFECTS.get("season"):
+            out.append(f"<i>Na písmenech: {esc(HOLIDAYS[h][1])}</i>")
+    days = d.get("days") or []
+    if days:
+        out.append("\n<b>Mezinárodní a významné dny</b>")
+        for name, by, since in days:
+            more = ", ".join(p for p in (f"vyhlásil(a) {by}" if by else "", f"od {since}" if since else "") if p)
+            out.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else ""))
+    if not holidays_today() and EFFECTS.get("season"):
+        season = season_today()[0]
+        out.append(f"\n<i>Na písmenech: {esc(SEASON_CZ[season][2])} ({SEASON_CZ[season][0]})</i>")
+    return "\n".join(out)
+
+
 for _hid, _h in HOLIDAYS.items():  # each day's motifs and colors, like a season's
     SEASON_KINDS[_hid], SEASON_COLORS[_hid] = _h[3], _h[4]
 
@@ -6199,13 +6353,17 @@ class ClockView(Gtk.Widget):
     the fonts' line boxes), all made smaller together when they wouldn't fit its height; never touching.
     In the Beat Radio fonts, white with a shadow like the song info's."""
 
-    FONTS = (("Anton", Pango.Weight.NORMAL),) + (("Oswald", Pango.Weight.SEMIBOLD),) * 4
-    ORDER = (1, 2, 3, 4, 0)  # top to bottom: weekday, day, month, year, time
+    FONTS = (("Anton", Pango.Weight.NORMAL),) + (("Oswald", Pango.Weight.SEMIBOLD),) * 7
+    # top to bottom: weekday, day, month, the special day's name (one to three rows, when there is one), year, time
+    ORDER = (1, 2, 3, 5, 6, 7, 4, 0)
+    DAY_LINE = 2  # the day number: a one-digit day as big as a two-digit one
+    SEED = 0  # its lines' decorations and colors (another view: others)
     GAP = 0.05  # between the lines, of the width
 
     def __init__(self, **kw):
         super().__init__(**kw)
-        self.texts = ("", "", "", "", "")
+        self.texts = ("",) * len(self.FONTS)
+        self.order = []  # the lines drawn (with text), top to bottom: their indexes in texts
         self.room = (0, 0)
         self.lays = None
         self.colon = True  # the time's colon blinks: a second on, a second off
@@ -6224,7 +6382,7 @@ class ClockView(Gtk.Widget):
     def _fit(self, which: int, w: float, h: float):
         _, ink = self._layout(which, 100)  # measured at 100 pt, then scaled to fit
         width = ink.width
-        if which == 2:  # the day: a one-digit day (1, 2…) as big as a two-digit one, not stretched to a giant
+        if which == self.DAY_LINE:  # the day: a one-digit day (1, 2…) as big as a two-digit one, not a giant
             width = max(width, self._layout(which, 100, "28")[1].width)
         return self._layout(which, 100 * min(w / max(1, width), h / max(1, ink.height)) * 0.97)
 
@@ -6232,13 +6390,14 @@ class ClockView(Gtk.Widget):
         if (w, h) == self.room and texts == self.texts and self.lays:
             return
         self.room, self.texts = (w, h), texts
+        self.order = [i for i in self.ORDER if i < len(texts) and texts[i]]
         gap = max(4.0, w * self.GAP)
-        lays = [self._fit(i, w, 10000) for i in self.ORDER]
+        lays = [self._fit(i, w, 10000) for i in self.order]
         gaps = (len(lays) - 1) * gap
         tall = sum(ink.height for _, ink in lays)
         if tall + gaps > h:  # too tall for the room: all smaller, as much
             k = max(0.05, (h - gaps) / max(1, tall))
-            lays = [self._fit(i, w * k, 10000) for i in self.ORDER]
+            lays = [self._fit(i, w * k, 10000) for i in self.order]
         total = sum(ink.height for _, ink in lays) + gaps
         self.sy = min(InfoStack.STRETCH, h / total) if 0 < total < h else 1.0  # taller to fill the room
         self.lays = (lays, gap)
@@ -6252,7 +6411,7 @@ class ClockView(Gtk.Widget):
         w = self.room[0]
         tl = lays[-1][0]
         i = self.texts[0].find(":")
-        if i >= 0:  # off: drawn see-through (the time keeps its place)
+        if i >= 0 and self.order[-1] == 0:  # off: drawn see-through (the time keeps its place)
             attrs = tl.get_attributes().copy()
             alpha = Pango.attr_foreground_alpha_new(65535 if self.colon else 1)
             alpha.start_index, alpha.end_index = i, i + 1
@@ -6262,7 +6421,7 @@ class ClockView(Gtk.Widget):
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
         snap.push_shadow([shadow])
         y, sy = 0.0, getattr(self, "sy", 1.0)
-        for (lay, ink), color in zip(lays, day_colors(len(lays))):
+        for (lay, ink), color in zip(lays, self._colors()):
             snap.save()
             snap.translate(Graphene.Point().init(0, y * sy))
             snap.scale(1.0, sy)
@@ -6277,8 +6436,8 @@ class ClockView(Gtk.Widget):
         if not EFFECTS["season"]:
             return
         if self._decor[0] != key:
-            self._decor = (key, [self._as_texture(SeasonDecor.build(n, ink.width, ink.height, c), ink)
-                                 for n, ((_, ink), c) in enumerate(zip(lays, day_colors(len(lays))))])
+            self._decor = (key, [self._as_texture(SeasonDecor.build(n + self.SEED, ink.width, ink.height, c), ink)
+                                 for n, (_, ink), c in zip(self.order, lays, self._colors())])
         y = 0.0
         for (lay, ink), node in zip(lays, self._decor[1]):
             snap.save()
@@ -6296,6 +6455,11 @@ class ClockView(Gtk.Widget):
             y += ink.height + gap
 
 
+    def _colors(self) -> list:
+        """Each line's color from the month's palette, by which line it is (not where it lands)."""
+        cols = day_colors(len(self.ORDER) + 1)
+        return [cols[(i + self.SEED) % len(cols)] for i in self.order]
+
     def _as_texture(self, node, ink):
         """A line's decorations rendered once (a day) into a texture at the screen's scale: drawn from it every
         second (the colon), and its memory known."""
@@ -6312,6 +6476,16 @@ class ClockView(Gtk.Widget):
 
     def decor_bytes(self) -> int:
         return sum(tex_bytes(t) for t in self._decor[1])
+
+
+class NamesView(ClockView):
+    """Whose name day it is ("FELIX", "BRONISLAV / BRONISLAVA"), one line in the clock's letters, as wide as its
+    room: below the volume slider and the quality pill, above the screen's bottom edge."""
+
+    FONTS = (("Oswald", Pango.Weight.SEMIBOLD),)
+    ORDER = (0,)
+    DAY_LINE = None
+    SEED = 7
 
 
 class InfoStack(Gtk.Widget):
@@ -6982,6 +7156,31 @@ class Window(Adw.ApplicationWindow):
         self.clock.set_cursor(Gdk.Cursor.new_from_name("pointer"))
         self.clock.set_visible(False)
         overlay.add_overlay(self.clock)
+        # whose name day it is, below the volume slider and the quality pill (a click: the same as on the date)
+        self.names = NamesView(halign=Gtk.Align.END, valign=Gtk.Align.END, visible=False)
+        click = Gtk.GestureClick()
+        click.connect("pressed", lambda g, n, *_: (g.set_state(Gtk.EventSequenceState.CLAIMED),
+                                                   n == 1 and app.set_look(fx_season=not EFFECTS["season"])))
+        self.names.add_controller(click)
+        self.names.set_cursor(Gdk.Cursor.new_from_name("pointer"))
+        overlay.add_overlay(self.names)
+        # the mouse on the date, time or names: what day it is, in a glass box beside them
+        self.day_text = Gtk.Label(xalign=0, wrap=True, max_width_chars=46, use_markup=True, margin_top=10,
+                                  margin_bottom=10, margin_start=14, margin_end=14)
+        dglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
+        dglass.radius = 16.0
+        dglass.append(self.day_text)
+        self.day_pop = Gtk.Popover(child=dglass, has_arrow=False, position=Gtk.PositionType.LEFT, autohide=False,
+                                   can_focus=False)
+        self.day_pop.add_css_class("glass-menu")
+        self.day_pop.set_can_target(False)
+        self.day_pop.set_parent(self.clock)
+        self._day_on = None
+        for view in (self.clock, self.names):
+            m = Gtk.EventControllerMotion()
+            m.connect("enter", lambda *_, v=view: self._day_hover(v, True))
+            m.connect("leave", lambda *_, v=view: self._day_hover(v, False))
+            view.add_controller(m)
         GLib.timeout_add_seconds(1, self._tick_clock)
         self._tick_clock()
         self._make_puddle(overlay, scrim)
@@ -7244,14 +7443,32 @@ class Window(Adw.ApplicationWindow):
             GLib.idle_add(lambda: (self._place_puddle(), False)[1])  # it follows the window
         GLib.idle_add(self._place_clock)
 
+    def _day_hover(self, view, on: bool) -> None:
+        """The day's glass box: shown beside the view the mouse is on, gone when it leaves."""
+        self._day_on = view if on else (None if self._day_on is view else self._day_on)
+        if not self._day_on:
+            self.day_pop.popdown()
+            return
+        self.day_text.set_markup(day_summary())
+        ok, b = view.compute_bounds(self.clock)  # where it is, in the clock (the box's parent)
+        if ok:
+            r = Gdk.Rectangle()
+            r.x, r.y, r.width, r.height = round(b.get_x()) - 12, round(b.get_y()), 1, max(1, round(b.get_height()))
+            self.day_pop.set_pointing_to(r)
+        self.day_pop.get_child().fresh()  # never an earlier picture behind it
+        self.day_pop.popup()
+        GLib.idle_add(lambda: (self.day_pop.get_child().queue_draw(), False)[1])
+
     CLOCK_GAP = 22  # from the screen's right edge (as the song info from its left)
     CLOCK_PAD = 6  # off the volume slider's knob and the screen's bottom
 
     def _tick_clock(self) -> bool:
         now = time.localtime()
+        special = (balanced_rows(special_day_name().upper()) + ["", "", ""])[:3]
         self._clock_texts = (f"{now.tm_hour}:{now.tm_min:02d}", DAYS[now.tm_wday].upper(),
-                             str(now.tm_mday), MONTHS_1[now.tm_mon - 1].upper(), str(now.tm_year))
-        if self._clock_texts != self.clock.texts:
+                             str(now.tm_mday), MONTHS_1[now.tm_mon - 1].upper(), str(now.tm_year), *special)
+        self._names_text = name_day()
+        if self._clock_texts != self.clock.texts or (self._names_text,) != self.names.texts:
             self._place_clock()
         self.clock.colon = now.tm_sec % 2 == 0
         self.clock.queue_draw()
@@ -7262,6 +7479,7 @@ class Window(Adw.ApplicationWindow):
         ok, vol = self.vol.compute_bounds(self)
         if not cover or not ok or not getattr(self, "_clock_texts", None):
             self.clock.set_visible(False)
+            self.names.set_visible(False)
             return False
         # just below the slider's knob (the slider widget itself is taller than what's drawn of it)
         top = vol.get_y() + vol.get_height()
@@ -7296,11 +7514,24 @@ class Window(Adw.ApplicationWindow):
         room_h = int(knob_top - below - 3 * self.CLOCK_PAD)
         if room_w < 60 or room_h < 40:
             self.clock.set_visible(False)
+            self.names.set_visible(False)
             return False
         self.clock.set_room(room_w, room_h, self._clock_texts)
         self.clock.set_margin_end(self.CLOCK_GAP)
         self.clock.set_margin_bottom(int(H - knob_top + self.CLOCK_PAD))
         self.clock.set_visible(True)
+        # the names: below the slider's knob and the pill, above the screen's bottom edge
+        under = top
+        if ok3 and pill.get_height() > 0:
+            under = max(under, pill.get_y() + pill.get_height())
+        names_h = int(H - under - 2 * self.CLOCK_PAD)
+        if self._names_text and names_h >= 12:
+            self.names.set_room(room_w, names_h, (self._names_text,))
+            self.names.set_margin_end(self.CLOCK_GAP)
+            self.names.set_margin_bottom(self.CLOCK_PAD)
+            self.names.set_visible(True)
+        else:
+            self.names.set_visible(False)
         return False
 
     FIT_STEP = 0.95
@@ -8168,6 +8399,7 @@ class Window(Adw.ApplicationWindow):
             w.body.edge_mirror = EFFECTS["mirror"]
         if getattr(self, "clock", None):
             self.clock.queue_draw()
+            self.names.queue_draw()
         if getattr(self, "logo", None) and not EFFECTS["anim"]:
             self.logo.hover = False
         self.refresh_effects()
