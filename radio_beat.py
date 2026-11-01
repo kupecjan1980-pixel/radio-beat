@@ -4360,7 +4360,8 @@ def gpu_text() -> str:
     per = st["ms"] / st["frames"] if st["frames"] else 0.0
     mem = st["live_bytes"] + sum(GPU.sources.values())
     return (f"{what} · {GPU.why} · teď: {st['frames']} výpočtů čočky ({per:.2f} ms), obraz za sklem nahrán "
-            f"{st['uploads']}× ({mem_text(st['upload_bytes'])} celkem) · paměť: GPU {mem_text(mem)}")
+            f"{st['uploads']}× (za celou dobu přeneseno {mem_text(st['upload_bytes'])}: každé nahrání přepíše "
+            f"předchozí, nic se nehromadí) · drží teď v paměti GPU: {mem_text(mem)}")
 
 
 class GPU:
