@@ -5564,7 +5564,7 @@ def season_text(clock_bytes: int = None) -> str:
 class SeasonDecor:
     """Motifs for one line of letters (its ink box `w` x `h`), as a render node, cut to the letters by the caller."""
 
-    DENSITY = 6.5  # motifs per (half a line's height) squared of the letters' own area: they cover the letters
+    DENSITY = 4.0  # motifs per (half a line's height) squared of the letters' own area: they cover the letters
 
     @staticmethod
     def build(line: int, w: float, h: float, base: Gdk.RGBA = None, inside=None):
