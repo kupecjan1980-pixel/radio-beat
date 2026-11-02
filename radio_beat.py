@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.1"
+APP_VERSION = "0.25.2"
 
 import collections
 import ctypes
@@ -7118,7 +7118,14 @@ class SnowFall:
             s = Gtk.Snapshot()
             s.scale(k, k)
             s.translate(Graphene.Point().init(box / 2, box / 2))
+            # a faint glow round each: brown leaves stand out on a brown cover too
+            glow = Gsk.Shadow()
+            glow.color, glow.dx, glow.dy, glow.radius = _rgba(255, 248, 225, 0.9), 0, 0, max(3.0, size * 0.1)
+            near = Gsk.Shadow()  # (and a tighter one: the edge lit, not only a haze)
+            near.color, near.dx, near.dy, near.radius = _rgba(255, 250, 235, 0.7), 0, 0, max(1.5, size * 0.03)
+            s.push_shadow([glow, near])
             getattr(SeasonDecor, "_" + kind)(s, rng, size, color, sea)
+            s.pop()
             node = s.to_node()
             if node is None:
                 continue

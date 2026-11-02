@@ -4,6 +4,7 @@
 
 ## 0.25 — Padající ozdoby
 
+- **0.25.2** (2026-11-02) Padající ozdoby s jemnou září kolem: hnědé listí vynikne i na hnědém obalu, netopýři na tmavém
 - **0.25.1** (2026-11-02) Padající ozdoby větší (asi 1,5×) a asi dvakrát víc; ozdoby ročního období padají vždy (na podzim listí, v zimě vločky…), o svátcích a zvláštních dnech napůl s jejich vlastními
 - **0.25.0** (2026-11-02) Ozdoby podle ročního období (o svátcích jejich vlastní) pomalu padají jako sníh a náhodně se pootáčejí za datem a časem, tlačítky ⓘ ⚙ ✕, kvalitou, hlasitostí a jmény; písmena data a času jen v barvách měsíce, čitelnější; bez animací stojí, s otevřenou nabídkou se zastaví
 
