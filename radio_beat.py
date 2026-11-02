@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.6"
+APP_VERSION = "0.26.7"
 
 import collections
 import ctypes
@@ -6287,6 +6287,9 @@ HOLIDAYS = {
     "dead": ("Día de los Muertos", "calaveras, cempasúchil a papel picado", lambda y: [(11, 1), (11, 2)],
              ("calavera", "calavera", "marigold", "marigold", "papel", "skull"),
              ("#ff9100", "#ffd54f", "#e040fb", "#00e5ff", "#ff1744", "#76ff03"), None),
+    "japan": ("Den japonské kultury", "katany, samurajské masky, sakury a japonské vlajky", lambda y: [(11, 3)],
+              ("katana", "katana", "menpo", "sakura", "sakura", "sakura", "jpflag"),
+              ("#ffb7c5", "#ff8fab", "#ffffff", "#bc002d", "#f8bbd0"), None),
     "freedom": ("Den boje za svobodu a demokracii", "česká vlajka a svíčky", lambda y: [(11, 17)], ("candle",),
                 ("#ffffff", "#ffd54f"), "cz"),
     "thanks": ("Den díkůvzdání (USA)", "dýně a listí", lambda y: [_nth_weekday(y, 11, 3, 4)],
@@ -6311,7 +6314,7 @@ HOLIDAYS = {
                  ("candle", "candle", "david"), ("#1e88e5", "#ffffff", "#90caf9", "#ffd54f"), None),
 }
 HOLIDAY_PERIODS = {"advent"}  # whole stretches: mixed with the season, not instead of it
-UPRIGHT = {"palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
+UPRIGHT = {"menpo", "jpflag", "palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
            "skull", "gift", "crown", "broom", "guitar", "mimosa", "gravelight", "calavera", "papel", "mum"}
 
 
@@ -6414,6 +6417,8 @@ HOLIDAY_ABOUT = {
     "wenceslas": "Svatý Václav, patron české země, zavražděn ve Staré Boleslavi (935).",
     "music": "Mezinárodní den hudby (UNESCO, od 1975).",
     "republic": "Vznik samostatného Československa 28. října 1918.",
+    "japan": "Bunka no hi (3. listopadu), japonský státní svátek kultury: ocenění umělců a vědců, festivaly, "
+             "výstavy a tradiční umění, od kaligrafie po čajový obřad.",
     "halloween": "Předvečer Všech svatých: vydlabané dýně, kostýmy a „koledu, nebo vám něco provedu“. "
                  "U nás svítí od 31. října do Dušiček.",
     "dusicky": "Všech svatých (1. 11.) a Památka zesnulých (2. 11.): svíčky, věnce a chryzantémy na hrobech blízkých.",
@@ -6872,6 +6877,79 @@ class SeasonDecor:
         for k in range(-4, 5):
             SeasonDecor._line(s, [(k * size * 0.02, size * 0.12), (k * size * 0.05, size * 0.5)],
                               max(1.0, size * 0.03), _hex("#d7a86e"))
+
+    @staticmethod
+    def _katana(s, rng, size, color, _sea):
+        """A katana: the curved steel blade (a bright edge), the round guard (tsuba), the wrapped hilt."""
+        L = size * 1.25
+        top, guard, end = -L / 2, L * 0.2, L / 2
+        bw = max(1.6, size * 0.075)
+        side = [(bw * 0.15 + size * 0.10 * ((guard - y) / (guard - top)) ** 2, y)
+                for y in [top + (guard - top) * i / 10 for i in range(11)]]
+        blade = [(x - bw, y) for x, y in side] + [(x, y) for x, y in reversed(side)]
+        blade[0] = (side[0][0] - bw * 0.2, top - bw * 0.6)  # the tip
+        SeasonDecor._poly(s, blade, _hex("#cfd8dc"))
+        SeasonDecor._line(s, [(x - bw * 0.15, y) for x, y in side], max(0.8, size * 0.018), _hex("#ffffff"))
+        SeasonDecor._oval(s, 0, guard, size * 0.13, size * 0.04, _hex("#3e2723"))
+        SeasonDecor._oval(s, 0, guard, size * 0.08, size * 0.025, _hex("#c9a227"))
+        SeasonDecor._line(s, [(0, guard + size * 0.03), (0, end)], max(2.2, size * 0.1), _hex("#1a1a1a"))
+        n = 5
+        for i in range(n):  # the wrapping's diamonds
+            y = guard + size * 0.06 + (end - guard - size * 0.1) * (i + 0.5) / n
+            SeasonDecor._poly(s, [(0, y - size * 0.035), (size * 0.035, y), (0, y + size * 0.035),
+                                  (-size * 0.035, y)], _hex("#f5f5f5"))
+        SeasonDecor._dot(s, 0, end, size * 0.05, _hex("#c9a227"))
+
+    @staticmethod
+    def _menpo(s, rng, size, color, _sea):
+        """A samurai's lacquered face mask: red, fierce brows, dark eyes, a black moustache and white teeth."""
+        red = _hex(rng.choice(("#c62828", "#b71c1c", "#212121")), 0.97)
+        SeasonDecor._oval(s, 0, 0, size * 0.32, size * 0.4, red)
+        SeasonDecor._oval(s, 0, size * 0.33, size * 0.16, size * 0.1, red)  # the chin
+        gold = _hex("#c9a227")
+        for sx in (-1, 1):
+            SeasonDecor._poly(s, [(sx * size * 0.05, -size * 0.18), (sx * size * 0.28, -size * 0.27),
+                                  (sx * size * 0.26, -size * 0.2), (sx * size * 0.06, -size * 0.12)], gold)
+            SeasonDecor._poly(s, [(sx * size * 0.06, -size * 0.08), (sx * size * 0.24, -size * 0.14),
+                                  (sx * size * 0.2, -size * 0.04)], _hex("#0d0d0d"))  # the eye
+            SeasonDecor._line(s, [(sx * size * 0.02, size * 0.1), (sx * size * 0.14, size * 0.08),
+                                  (sx * size * 0.26, size * 0.18)], max(1.2, size * 0.045), _hex("#0d0d0d"))
+        SeasonDecor._poly(s, [(-size * 0.12, size * 0.16), (size * 0.12, size * 0.16), (size * 0.1, size * 0.24),
+                              (-size * 0.1, size * 0.24)], _hex("#f5f5f5"))
+        for x in (-size * 0.06, 0, size * 0.06):
+            SeasonDecor._line(s, [(x, size * 0.16), (x, size * 0.24)], max(0.6, size * 0.012), _hex("#424242"))
+
+    @staticmethod
+    def _sakura(s, rng, size, color, _sea):
+        """A cherry blossom: five pink petals, each notched at its tip, a darker heart and stamens."""
+        pink = _hex(rng.choice(("#ffb7c5", "#ffc1d0", "#ff9eb5", "#fbd3dc")), 0.96)
+        p = size * 0.45
+        for i in range(5):
+            s.save()
+            s.rotate(72 * i)
+            pb = Gsk.PathBuilder.new()
+            pb.move_to(0, 0)
+            pb.quad_to(-p * 0.62, -p * 0.45, -p * 0.26, -p)
+            pb.line_to(0, -p * 0.84)
+            pb.line_to(p * 0.26, -p)
+            pb.quad_to(p * 0.62, -p * 0.45, 0, 0)
+            pb.close()
+            s.append_fill(pb.to_path(), Gsk.FillRule.WINDING, pink)
+            SeasonDecor._line(s, [(0, -p * 0.12), (0, -p * 0.5)], max(0.6, size * 0.015), _hex("#e57399", 0.8))
+            s.restore()
+        SeasonDecor._dot(s, 0, 0, size * 0.08, _hex("#e0527a"))
+        for i in range(5):
+            a = math.radians(72 * i + 36)
+            SeasonDecor._dot(s, math.sin(a) * size * 0.13, -math.cos(a) * size * 0.13, size * 0.025, _hex("#ffd54f"))
+
+    @staticmethod
+    def _jpflag(s, rng, size, color, _sea):
+        """Japan's flag: white, a red sun in the middle, on a thin pole."""
+        W, H = size * 0.9, size * 0.6
+        SeasonDecor._line(s, [(-W / 2, -H / 2 - size * 0.05), (-W / 2, H / 2 + size * 0.3)], max(1.0, size * 0.035),
+                          _hex("#8d6e63"))
+        SeasonDecor._poly(s, [(-W / 2, -H / 2), (W / 2, -H / 2), (W / 2, H / 2), (-W / 2, H / 2)], _hex("#fafafa"))
+        SeasonDecor._dot(s, 0, 0, H * 0.3, _hex("#bc002d"))
 
     @staticmethod
     def _saber(s, rng, size, color, _sea):
