@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.2"
+APP_VERSION = "0.26.3"
 
 import collections
 import ctypes
@@ -7330,11 +7330,10 @@ def _temp_color(t: float) -> str:
 
 
 def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
-    """What the weather view shows: the sky (an emoji, or the moon drawn as it is there now on a clear night,
-    with a cloud over it when partly cloudy), a line of Pango markup with the temperature, the day's lowest and
-    highest and the humidity, another with the sky in words, the place and the moon's phase (a small moon drawn
-    after it)."""
-    sky, words = WMO.get(w["code"], ("🌡️", ""))
+    """What the weather view shows, pictures and numbers only: the sky (an emoji, or the moon drawn as it is
+    there now on a clear night, a cloud over it when partly cloudy), the temperature, the day's lowest and highest
+    (arrows), the humidity (a drop of glass, then the %)."""
+    sky = WMO.get(w["code"], ("🌡️", ""))[0]
     moon = moon_sky(lat, lon)
     big = {"emoji": sky, "moon": None, "cloud": False}
     if not w["day"]:
@@ -7342,29 +7341,69 @@ def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
             big = {"emoji": None, "moon": moon, "cloud": w["code"] == 2}
         elif w["code"] in (51, 53, 55, 80, 81):
             big["emoji"] = "🌧️"
-    esc = GLib.markup_escape_text
     t, lo, hi = round(w["temp"]), round(w["min"]), round(w["max"])
-    one = (f"<span foreground='{_temp_color(w['temp'])}'>{t} °C</span>  "
-           f"<span foreground='{_temp_color(w['min'])}'>↓{lo}°</span> "
-           f"<span foreground='{_temp_color(w['max'])}'>↑{hi}°</span>  "
-           f"<span foreground='#7fd8ff'>💧{round(w['hum'])} %</span>")
-    two = " · ".join(p for p in (esc(words), esc(place), esc(moon["name"])) if p)
-    return {"sky": big, "lines": [one, two], "moon": moon}
+    temps = (f"<span foreground='{_temp_color(w['temp'])}'>{t} °C</span>  "
+             f"<span foreground='{_temp_color(w['min'])}'>↓{lo}°</span> "
+             f"<span foreground='{_temp_color(w['max'])}'>↑{hi}°</span>")
+    return {"sky": big, "temps": temps, "hum": f"<span foreground='#9fe2ff'>{round(w['hum'])} %</span>",
+            "moon": moon, "place": place}
+
+
+def draw_drop(cr, size: float) -> None:
+    """A drop of water made of glass, centered on (0, 0), `size` tall: clear, a light rim at the top left, a
+    darker edge below, a glint and a bright caustic inside at the bottom."""
+    import cairo
+    k = size / 2
+    cr.save()
+    cr.scale(k, k)
+
+    def body():
+        cr.move_to(0, -1)
+        cr.curve_to(0.15, -0.6, 0.68, -0.15, 0.68, 0.32)
+        cr.arc(0, 0.32, 0.68, 0, math.pi)
+        cr.curve_to(-0.68, -0.15, -0.15, -0.6, 0, -1)
+        cr.close_path()
+    body()
+    g = cairo.LinearGradient(0, -1, 0, 1)
+    g.add_color_stop_rgba(0, 0.85, 0.95, 1.0, 0.10)
+    g.add_color_stop_rgba(1, 0.55, 0.80, 1.0, 0.32)
+    cr.set_source(g)
+    cr.fill_preserve()
+    rim = cairo.LinearGradient(-0.7, -0.6, 0.7, 1.0)  # lit from the top left, darker towards the bottom right
+    rim.add_color_stop_rgba(0, 1, 1, 1, 0.95)
+    rim.add_color_stop_rgba(0.55, 0.75, 0.88, 1.0, 0.55)
+    rim.add_color_stop_rgba(1, 0.05, 0.15, 0.30, 0.75)
+    cr.set_source(rim)
+    cr.set_line_width(0.09)
+    cr.stroke()
+    cr.save()  # the glint
+    cr.translate(-0.28, 0.05)
+    cr.rotate(0.35)
+    cr.scale(0.11, 0.30)
+    cr.arc(0, 0, 1, 0, 2 * math.pi)
+    cr.restore()
+    cr.set_source_rgba(1, 1, 1, 0.85)
+    cr.fill()
+    cr.set_line_width(0.07)  # the caustic: light gathered at the bottom, inside
+    cr.set_source_rgba(0.85, 0.97, 1.0, 0.8)
+    cr.arc(0, 0.32, 0.48, math.radians(25), math.radians(120))
+    cr.stroke()
+    cr.restore()
 
 
 class WeatherView(Gtk.Widget):
-    """The weather beside the logo: the sky big on the left (the sun, clouds, rain… as colored emoji; on a clear
-    night the moon, drawn as it is in the sky there), then two lines, each as big as fits (the first bigger),
-    white with a shadow like the song info, the temperatures and the humidity in their colors; a small moon in
-    its phase after the second."""
+    """The weather beside the logo, in one row, pictures and numbers only: the sky (the sun, clouds, rain… as
+    colored emoji; on a clear night the moon, drawn as it is in the sky there), the temperature, the day's
+    lowest and highest, a drop of glass and the humidity; as big as fits, white with a shadow like the song
+    info, the numbers in their colors."""
 
     def __init__(self, **kw):
         super().__init__(can_target=False, **kw)
-        self.info, self.room, self.font, self.lays, self.sky_lay = None, (0, 0), None, None, None
+        self.info, self.room, self.font, self.parts = None, (0, 0), None, None
 
     @property
     def lines(self):
-        return self.info["lines"] if self.info else []
+        return [self.info["temps"]] if self.info else []
 
     def set_info(self, info: dict | None, font: str = None) -> None:
         if info != self.info or font != self.font:
@@ -7391,75 +7430,73 @@ class WeatherView(Gtk.Widget):
 
     def _fit(self) -> None:
         w, h = self.room
-        self.lays = self.sky_lay = None
+        self.parts = None
         if not self.info or w < 40 or h < 12:
             self.queue_resize()
             return
-        sky = self.info["sky"]
-        self.icon = h  # the sky: a square as tall as the view
-        if sky["emoji"]:
-            lay, ink = self._layout(sky["emoji"], 100, "Noto Color Emoji")
-            px = 100 * 0.95 * min(self.icon / max(1, ink.width), self.icon / max(1, ink.height))
-            self.sky_lay = self._layout(sky["emoji"], px, "Noto Color Emoji")
-        x0 = self.icon + h * 0.18
-        tw = w - x0
-        moon_small = h * 0.30  # the small moon after the second line
-        lays, y, first = [], 0.0, None
-        for i, (text, share) in enumerate(zip(self.info["lines"], (0.56, 0.34))):
-            room_w = tw - (moon_small * 1.3 if i == 1 else 0)
-            ink = self._layout(text, 100)[1]
-            px = 100 * 0.97 * min(room_w / max(1, ink.width), h * share / max(1, ink.height))
-            if first is not None:
-                px = min(px, first * 0.75)  # the second line never bigger than the first
-            first = px if first is None else first
-            lay, ink = self._layout(text, px)
-            lays.append((lay, ink, x0, y))
-            y += ink.height + h * 0.08
-        # the lines in the middle of the height
-        top = (h - (y - h * 0.08)) / 2
-        self.lays = [(lay, ink, x, yy + top) for lay, ink, x, yy in lays]
+        icon = h  # the sky: a square as tall as the view
+        # the numbers as tall as 60 % of it at most, all of it as wide as the room at most
+        a_ink, b_ink = self._layout(self.info["temps"], 100)[1], self._layout(self.info["hum"], 100)[1]
+        tall = max(a_ink.height, b_ink.height)
+        px = 100 * h * 0.6 / max(1, tall)
+        gap = h * 0.22
+        for _ in range(2):
+            scale = px / 100
+            drop = tall * scale * 1.15
+            need = icon + gap + (a_ink.width + b_ink.width) * scale + gap + drop + gap * 0.3
+            if need <= w:
+                break
+            px *= (w - icon - gap * 2.3) / max(1, need - icon - gap * 2.3) * 0.98
+        a, b = self._layout(self.info["temps"], px), self._layout(self.info["hum"], px)
+        drop = max(a[1].height, b[1].height) * 1.15
+        sky = None
+        if self.info["sky"]["emoji"]:
+            ink = self._layout(self.info["sky"]["emoji"], 100, "Noto Color Emoji")[1]
+            sky = self._layout(self.info["sky"]["emoji"],
+                               100 * 0.95 * icon / max(1, ink.width, ink.height), "Noto Color Emoji")
+        x_a = icon + gap
+        x_d = x_a + a[1].width + gap
+        x_b = x_d + drop * 0.75 + gap * 0.3
+        self.parts = {"icon": icon, "sky": sky, "a": (a, x_a), "b": (b, x_b), "drop": (drop, x_d)}
         self.queue_resize()
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
-        if not self.lays:
+        if not self.parts:
             return
         w, h = self.room
-        sky = self.info["sky"]
+        P, sky = self.parts, self.info["sky"]
+        icon = P["icon"]
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.9), -1, 2, 3
         snap.push_shadow([shadow])
-        if self.sky_lay:
-            lay, ink = self.sky_lay
+        if P["sky"]:
+            lay, ink = P["sky"]
             snap.save()
-            snap.translate(Graphene.Point().init((self.icon - ink.width) / 2 - ink.x, (h - ink.height) / 2 - ink.y))
+            snap.translate(Graphene.Point().init((icon - ink.width) / 2 - ink.x, (h - ink.height) / 2 - ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, 1))
             snap.restore()
-        for lay, ink, x, y in self.lays:
+        for key in ("a", "b"):
+            (lay, ink), x = P[key]
             snap.save()
-            snap.translate(Graphene.Point().init(x - ink.x, y - ink.y))
+            snap.translate(Graphene.Point().init(x - ink.x, (h - ink.height) / 2 - ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, 0.95))
             snap.restore()
         snap.pop()
-        moon = self.info["moon"]
-        if sky["moon"]:  # the big moon (a cloud over part of it when partly cloudy)
-            rad = self.icon * 0.42
-            cr = snap.append_cairo(Graphene.Rect().init(0, 0, self.icon, h))
-            cr.translate(self.icon / 2, h / 2)
-            draw_moon(cr, rad, moon)
+        if sky["moon"]:  # the moon as it is (a cloud over part of it when partly cloudy)
+            cr = snap.append_cairo(Graphene.Rect().init(0, 0, icon, h))
+            cr.translate(icon / 2, h / 2)
+            draw_moon(cr, icon * 0.42, self.info["moon"])
             if sky["cloud"]:
-                lay, ink = self._layout("☁️", self.icon * 0.55, "Noto Color Emoji")
+                lay, ink = self._layout("☁️", icon * 0.55, "Noto Color Emoji")
                 snap.save()
-                snap.translate(Graphene.Point().init(self.icon * 0.45 - ink.x, h * 0.5 - ink.y))
+                snap.translate(Graphene.Point().init(icon * 0.45 - ink.x, h * 0.5 - ink.y))
                 snap.append_layout(lay, _rgba(255, 255, 255, 1))
                 snap.restore()
-        if len(self.lays) > 1:  # the small moon after the phase's name
-            lay, ink, x, y = self.lays[1]
-            rad = h * 0.15
-            cx, cy = x + ink.width + rad * 1.6, y + ink.height / 2
-            cr = snap.append_cairo(Graphene.Rect().init(cx - rad - 1, cy - rad - 1, 2 * rad + 2, 2 * rad + 2))
-            cr.translate(cx, cy)
-            draw_moon(cr, rad, moon)
+        drop, x = P["drop"]
+        cr = snap.append_cairo(Graphene.Rect().init(x - 2, (h - drop) / 2 - 2, drop + 4, drop + 4))
+        cr.translate(x + drop * 0.36, h / 2)
+        draw_drop(cr, drop)
 
 
 class FitText(Gtk.Widget):

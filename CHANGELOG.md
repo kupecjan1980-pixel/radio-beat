@@ -4,6 +4,7 @@
 
 ## 0.26 — Počasí
 
+- **0.26.3** (2026-11-02) Počasí v jednom řádku jen obrázky a čísla: obloha (v noci Měsíc ve své fázi), teplota, nejnižší ↓ a nejvyšší ↑, skleněná kapka a vlhkost v %; bez popisu, místa a názvu fáze
 - **0.26.2** (2026-11-02) Počasí větší, obloha velká vlevo přes oba řádky; Měsíc kreslený jako skutečný (modrošedý, moře, krátery Tycho a Koperník s paprsky), osvětlený a natočený tak, jak ho teď vidíš z vybraného místa; fáze počítaná přesně (podle polohy Slunce a Měsíce: teď couvající srpek, ne poslední čtvrť); malý Měsíc i za názvem fáze
 - **0.26.1** (2026-11-02) Počasí se opravdu ukáže vedle loga (místo pro ně se počítalo od rámečku informací o skladbě, který začíná výš než jejich písmena: vyšlo nic); v nastavení je vybrané místo vidět celé (pod nadpisem)
 - **0.26.0** (2026-11-02) Počasí vedle loga vlevo nahoře (mezi logem a obalem, nad informacemi o skladbě, od horního okraje s mezerou): barevná obloha (slunce, slunce za mrakem, déšť…, v noci Měsíc v jeho fázi), teplota, nejnižší a nejvyšší za den, vlhkost, popis, místo a fáze Měsíce; místo v nastavení (Oprechtice, Ostrava-Přívoz, Ostrava-Poruba, Praha; výchozí Oprechtice); data z Open-Meteo, každých 20 minut
