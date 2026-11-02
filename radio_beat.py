@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.10"
+APP_VERSION = "0.25.11"
 
 import collections
 import ctypes
@@ -9707,8 +9707,11 @@ class Window(Adw.ApplicationWindow):
         self.refresh_effects()
         self.look_css.load_from_data(css.encode())
         waters = [g for w in getattr(self, "waters", []) for g in (w.body, w.neck)]
-        for card in (self.show_card, *self.discs, *self.head_glass, *waters):
+        for card in (self.show_card, *self.discs, *self.head_glass):
             card.shade = k
+            card.queue_draw()
+        for card in waters:  # the panels: always readable, like the menus, whatever Background shade is
+            card.shade = 1.0
             card.queue_draw()
         if getattr(self, "quality_pill", None):
             self.quality_pill.queue_draw()  # (its shadow on or off)
