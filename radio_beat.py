@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.24.1"
+APP_VERSION = "0.25.0"
 
 import collections
 import ctypes
@@ -5655,6 +5655,18 @@ class MenuGlass(GlassCard):
         self._tex_version = 0  # the window's content changed this many times (a new picture of it then)
         self._tex_key = None
         self.connect("unmap", lambda *_: setattr(self, "_tex", None))  # (closed: its picture let go)
+        # the falling motifs still while it's open (it pictures the window anew whenever that changes)
+        self.connect("map", lambda *_: self._still(True))
+        self.connect("unmap", lambda *_: self._still(False))
+
+    shown = 0  # menus open now
+
+    def _still(self, on: bool) -> None:
+        MenuGlass.shown = max(0, MenuGlass.shown + (1 if on else -1))
+        snow = getattr(getattr(self.win, "scrim", None), "snow", None)
+        if snow is not None and snow.frozen != (MenuGlass.shown > 0):
+            snow.frozen = MenuGlass.shown > 0
+            snow.update()
 
     def _where(self, widget):
         pop = self.get_native()
@@ -5844,9 +5856,9 @@ def day_colors(n: int) -> list:
     return [_rgba(*(int(c[i:i + 2], 16) for i in (1, 3, 5)), 1) for c in (pal * n)[:n]]
 
 
-# The clock's letters dressed for the season, cut to the letters' shapes: autumn leaves, winter snow caps,
-# snowflakes and frost, spring blossoms and grass, summer suns, palms and waves. Laid out anew each day (the
-# date seeds it); in a season's last month more and more of the next one's come in.
+# The season's motifs falling like snow beside the cover (SnowFall): autumn leaves, snowflakes and frost,
+# spring blossoms, summer suns, palms and shells. Picked anew each day (the date seeds it); in a season's last
+# month more and more of the next one's come in.
 SEASONS = {12: "winter", 1: "winter", 2: "winter", 3: "spring", 4: "spring", 5: "spring",
            6: "summer", 7: "summer", 8: "summer", 9: "autumn", 10: "autumn", 11: "autumn"}
 NEXT_SEASON = {"winter": "spring", "spring": "summer", "summer": "autumn", "autumn": "winter"}
@@ -5876,7 +5888,7 @@ def season_today() -> tuple:
 
 
 
-# --- special days: the clock's letters dressed for them instead of the season --------------------------------
+# --- special days: their own falling motifs instead of the season's --------------------------------------------
 def _easter(y: int) -> tuple:
     """Easter Sunday (Gregorian; anonymous algorithm): (month, day)."""
     a, b, c = y % 19, y // 100, y % 100
@@ -6153,7 +6165,7 @@ def day_summary() -> list:
         out.append(("head", esc(HOLIDAYS[h][0])))
         about = [esc(HOLIDAY_ABOUT[h])] if h in HOLIDAY_ABOUT else []
         if EFFECTS.get("season"):
-            about.append(f"<i>Na písmenech: {esc(HOLIDAYS[h][1])}</i>")
+            about.append(f"<i>Padají: {esc(HOLIDAYS[h][1])}</i>")
         if about:
             out.append(("text", "\n".join(about)))
     days = d.get("days") or []
@@ -6166,20 +6178,20 @@ def day_summary() -> list:
         out.append(("text", "\n".join(rows)))
     if not holidays_today() and EFFECTS.get("season"):
         season = season_today()[0]
-        out.append(("text", f"<i>Na písmenech: {esc(SEASON_CZ[season][2])} ({SEASON_CZ[season][0]})</i>"))
+        out.append(("text", f"<i>Padají: {esc(SEASON_CZ[season][2])} ({SEASON_CZ[season][0]})</i>"))
     return out
 
 
 for _hid, _h in HOLIDAYS.items():  # each day's motifs and colors, like a season's
     SEASON_KINDS[_hid], SEASON_COLORS[_hid] = _h[3], _h[4]
 
-SEASON_CZ = {"autumn": ("podzim", "podzimu", "listí"), "winter": ("zima", "zimy", "sněhové čepice, vločky a jinovatka"),
-             "spring": ("jaro", "jara", "květy, větvičky a tráva"), "summer": ("léto", "léta", "slunce, palmy, mušle a vlny")}
+SEASON_CZ = {"autumn": ("podzim", "podzimu", "listí"), "winter": ("zima", "zimy", "vločky a jinovatka"),
+             "spring": ("jaro", "jara", "květy, poupata a větvičky"), "summer": ("léto", "léta", "slunce, palmy a mušle")}
 
 
 def season_text(clock_bytes: int = None) -> str:
     if not EFFECTS["season"]:
-        return "Vypnuto: datum a čas jen v barvách měsíce"
+        return "Vypnuto: nic nepadá, datum a čas v barvách měsíce"
     season, nxt, share = season_today()
     name, _, motifs = SEASON_CZ[season]
     days = holidays_today()
@@ -6187,80 +6199,19 @@ def season_text(clock_bytes: int = None) -> str:
         name = " + ".join(HOLIDAYS[d][0] for d in days)
         motifs = ", ".join(HOLIDAYS[d][1] for d in days)
         share = 0.0
-    text = (f"Na písmenech dne, měsíce, roku a času, oříznuto do jejich tvaru; klik na datum je vypne a zapne; "
+    text = (f"Padají pomalu jako sníh a pootáčejí se za datem a časem, tlačítky, kvalitou, hlasitostí a jmény "
+            f"(písmena jen v barvách měsíce, čitelnější); bez animací stojí; klik na datum je vypne a zapne; "
             f"každý den trochu jinak; o svátcích a zvláštních dnech (české, americké i světové: Vánoce, Halloween, "
             f"4. červenec, Velikonoce, Den rocku…) jejich vlastní · dnes: {name} ({motifs})")
     if share > 0:
         text += f", přidává se {round(share * 100)} % {SEASON_CZ[nxt][1]}"
     if clock_bytes is not None:
-        text += f" · paměť: GPU {mem_text(clock_bytes)} (jednou za den vykreslené ozdoby)"
+        text += f" · paměť: GPU {mem_text(clock_bytes)} (obrázky vykreslené jednou za den)"
     return text
 
 
 class SeasonDecor:
-    """Motifs for one line of letters (its ink box `w` x `h`), as a render node, cut to the letters by the caller."""
-
-    DENSITY = 4.0  # motifs per (half a line's height) squared of the letters' own area: they cover the letters
-
-    @staticmethod
-    def build(line: int, w: float, h: float, base: Gdk.RGBA = None, inside=None):
-        """`inside(x, y)`: whether a point is on a letter; the motifs go there (none wasted on the gaps)."""
-        season, nxt, share = season_today()
-        t = time.localtime()
-        rng = random.Random((t.tm_year * 1000 + t.tm_yday) * 7 + line)
-        s = Gtk.Snapshot()
-        D = SeasonDecor
-        days = holidays_today()
-        special = [d for d in days if d not in HOLIDAY_PERIODS]
-        pool = special or None  # a special day: its motifs instead of the season's
-        if days and not special:  # only a period (Advent): half of it, half the season
-            nxt, share = days[0], 0.5
-        for d in special:
-            if HOLIDAYS[d][5]:
-                getattr(D, "_flag_" + HOLIDAYS[d][5])(s, w, h)
-        if pool:
-            pass
-        elif season == "winter":
-            D._snow_cap(s, rng, w, h)
-        elif season == "summer" and rng.random() < 0.6:
-            D._waves(s, rng, w, h)
-        elif season == "spring" and rng.random() < 0.6:
-            D._grass(s, rng, w, h)
-        # motifs no bigger on the big day number than on the other lines (more of them there instead)
-        ref = min(h, 100.0)
-        fill = 1.0
-        if inside is not None:  # how much of the line's box the letters cover
-            pts = [(w * (i + 0.5) / 24, h * (j + 0.5) / 24) for i in range(24) for j in range(24)]
-            fill = max(0.05, sum(inside(x, y) for x, y in pts) / len(pts))
-        n = max(8, min(260, int(D.DENSITY * fill * w * h / (0.5 * ref) ** 2 * rng.uniform(0.9, 1.1))))
-
-        def lum(c):
-            return 0.3 * c.red + 0.59 * c.green + 0.11 * c.blue
-
-        def pick(sea):  # colors that stand out on this line's letters
-            cols = [_hex(c) for c in SEASON_COLORS[sea]]
-            far = [c for c in cols if base is None or abs(lum(c) - lum(base)) > 0.22] or cols
-            c = rng.choice(far)
-            return _rgba(int(c.red * 255), int(c.green * 255), int(c.blue * 255), rng.uniform(0.8, 0.97))
-        for _ in range(n):
-            sea = rng.choice(pool) if pool else (nxt if rng.random() < share else season)
-            kind = rng.choice(SEASON_KINDS[sea])
-            for _try in range(12):  # on a letter (or near enough, its edge cut by the letter)
-                x, y = rng.uniform(-0.05 * ref, w + 0.05 * ref), rng.uniform(-0.05 * ref, h + 0.05 * ref)
-                if inside is None or inside(x, y):
-                    break
-            size = ref * rng.uniform(0.28, 0.7)
-            color = pick(sea)
-            s.save()
-            s.translate(Graphene.Point().init(x, y))
-            s.rotate(rng.uniform(0, 360) if kind not in UPRIGHT else rng.uniform(-20, 20))
-            getattr(D, "_" + kind)(s, rng, size, color, sea)
-            s.restore()
-        if season == "winter" and not pool:  # frost: a sprinkle of fine ice
-            for _ in range(int(w * h / (h * h) * 40)):
-                r = h * rng.uniform(0.008, 0.025)
-                D._dot(s, rng.uniform(0, w), rng.uniform(0, h), r, _hex("#ffffff", rng.uniform(0.5, 0.9)))
-        return s.to_node()
+    """The season's (and special days') motifs, each drawn round (0, 0) at a given size: the snow's pictures."""
 
     # -- pieces --------------------------------------------------------------------------------------------
     @staticmethod
@@ -6919,78 +6870,6 @@ class SeasonDecor:
                    for i in range(4)]
             SeasonDecor._line(s, pts, w, color)
 
-    @staticmethod
-    def _flag_cz(s, w, h):
-        """The Czech flag across the letters: white over red, a blue wedge from the left."""
-        SeasonDecor._poly(s, [(-2, -2), (w + 2, -2), (w + 2, h / 2), (-2, h / 2)], _hex("#ffffff", 0.95))
-        SeasonDecor._poly(s, [(-2, h / 2), (w + 2, h / 2), (w + 2, h + 2), (-2, h + 2)], _hex("#d7141a", 0.95))
-        SeasonDecor._poly(s, [(-2, -2), (w * 0.45, h / 2), (-2, h + 2)], _hex("#11457e", 0.95))
-
-    @staticmethod
-    def _flag_us(s, w, h):
-        """Stars and stripes across the letters: thirteen stripes, the blue canton with white stars."""
-        for i in range(13):
-            y0 = i * h / 13
-            SeasonDecor._poly(s, [(-2, y0), (w + 2, y0), (w + 2, y0 + h / 13 + 0.5), (-2, y0 + h / 13 + 0.5)],
-                              _hex("#b22234" if i % 2 == 0 else "#ffffff", 0.95))
-        cw, ch = w * 0.4, h * 7 / 13
-        SeasonDecor._poly(s, [(-2, -2), (cw, -2), (cw, ch), (-2, ch)], _hex("#3c3b6e", 0.97))
-        for r in range(5):
-            for c in range(6):
-                SeasonDecor._dot(s, (c + 0.5 + (r % 2) * 0.5) * cw / 6.5, (r + 0.6) * ch / 5.4, h * 0.025,
-                                 _hex("#ffffff"))
-
-    @staticmethod
-    def _snow_cap(s, rng, w, h):
-        """Snow lying on top of the letters: a white band with a wavy, dripping lower edge."""
-        depth = h * rng.uniform(0.12, 0.2)
-        pb = Gsk.PathBuilder.new()
-        pb.move_to(-2, -h)
-        pb.line_to(w + 2, -h)
-        x = w + 2
-        pb.line_to(x, depth)
-        while x > -2:
-            step = h * rng.uniform(0.12, 0.3)
-            dip = depth * rng.uniform(0.6, 1.5) + (h * 0.12 if rng.random() < 0.15 else 0)  # now and then an icicle
-            pb.quad_to(x - step / 2, dip, x - step, depth * rng.uniform(0.7, 1.1))
-            x -= step
-        pb.close()
-        path = pb.to_path()
-        s.append_fill(path, Gsk.FillRule.WINDING, _hex("#f5fbff", 0.97))
-        s.append_stroke(path, Gsk.Stroke.new(max(1.0, h * 0.012)), _hex("#90caf9", 0.9))
-
-    @staticmethod
-    def _waves(s, rng, w, h):
-        """The sea along the bottom of the letters: two wavy bands of blue."""
-        for k, (col, top) in enumerate((("#4fc3f7", 0.72), ("#0288d1", 0.84))):
-            pb = Gsk.PathBuilder.new()
-            y0 = h * (top + rng.uniform(-0.04, 0.04))
-            pb.move_to(-2, h * 2)
-            pb.line_to(-2, y0)
-            x, amp, wl = -2.0, h * 0.05, h * rng.uniform(0.35, 0.5)
-            while x < w + 2:
-                pb.quad_to(x + wl / 4, y0 - amp, x + wl / 2, y0)
-                pb.quad_to(x + 3 * wl / 4, y0 + amp, x + wl, y0)
-                x += wl
-            pb.line_to(w + 2, h * 2)
-            pb.close()
-            s.append_fill(pb.to_path(), Gsk.FillRule.WINDING, _hex(col, 0.8))
-
-    @staticmethod
-    def _grass(s, rng, w, h):
-        """Fresh grass growing up from the bottom of the letters."""
-        x = 0.0
-        while x < w:
-            tall = h * rng.uniform(0.12, 0.3)
-            lean = rng.uniform(-0.4, 0.4) * tall
-            pb = Gsk.PathBuilder.new()
-            pb.move_to(x - h * 0.015, h * 1.05)
-            pb.quad_to(x, h - tall * 0.5, x + lean, h - tall)
-            pb.quad_to(x + h * 0.01, h - tall * 0.5, x + h * 0.02, h * 1.05)
-            pb.close()
-            s.append_fill(pb.to_path(), Gsk.FillRule.WINDING,
-                          _hex(rng.choice(("#7cb342", "#8bc34a", "#689f38", "#9ccc65")), 0.9))
-            x += h * rng.uniform(0.02, 0.05)
 
 
 class ClockView(Gtk.Widget):
@@ -7014,7 +6893,6 @@ class ClockView(Gtk.Widget):
         self.room = (0, 0)
         self.lays = None
         self.colon = True  # the time's colon blinks: a second on, a second off
-        self._decor = (None, [])  # ((day, sizes), [render node per line]): the season's motifs, built once a day
 
     def _layout(self, which: int, pt: float, text: str = None):
         family, weight = self.FONTS[which]
@@ -7075,87 +6953,15 @@ class ClockView(Gtk.Widget):
             snap.restore()
             y += ink.height + gap
         snap.pop()
-        # the season's motifs over the letters, cut to them (no shadow of their own: they lie on the letters)
-        t = time.localtime()
-        key = ((t.tm_year, t.tm_yday), tuple((round(ink.width * sx), round(ink.height * sy)) for _, ink in lays))
-        if not EFFECTS["season"]:
-            return
-        if self._decor[0] != key:
-            # built at the size they're seen (the letters stretched to fill the room, the pictures not)
-            self._decor = (key, [self._as_texture(
-                SeasonDecor.build(n + self.SEED, ink.width * sx, ink.height * sy, c, self._letters(lay, ink, sx, sy)),
-                ink.width * sx, ink.height * sy) for n, (lay, ink), c in zip(self.order, lays, self._colors())])
-        y = 0.0
-        for (lay, ink), node in zip(lays, self._decor[1]):
-            snap.save()
-            snap.translate(Graphene.Point().init(0, y * sy))
-            snap.scale(sx, sy)
-            snap.translate(Graphene.Point().init((w / sx - ink.width) / 2 - ink.x, -ink.y))
-            snap.push_mask(Gsk.MaskMode.ALPHA)
-            snap.append_layout(lay, _rgba(255, 255, 255, 1))
-            snap.pop()
-            if node is not None:
-                snap.translate(Graphene.Point().init(ink.x, ink.y))
-                snap.scale(1 / sx, 1 / sy)
-                snap.append_texture(node, Graphene.Rect().init(0, 0, ink.width * sx, ink.height * sy))
-            snap.pop()
-            snap.restore()
-            y += ink.height + gap
-
 
     def lines_width(self) -> float:
         """How wide its lines are drawn (the widest)."""
         return max((ink.width * self.sx for _, ink in self.lays[0]), default=0.0) if self.lays else 0.0
 
-    def _letters(self, lay, ink, sx=1.0, sy=1.0):
-        """Whether a point of a line's ink box lies on its letters: the layout rendered small once, its alpha
-        read back (a little grown, so motifs at the edges count)."""
-        native = self.get_native()
-        if not native or ink.width < 1 or ink.height < 1:
-            return None
-        q = min(1.0, 160.0 / max(ink.width, ink.height))
-        W, H = max(1, int(ink.width * q)), max(1, int(ink.height * q))
-        s = Gtk.Snapshot()
-        s.scale(q, q)
-        s.translate(Graphene.Point().init(-ink.x, -ink.y))
-        s.append_layout(lay, _rgba(255, 255, 255, 1))
-        node = s.to_node()
-        if node is None:
-            return None
-        d = Gdk.TextureDownloader.new(native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, W, H)))
-        d.set_format(Gdk.MemoryFormat.R8G8B8A8)
-        data, stride = d.download_bytes()
-        data = data.get_data()
-
-        def inside(x, y):  # (x, y) as seen: stretched by sx, sy
-            cx, cy = int(x / sx * q), int(y / sy * q)
-            for dx, dy in ((0, 0), (2, 0), (-2, 0), (0, 2), (0, -2)):
-                px, py = cx + dx, cy + dy
-                if 0 <= px < W and 0 <= py < H and data[py * stride + px * 4 + 3] > 100:
-                    return True
-            return False
-        return inside
-
     def _colors(self) -> list:
         """Each line's color from the month's palette, by which line it is (not where it lands)."""
         cols = day_colors(len(self.ORDER) + 1)
         return [cols[(i + self.SEED) % len(cols)] for i in self.order]
-
-    def _as_texture(self, node, w, h):
-        """A line's decorations rendered once (a day) into a texture at the screen's scale: drawn from it every
-        second (the colon), and its memory known."""
-        native = self.get_native()
-        if node is None or not native:
-            return None
-        surf = native.get_surface()
-        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
-        s = Gtk.Snapshot()
-        s.scale(k, k)
-        s.append_node(node)
-        return native.get_renderer().render_texture(s.to_node(), Graphene.Rect().init(0, 0, w * k, h * k))
-
-    def decor_bytes(self) -> int:
-        return sum(tex_bytes(t) for t in self._decor[1])
 
 
 class FitText(Gtk.Widget):
@@ -7240,6 +7046,176 @@ class NamesView(ClockView):
         self.lays = ([(lay, ink)], 0.0)
         self.set_size_request(w, h)
         self.queue_draw()
+
+
+class SnowFall:
+    """The season's motifs (a special day's instead, Advent's half and half; in a season's last month more and
+    more of the next one's) falling slowly like snow, each turning a little its own way, behind the date and
+    time, the top buttons, the quality pill, the volume slider and the names: right of the cover, the window's
+    whole height. Drawn by the shaded panel (Scrim) over its shading, under the buttons and the slider; still
+    while a glass menu is open (it pictures the window: a moving one would be pictured again every frame)."""
+
+    SPRITES = 18  # different pictures (each drawn once a day into a texture)
+
+    def __init__(self, widget):
+        self.widget = widget  # draws it, ticks it
+        self.area = None  # (x, y, w, h) in its coordinates
+        self.flakes: list = []
+        self.sprites: list = []  # [(texture, box px, upright)]
+        self._key = None
+        self._tick = None
+        self._last = None
+        self._drawn = 0.0
+        self.frozen = False
+
+    def set_area(self, area) -> None:
+        if area != self.area:
+            old, self.area = self.area, area
+            if not area:
+                self.flakes = []
+            elif not old or abs(old[2] * old[3] - area[2] * area[3]) > 0.15 * max(1, old[2] * old[3]):
+                self.flakes = []  # much bigger or smaller: sown again
+            self.update()
+
+    def update(self) -> None:
+        """Ticking only when it moves: on, animations on, seen, and no glass menu open."""
+        want = bool(EFFECTS["season"] and EFFECTS["anim"] and self.area and not self.frozen)
+        if want and self._tick is None:
+            self._last = None
+            self._tick = self.widget.add_tick_callback(self._step)
+        elif not want and self._tick is not None:
+            self.widget.remove_tick_callback(self._tick)
+            self._tick = None
+        self.widget.queue_draw()
+
+    def _base(self) -> float:
+        x, y, w, h = self.area
+        return max(14.0, min(40.0, min(w, h) * 0.075))
+
+    def _make_sprites(self, base: float, k: float) -> None:
+        t = time.localtime()
+        key = (t.tm_year, t.tm_yday, round(base), k)
+        if key == self._key:
+            return
+        self._key, self.sprites = key, []
+        season, nxt, share = season_today()
+        days = holidays_today()
+        special = [d for d in days if d not in HOLIDAY_PERIODS]
+        pool = special or None  # a special day: its motifs instead of the season's
+        if days and not special:  # only a period (Advent): half of it, half the season
+            nxt, share = days[0], 0.5
+        rng = random.Random(t.tm_year * 1000 + t.tm_yday)
+        native = self.widget.get_native()
+        if not native:
+            return
+        size = base * 1.3  # the biggest flakes' size: drawn sharp at it, smaller ones scaled down
+        box = size * 1.7  # pieces reach a little past their size (stems, rays)
+        for i in range(self.SPRITES):
+            sea = rng.choice(pool) if pool else (nxt if i < round(self.SPRITES * share) else season)
+            kind = rng.choice(SEASON_KINDS[sea])
+            color = _hex(rng.choice(SEASON_COLORS[sea]), rng.uniform(0.85, 0.97))
+            s = Gtk.Snapshot()
+            s.scale(k, k)
+            s.translate(Graphene.Point().init(box / 2, box / 2))
+            getattr(SeasonDecor, "_" + kind)(s, rng, size, color, sea)
+            node = s.to_node()
+            if node is None:
+                continue
+            tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, box * k, box * k))
+            self.sprites.append((tex, box, kind in UPRIGHT))
+
+    def _sow(self, base: float, anywhere: bool) -> dict:
+        x, y, w, h = self.area
+        rng = random
+        near = rng.random()  # 0 far (small, slow, paler) .. 1 near
+        scale = 0.5 + 0.55 * near
+        return {
+            "x": x + rng.uniform(0, w), "y": y + (rng.uniform(0, h) if anywhere else -base * 1.2),
+            "vy": base * (0.9 + 1.1 * near) * rng.uniform(0.8, 1.2),  # px a second: about a flake a second
+            "sway": base * rng.uniform(0.3, 0.9), "freq": rng.uniform(0.12, 0.3), "phase": rng.uniform(0, 6.3),
+            "angle": rng.uniform(0, 360), "spin": rng.choice((-1, 1)) * rng.uniform(8, 40),
+            "sprite": rng.randrange(max(1, len(self.sprites))), "scale": scale,
+            "alpha": 0.55 + 0.4 * near, "t": rng.uniform(0, 100),
+        }
+
+    def _count(self, base: float) -> int:
+        x, y, w, h = self.area
+        return max(8, min(70, int(w * h / (base * 3.4) ** 2)))
+
+    def _step(self, widget, clock) -> bool:
+        now = clock.get_frame_time() / 1e6
+        dt = 0.0 if self._last is None else min(0.1, now - self._last)
+        self._last = now
+        if not self.area:
+            return True
+        x, y, w, h = self.area
+        base = self._base()
+        for f in self.flakes:
+            f["t"] += dt
+            f["y"] += f["vy"] * dt
+            f["angle"] += f["spin"] * dt
+            if f["y"] > y + h + base * 1.2:  # gone below: a new one from above
+                f.update(self._sow(base, False))
+        if now - self._drawn >= 0.03:  # about 30 pictures a second: slow enough, half the redrawing
+            self._drawn = now
+            widget.queue_draw()
+        return True
+
+    def draw(self, snap, dx: float = 0.0, dy: float = 0.0) -> None:
+        """Into `snap`, shifted by (dx, dy) (the drawing widget isn't where the area's coordinates start)."""
+        if not EFFECTS["season"] or not self.area:
+            return
+        x, y, w, h = self.area
+        if w < 20 or h < 20:
+            return
+        native = self.widget.get_native()
+        surf = native.get_surface() if native else None
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.widget.get_scale_factor()
+        base = self._base()
+        self._make_sprites(base, k)
+        if not self.sprites:
+            return
+        want = self._count(base)
+        while len(self.flakes) < want:
+            self.flakes.append(self._sow(base, True))
+        del self.flakes[want:]
+        snap.save()
+        snap.translate(Graphene.Point().init(dx, dy))
+        snap.push_clip(Graphene.Rect().init(x, y, w, h))
+        for f in self.flakes:
+            tex, box, upright = self.sprites[f["sprite"] % len(self.sprites)]
+            snap.save()
+            snap.translate(Graphene.Point().init(f["x"] + f["sway"] * math.sin(f["t"] * f["freq"] * 6.283 + f["phase"]),
+                                                 f["y"]))
+            # pictures that stand (palms, candles, pumpkins): rocking a little, the rest turning round slowly
+            snap.rotate(18 * math.sin(f["t"] * f["freq"] * 4 + f["phase"]) if upright else f["angle"])
+            snap.scale(f["scale"], f["scale"])
+            snap.push_opacity(f["alpha"])
+            snap.append_texture(tex, Graphene.Rect().init(-box / 2, -box / 2, box, box))
+            snap.pop()
+            snap.restore()
+        snap.pop()
+        snap.restore()
+
+    def bytes(self) -> int:
+        return sum(tex_bytes(t) for t, _, _ in self.sprites)
+
+
+class Scrim(Gtk.Box):
+    """The shaded panel under the song info and the buttons: the falling motifs drawn over its shading (else
+    darkened near the bottom), under what's on it."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.snow = SnowFall(self)
+        self.win = None
+
+    def do_snapshot(self, snap) -> None:
+        if self.win is not None:
+            ok, p = self.compute_point(self.win, Graphene.Point().init(0, 0))
+            if ok:
+                self.snow.draw(snap, -p.x, -p.y)  # (drawn past its own top too: up to the window's)
+        Gtk.Box.do_snapshot(self, snap)
 
 
 class InfoStack(Gtk.Widget):
@@ -7786,8 +7762,9 @@ class Window(Adw.ApplicationWindow):
         wheel.connect("scroll", self.on_wheel)
         self.add_controller(wheel)
 
-        scrim = self.scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
-                        margin_top=0)
+        scrim = self.scrim = Scrim(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
+                                   margin_top=0)
+        scrim.win = self
         scrim.add_css_class("scrim")
         inner = self.inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=90,
                         margin_bottom=22, margin_start=22, margin_end=22)
@@ -8039,7 +8016,7 @@ class Window(Adw.ApplicationWindow):
         group.add(style)
         self.fx_rows = {}
         for key, title in (("mirror", "Odrazy písma na okrajích skla"), ("shadows", "Stíny tlačítek (3D)"),
-                           ("anim", "Animace"), ("season", "Ozdoby podle ročního období na datu a čase"),
+                           ("anim", "Animace"), ("season", "Padající ozdoby podle ročního období"),
                            ("gpu", "Sklo počítané grafickou kartou (shader)")):
             row = Adw.SwitchRow(title=title, subtitle_lines=0)
             row.set_active(self.app.settings.get("fx_" + key, True))
@@ -8425,6 +8402,9 @@ class Window(Adw.ApplicationWindow):
 
     def _place_clock(self) -> bool:
         cover, W, H = self.cover_rect(), self.get_width(), self.get_height()
+        # the falling motifs: right of the cover, the window's whole height
+        left = cover[2] if cover else W
+        self.scrim.snow.set_area((left, 0, W - left, H) if W - left >= 40 and H >= 40 else None)
         ok, vol = self.vol.compute_bounds(self)
         if not cover or not ok or not getattr(self, "_clock_texts", None):
             self.clock.set_visible(False)
@@ -9355,6 +9335,8 @@ class Window(Adw.ApplicationWindow):
         if getattr(self, "clock", None):
             self.clock.queue_draw()
             self.names.queue_draw()
+        if getattr(self, "scrim", None):
+            self.scrim.snow.update()  # (falling with the season's switch, still without animations)
         if getattr(self, "logo", None) and not EFFECTS["anim"]:
             self.logo.hover = False
         self.refresh_effects()
@@ -9372,7 +9354,7 @@ class Window(Adw.ApplicationWindow):
             if row.get_active() != EFFECTS[key]:
                 row.set_active(EFFECTS[key])  # changed elsewhere (a click on the date and time)
         for key, text in (("mirror", self.mirror_text), ("anim", self.app.anim_text),
-                          ("season", lambda: season_text(self.clock.decor_bytes() if getattr(self, "clock", None) else None)),
+                          ("season", lambda: season_text(self.scrim.snow.bytes() if getattr(self, "scrim", None) else None)),
                           ("shadows", self.shadow_text), ("gpu", gpu_text)):
             row = getattr(self, "fx_rows", {}).get(key)
             if row:

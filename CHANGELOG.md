@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.25 — Padající ozdoby
+
+- **0.25.0** (2026-11-02) Ozdoby podle ročního období (o svátcích jejich vlastní) pomalu padají jako sníh a náhodně se pootáčejí za datem a časem, tlačítky ⓘ ⚙ ✕, kvalitou, hlasitostí a jmény; písmena data a času jen v barvách měsíce, čitelnější; bez animací stojí, s otevřenou nabídkou se zastaví
+
 ## 0.24 — Sdílení přes internet (společný server)
 
 - **0.24.1** (2026-11-01) Adresa společného serveru (https://ryzen7030pro.tail326f7d.ts.net, Tailscale Funnel): sdílení přes internet zapnuto pro všechna Rádia Beat; server neomezuje aplikaci na svém počítači, ostatní adresy až 3000 požadavků za 10 min
