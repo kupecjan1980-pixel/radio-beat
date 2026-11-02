@@ -4,6 +4,7 @@
 
 ## 0.25 — Padající ozdoby
 
+- **0.25.14** (2026-11-02) Přepínače v panelech a nabídkách s výrazným tmavým obrysem (dráha i kolečko): vidět i na bílém obalu
 - **0.25.13** (2026-11-02) Všechno sklo čiré bez šedého závoje (i nabídky); v panelech a nabídkách bez světlých podkladů řádků, čar mezi nimi a šedých drah přepínačů; pilulka kvality se řídí Ztmavením pozadí jako ostatní tlačítka (dřív vždy naplno, skoro černá)
 - **0.25.12** (2026-11-02) Sklo panelů a nabídek zase jako dřív (průhledné, Ztmavení pozadí platí i pro panely); čitelnost místo toho dává tmavá záře kolem samotných písmen a přepínačů
 - **0.25.11** (2026-11-02) Panely ⓘ a ⚙ ztmavené vždy, jako nabídky: jejich text je čitelný i při Ztmavení pozadí 0 % (to dál řídí jen plochy za textem okna)

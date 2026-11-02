@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.13"
+APP_VERSION = "0.25.14"
 
 import collections
 import ctypes
@@ -4154,7 +4154,10 @@ scale.vol-slider slider { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px
    as clear as ever */
 .puddle label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), 0 0 1px rgba(0,0,0,1), 0 0 3px rgba(0,0,0,1), 0 0 7px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.9), 0 0 14px rgba(0,0,0,0.85), 0 0 22px rgba(0,0,0,0.75); }
 .puddle button.puddle-tab label { text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
-.puddle switch, popover.glass-menu switch { box-shadow: 0 0 6px rgba(0,0,0,0.75); }
+.puddle switch, popover.glass-menu switch { box-shadow: inset 0 0 0 2px rgba(0,0,0,0.6), 0 0 0 1px rgba(0,0,0,0.5),
+                                                       0 0 7px rgba(0,0,0,0.85); }  /* a dark outline: seen on white too */
+.puddle switch > slider, popover.glass-menu switch > slider { box-shadow: 0 0 0 1px rgba(0,0,0,0.65),
+                                                                          0 1px 4px rgba(0,0,0,0.8); }
 .puddle .puddle-now label { font-weight: 700; }
 /* the panels' and menus' lists: no pale fill, no lines between the rows, no pale switch tracks (the glass alone,
    clear) */
