@@ -4,6 +4,7 @@
 
 ## 0.26 — Počasí
 
+- **0.26.6** (2026-11-03) Počasí bez °C a ° (jen čísla a šipky, % zůstává), kapka menší: čísla větší
 - **0.26.5** (2026-11-03) Čísla počasí tučná a vyšší (protažená do výšky jako informace o skladbě, šířku hlídá okraj obalu), kapka stejně vysoká jako čísla; odlesk na velkém skle panelů a nabídek výraznější (dlouhá záře vlevo nahoře, světlo vpravo dole)
 - **0.26.4** (2026-11-02) Počasí větší; kapka vlhkosti je opravdové sklo jako nabídky (lom obrazu za ní, modrý nádech, okraj a odlesk); všechno sklo (tlačítka, pilulka, panely, nabídky) má realističtější odlesk: měkká záře s jasným bodem vlevo nahoře a světlo soustředěné uvnitř vpravo dole
 - **0.26.3** (2026-11-02) Počasí v jednom řádku jen obrázky a čísla: obloha (v noci Měsíc ve své fázi), teplota, nejnižší ↓ a nejvyšší ↑, skleněná kapka a vlhkost v %; bez popisu, místa a názvu fáze

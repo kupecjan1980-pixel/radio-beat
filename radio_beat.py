@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.5"
+APP_VERSION = "0.26.6"
 
 import collections
 import ctypes
@@ -7437,9 +7437,9 @@ def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
         elif w["code"] in (51, 53, 55, 80, 81):
             big["emoji"] = "🌧️"
     t, lo, hi = round(w["temp"]), round(w["min"]), round(w["max"])
-    temps = (f"<span foreground='{_temp_color(w['temp'])}'>{t} °C</span>  "
-             f"<span foreground='{_temp_color(w['min'])}'>↓{lo}°</span> "
-             f"<span foreground='{_temp_color(w['max'])}'>↑{hi}°</span>")
+    temps = (f"<span foreground='{_temp_color(w['temp'])}'>{t}</span>  "  # (no ° or C: plainly temperatures)
+             f"<span foreground='{_temp_color(w['min'])}'>↓{lo}</span> "
+             f"<span foreground='{_temp_color(w['max'])}'>↑{hi}</span>")
     return {"sky": big, "temps": temps, "hum": f"<span foreground='#9fe2ff'>{round(w['hum'])} %</span>",
             "moon": moon, "place": place}
 
@@ -7493,7 +7493,7 @@ class WeatherView(Gtk.Widget):
         a_ink, b_ink = self._layout(self.info["temps"], 100)[1], self._layout(self.info["hum"], 100)[1]
         tall = max(a_ink.height, b_ink.height)
         gap = h * 0.12
-        drop = h * 0.84
+        drop = h * 0.62
         room = w - icon - gap * 2.3 - drop * 0.72
         px = 100 * min(room / max(1, a_ink.width + b_ink.width), h * 0.82 / max(1, tall)) * 0.98
         a, b = self._layout(self.info["temps"], px), self._layout(self.info["hum"], px)
