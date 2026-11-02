@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.5"
+APP_VERSION = "0.25.6"
 
 import collections
 import ctypes
@@ -8443,14 +8443,22 @@ class Window(Adw.ApplicationWindow):
     QUALITY_GAP = 10  # between the pill and its menu (as the gear menu's)
 
     def _place_quality(self, pop) -> None:
-        """Above the pill, a gap between, its right edge on the pill's (the notes wrap)."""
-        pw = self.quality_pill.get_width()
-        w = max(pw, min(self.get_width() - 44, 460))
-        self.quality_fit.set_size_request(w, -1)
+        """Above the pill, a gap between, filling the room right of the cover (from its edge to the screen's,
+        a gap at each; the notes wrap); without that room, its right edge on the pill's."""
+        pw, W = self.quality_pill.get_width(), self.get_width()
+        cover = self.cover_rect()
+        m = self.QUALITY_GAP + 4
+        room = W - cover[2] - 2 * m if cover else 0
         ok, at = self.quality_pill.compute_point(self.quality_tab, Graphene.Point().init(0, 0))
         px, py = (at.x, at.y) if ok else (0, 0)  # the pill's corner, in the tab (the popover's parent)
+        ok_w, wx = self.compute_point(self.quality_tab, Graphene.Point().init(W - m, 0))  # the screen's edge
+        if room >= max(pw, 240) and ok_w:
+            w, right = int(room), wx.x
+        else:
+            w, right = max(pw, min(W - 44, 460)), px + pw
+        self.quality_fit.set_size_request(w, -1)
         r = Gdk.Rectangle()
-        r.x, r.y, r.width, r.height = round(px + pw - w), round(py - self.QUALITY_GAP), w, 1
+        r.x, r.y, r.width, r.height = round(right - w), round(py - self.QUALITY_GAP), w, 1
         pop.set_pointing_to(r)
         GLib.idle_add(lambda: (pop.get_child().queue_draw(), False)[1])
 
