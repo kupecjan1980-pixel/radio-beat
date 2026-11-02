@@ -4,6 +4,7 @@
 
 ## 0.25 — Padající ozdoby
 
+- **0.25.4** (2026-11-02) Padající ozdoby plynule v plné snímkové frekvenci obrazovky (60 Hz a víc), i za sklem nabídek a panelů (kreslené do skla každý snímek, zvětšené jako jeho střed); pod sklem už žádné posunuté dvojníky: tlačítka a pilulka kvality jen zrcadlově, okraje bez starých kopií
 - **0.25.3** (2026-11-02) Na podzim padá hlavně javorové listí; ozdoby už se nezastaví při otevřené nabídce ani nad datem; panely ⓘ a ⚙ ukazují jako nabídka kvality i datum a čas, padající ozdoby, informace o skladbě a tlačítka za sklem, živě (až 15× za sekundu, na velkém skle 4K méně: nejvýš čtvrtina jádra CPU)
 - **0.25.2** (2026-11-02) Padající ozdoby s jemnou září kolem: hnědé listí vynikne i na hnědém obalu, netopýři na tmavém
 - **0.25.1** (2026-11-02) Padající ozdoby větší (asi 1,5×) a asi dvakrát víc; ozdoby ročního období padají vždy (na podzim listí, v zimě vločky…), o svátcích a zvláštních dnech napůl s jejich vlastními
