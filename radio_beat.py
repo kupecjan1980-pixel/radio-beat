@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.27.0"
+APP_VERSION = "0.27.1"
 
 import collections
 import ctypes
@@ -6482,7 +6482,9 @@ def day_summary() -> list:
         rows = []
         for name, by, since in days:
             more = ", ".join(p for p in (f"vyhlásil(a) {by}" if by else "", f"od {since}" if since else "") if p)
-            pics = " ".join(DAY_EMOJI.get(name) or ()) if EFFECTS.get("season") else ""
+            pics = " ".join(dict.fromkeys("✡" if e == "@goldstar" else e for e in DAY_EMOJI.get(name) or ()
+                                          if not e.startswith("@") or e == "@goldstar")) \
+                if EFFECTS.get("season") else ""
             rows.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else "")
                         + (f" {pics}" if pics else ""))
         out.append(("text", "\n".join(rows)))
@@ -6767,7 +6769,7 @@ Mezinárodní den ochrany ozónové vrstvy|🌍 ☀️ 🛡️
 Mezinárodní den odpůrců vojenské služby|☮️ 🕊️
 Mezinárodní den orangutanů|🦧 🦧 🌳
 Mezinárodní den památek a sídel|🏰 🏛️ ⛪
-Mezinárodní den památky obětí holokaustu|🕯️ 🕊️ 🤍 🕯️
+Mezinárodní den památky obětí holokaustu|🕯️ 🕊️ 🤍 @goldstar @goldstar
 Mezinárodní den památky obětí obchodu s otroky|⛓️ 🕯️ 🕊️
 Mezinárodní den památky obětí otroctví a transatlantického obchodu s otroky|⛓️ 🕯️ 🕊️ 🌊
 Mezinárodní den parlamentarismu|🏛️ 🗳️ ⚖️
@@ -6999,13 +7001,13 @@ Vzpomínka na genocidu ve Rwandě|🕯️ 💜 🕊️
 svatý Martin|🐎 🍷 🦢 ❄️
 tzv. Mezinárodní den proti McDonald’s|🥗 🍔 🚫
 """
-DAY_EMOJI = {}
+DAY_EMOJI = {}  # (a "@kind" among them: one of SeasonDecor's drawn motifs, e.g. a golden Star of David)
 for _line in DAY_EMOJI_TEXT.strip().splitlines():
     _name, _, _pics = _line.partition("|")
     DAY_EMOJI[_name] = tuple(_pics.split())
     if DAY_EMOJI[_name]:
-        SEASON_KINDS["day:" + _name] = tuple("emoji:" + e for e in DAY_EMOJI[_name])
-        SEASON_COLORS["day:" + _name] = ("#ffffff",)
+        SEASON_KINDS["day:" + _name] = tuple(e[1:] if e.startswith("@") else "emoji:" + e for e in DAY_EMOJI[_name])
+        SEASON_COLORS["day:" + _name] = ("#ffd54f",)
 # the calendar's days a special day (HOLIDAYS, drawn motifs) stands for already
 CALENDAR_THEMED = {"Den japonské kultury", "Halloween", "Dušičky", "Den všech svatých", "Mikuláš",
                    "Dneska chodí Mikuláš", "Den Země", "Den svatého Patrika", "Den Star Wars", "Den pí",
@@ -7036,7 +7038,8 @@ def season_text(clock_bytes: int = None) -> str:
     if days or cal:  # the season's always, the day's as many again
         name += " + " + " + ".join([HOLIDAYS[d][0] for d in days] + [c[4:] for c in cal])
         motifs += "; napůl s: " + ", ".join([HOLIDAYS[d][1] for d in days]
-                                          + [" ".join(DAY_EMOJI[c[4:]]) for c in cal])
+                                          + [" ".join(e for e in DAY_EMOJI[c[4:]] if not e.startswith("@"))
+                                             for c in cal])
     text = (f"Padají pomalu jako sníh a pootáčejí se za datem a časem, tlačítky, kvalitou, hlasitostí a jmény "
             f"(písmena jen v barvách měsíce, čitelnější); bez animací stojí; klik na datum je vypne a zapne; "
             f"každý den trochu jinak; o svátcích a zvláštních dnech (české, americké i světové: Vánoce, Halloween, "
@@ -7772,6 +7775,20 @@ class SeasonDecor:
         s.translate(Graphene.Point().init(size * 0.3, -size * 0.28))
         SeasonDecor._flame(s, rng, size * 0.4, color, _sea)
         s.restore()
+
+    @staticmethod
+    def _goldstar(s, rng, size, color, _sea):
+        """A Star of David in gold: two filled triangles, a darker gold edge, a lighter middle."""
+        R = size / 2
+        for rot in (0, math.pi):
+            pts = [(R * math.cos(rot - math.pi / 2 + 2 * math.pi * i / 3), R * math.sin(rot - math.pi / 2 + 2 * math.pi * i / 3))
+                   for i in range(3)]
+            SeasonDecor._poly(s, pts, _hex("#ffcc33"))
+        for rot in (0, math.pi):
+            pts = [(R * math.cos(rot - math.pi / 2 + 2 * math.pi * i / 3), R * math.sin(rot - math.pi / 2 + 2 * math.pi * i / 3))
+                   for i in range(4)]
+            SeasonDecor._line(s, pts, max(1.0, size * 0.045), _hex("#b8860b"))
+        SeasonDecor._dot(s, 0, 0, R * 0.38, _hex("#ffe680", 0.85))
 
     @staticmethod
     def _david(s, rng, size, color, _sea):
