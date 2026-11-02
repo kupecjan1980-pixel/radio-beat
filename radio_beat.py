@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.12"
+APP_VERSION = "0.25.13"
 
 import collections
 import ctypes
@@ -4156,7 +4156,12 @@ scale.vol-slider slider { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px
 .puddle button.puddle-tab label { text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
 .puddle switch, popover.glass-menu switch { box-shadow: 0 0 6px rgba(0,0,0,0.75); }
 .puddle .puddle-now label { font-weight: 700; }
-.puddle .boxed-list, .puddle .boxed-list > row { background: rgba(255,255,255,0.04); }
+/* the panels' and menus' lists: no pale fill, no lines between the rows, no pale switch tracks (the glass alone,
+   clear) */
+.puddle .boxed-list, .puddle .boxed-list > row, popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row {
+    background: none; box-shadow: none; border: none; }
+.puddle .boxed-list separator, popover.glass-menu .boxed-list separator { background: none; min-height: 0; }
+.puddle switch:not(:checked), popover.glass-menu switch:not(:checked) { background: none; }
 .puddle button.puddle-tab { padding: 4px 14px; min-height: 0; border-radius: 999px; color: white;
                             background: none; box-shadow: none; font-weight: 700; }  /* the glass is the tab */
 .puddle button.puddle-tab:hover { background: rgba(255,255,255,0.10); }
@@ -4176,7 +4181,6 @@ button.quality-tab label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.
 .glass-disc > button.disc-btn:active { background: rgba(0,0,0,0.15); }
 
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
-popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
 popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8), 0 0 1px rgba(0,0,0,1), 0 0 3px rgba(0,0,0,1), 0 0 7px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.9), 0 0 14px rgba(0,0,0,0.85), 0 0 22px rgba(0,0,0,0.75); }
 .overlay-header:backdrop, .overlay-header:backdrop * { opacity: 1; filter: none; }  /* not faded when unfocused */
 
@@ -4891,7 +4895,7 @@ class GlassCard(Gtk.Box):
         self.radius = 28.0
         self._blurred = []  # [(key, texture)]: the blurred backdrop, made once per picture and size (two morphing)
         self.shade = 1.0  # scales the darkening (gear menu: Background shade)
-        self.tint = 0.34  # the dark tint over the glass (times shade)
+        self.tint = 0.0  # a dark tint over the glass (times shade): none, the glass clear (no gray veil on pale covers)
         self.mag = self.MAG  # < 1: a concave lens (things look smaller)
         self.frame = True  # its lit edges and border (not for the puddle's neck)
         self.warp_content = False  # what's inside bent by the glass too (the big panels)
@@ -5824,7 +5828,7 @@ class MenuGlass(GlassCard):
         self.paint = None  # the window's content, live
         self._tex = None
         self.cache_lens = False  # it shows the live window, a new texture each time anyway
-        self.tint = 0.42  # a little darker than the show card: the menu's small text stays readable
+        self.tint = 0.0  # clear like the rest (its text readable by the dark halo round the letters)
         self.sharp_bars = True
         self.depth = False  # the popup's own shadow does it
         self._tex_version = 0  # the window's content changed this many times (a new picture of it then)
@@ -9710,7 +9714,8 @@ class Window(Adw.ApplicationWindow):
         self.refresh_effects()
         self.look_css.load_from_data(css.encode())
         waters = [g for w in getattr(self, "waters", []) for g in (w.body, w.neck)]
-        for card in (self.show_card, *self.discs, *self.head_glass, *waters):
+        pill = [self.quality_pill] if getattr(self, "quality_pill", None) else []  # (it was always at full: black)
+        for card in (self.show_card, *self.discs, *self.head_glass, *waters, *pill):
             card.shade = k
             card.queue_draw()
         if getattr(self, "quality_pill", None):
