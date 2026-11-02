@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.1"
+APP_VERSION = "0.26.2"
 
 import collections
 import ctypes
@@ -7182,15 +7182,120 @@ WMO = {0: ("☀️", "jasno"), 1: ("🌤️", "skoro jasno"), 2: ("⛅", "poloja
        77: ("🌨️", "sněhová zrna"), 80: ("🌦️", "přeháňky"), 81: ("🌦️", "přeháňky"), 82: ("⛈️", "prudké přeháňky"),
        85: ("🌨️", "sněhové přeháňky"), 86: ("🌨️", "sněhové přeháňky"), 95: ("⛈️", "bouřka"),
        96: ("⛈️", "bouřka s kroupami"), 99: ("⛈️", "bouřka s kroupami")}
-MOON = (("🌑", "nov"), ("🌒", "dorůstající srpek"), ("🌓", "první čtvrť"), ("🌔", "dorůstající měsíc"),
-        ("🌕", "úplněk"), ("🌖", "couvající měsíc"), ("🌗", "poslední čtvrť"), ("🌘", "couvající srpek"))
-
-
-def moon_phase(t: float = None) -> tuple:
-    """(emoji, Czech name) of the moon's phase now: days since a known new moon, in synodic months."""
+def moon_sky(lat: float, lon: float, t: float = None) -> dict:
+    """The moon as seen from (lat, lon) now (low-precision ephemeris, good to a degree or so): how much of it is
+    lit (k 0..1), its elongation from the sun (0 new, 90 first quarter, 180 full, 270 last quarter), the Czech
+    name of its phase, and two angles for drawing it as it looks there: chi, where its lit edge points (position
+    angle, from celestial north towards east), and q, the parallactic angle (where the zenith is, the same way).
+    Drawn with north up, east left, then turned by q: the zenith up, as one sees it in the sky."""
     t = time.time() if t is None else t
-    age = ((t - 947182440) / 86400.0) % 29.530588853  # (new moon 2000-01-06 18:14 UTC)
-    return MOON[int(age / 29.530588853 * 8 + 0.5) % 8]
+    d = t / 86400.0 - 10957.5  # days since J2000.0
+    r, sin, cos = math.radians, math.sin, math.cos
+    L = 280.460 + 0.9856474 * d
+    g = r(357.528 + 0.9856003 * d)
+    ls = r(L + 1.915 * sin(g) + 0.020 * sin(2 * g))
+    Mm, F, D = r(134.963 + 13.064993 * d), r(93.272 + 13.229350 * d), r(297.850 + 12.190749 * d)
+    lm = r(218.316 + 13.176396 * d + 6.289 * sin(Mm) - 1.274 * sin(Mm - 2 * D) + 0.658 * sin(2 * D)
+           + 0.214 * sin(2 * Mm) - 0.186 * sin(g) - 0.114 * sin(2 * F))
+    bm = r(5.128 * sin(F))
+    eps = r(23.439 - 0.0000004 * d)
+
+    def equatorial(lam, beta):
+        ra = math.atan2(sin(lam) * cos(eps) - math.tan(beta) * sin(eps), cos(lam))
+        return ra, math.asin(sin(beta) * cos(eps) + cos(beta) * sin(eps) * sin(lam))
+    a0, d0 = equatorial(ls, 0.0)  # the sun
+    am, dm = equatorial(lm, bm)  # the moon
+    elong = math.degrees(lm - ls) % 360
+    k = (1 - cos(r(elong))) / 2
+    chi = math.atan2(cos(d0) * sin(a0 - am), sin(d0) * cos(dm) - cos(d0) * sin(dm) * cos(a0 - am))
+    lst = r((280.46061837 + 360.98564736629 * d + lon) % 360)
+    H, phi = lst - am, r(lat)
+    q = math.atan2(sin(H), math.tan(phi) * cos(dm) - sin(dm) * cos(H))
+    name = ("nov" if elong < 8 or elong > 352 else "dorůstající srpek" if elong < 80 else "první čtvrť" if elong < 100
+            else "dorůstající měsíc" if elong < 172 else "úplněk" if elong < 188 else "couvající měsíc" if elong < 260
+            else "poslední čtvrť" if elong < 280 else "couvající srpek")
+    return {"k": k, "elong": elong, "name": name, "chi": chi, "q": q}
+
+
+# The moon's face, north up, as seen from the northern hemisphere: (x, y, rx, ry) in its radii, x right, y down.
+MOON_SEAS = ((-0.55, 0.02, 0.33, 0.58), (-0.26, -0.44, 0.30, 0.25), (0.20, -0.38, 0.17, 0.16),
+             (0.33, -0.07, 0.22, 0.18), (0.68, -0.30, 0.12, 0.10), (0.55, 0.16, 0.14, 0.20), (0.35, 0.31, 0.10, 0.09),
+             (-0.20, 0.40, 0.20, 0.14), (-0.50, 0.43, 0.10, 0.09), (0.02, -0.72, 0.42, 0.07))
+MOON_BRIGHT = ((-0.12, 0.72, 0.055, True), (-0.32, -0.12, 0.05, True), (-0.68, -0.30, 0.03, False),
+               (-0.60, -0.08, 0.03, False))  # Tycho (rays), Copernicus (rays), Aristarchus, Kepler
+
+
+def draw_moon(cr, rad: float, m: dict) -> None:
+    """The moon in cairo, centered on (0, 0), radius `rad`: bluish gray, its seas darker, its bright craters,
+    the night side dark (a faint earthshine), lit and turned as m (moon_sky) says."""
+    cr.save()
+    cr.rotate(m["q"])  # the zenith up (cairo turns clockwise; the position angles go anticlockwise, east left)
+    cr.arc(0, 0, rad, 0, 2 * math.pi)
+    cr.clip()
+    face = cairo_radial(0, 0, rad, (0.80, 0.84, 0.90), (0.60, 0.65, 0.73))
+    cr.set_source(face)
+    cr.paint()
+    for x, y, rx, ry in MOON_SEAS:  # the seas: darker, bluer
+        cr.save()
+        cr.translate(x * rad, y * rad)
+        cr.scale(rx * rad, ry * rad)
+        cr.arc(0, 0, 1, 0, 2 * math.pi)
+        cr.restore()
+        cr.set_source_rgba(0.38, 0.43, 0.52, 0.55)
+        cr.fill()
+    rng = random.Random(7)
+    for _ in range(26):  # small craters: a dark rim, a lit edge
+        x, y, cr_r = rng.uniform(-0.85, 0.85), rng.uniform(-0.85, 0.85), rng.uniform(0.025, 0.07)
+        if x * x + y * y > 0.8:
+            continue
+        cr.arc(x * rad, y * rad, cr_r * rad, 0, 2 * math.pi)
+        cr.set_source_rgba(0.30, 0.34, 0.42, 0.35)
+        cr.fill()
+        cr.arc(x * rad - cr_r * rad * 0.25, y * rad - cr_r * rad * 0.25, cr_r * rad * 0.7, 0, 2 * math.pi)
+        cr.set_source_rgba(0.92, 0.94, 0.98, 0.18)
+        cr.fill()
+    for x, y, cr_r, rays in MOON_BRIGHT:  # bright young craters, Tycho and Copernicus with their rays
+        if rays and rad > 14:
+            cr.set_line_width(max(0.6, rad * 0.012))
+            cr.set_source_rgba(0.92, 0.95, 1.0, 0.22)
+            for i in range(12):
+                ang = i * math.pi / 6 + 0.3
+                cr.move_to(x * rad, y * rad)
+                cr.line_to((x + math.cos(ang) * 0.45) * rad, (y + math.sin(ang) * 0.45) * rad)
+            cr.stroke()
+        cr.arc(x * rad, y * rad, cr_r * rad, 0, 2 * math.pi)
+        cr.set_source_rgba(0.96, 0.97, 1.0, 0.9)
+        cr.fill()
+    cr.restore()
+    # the night side: lit side towards +x after turning to where its lit edge points, then the terminator
+    # (an ellipse: x = e * sqrt(1 - y^2), e = rad * (1 - 2k)); everything left of it in shadow
+    cr.save()
+    cr.rotate(m["q"])
+    cr.rotate(-math.pi / 2 - m["chi"])
+    cr.arc(0, 0, rad, 0, 2 * math.pi)
+    cr.clip()
+    e = rad * (1 - 2 * m["k"])
+    cr.move_to(0, -rad)
+    cr.arc_negative(0, 0, rad, -math.pi / 2, math.pi / 2)  # the left half, top to bottom (through the left)
+    for i in range(41):  # back up along the terminator
+        y = rad - 2 * rad * i / 40
+        cr.line_to(e * math.sqrt(max(0.0, 1 - (y / rad) ** 2)), y)
+    cr.close_path()
+    cr.set_source_rgba(0.04, 0.06, 0.11, 0.86)
+    cr.fill()
+    cr.restore()
+    cr.arc(0, 0, rad, 0, 2 * math.pi)  # a soft edge glow
+    cr.set_line_width(max(0.5, rad * 0.03))
+    cr.set_source_rgba(0.85, 0.90, 1.0, 0.25)
+    cr.stroke()
+
+
+def cairo_radial(x, y, rad, inner, outer):
+    import cairo
+    g = cairo.RadialGradient(x - rad * 0.25, y - rad * 0.25, rad * 0.1, x, y, rad)
+    g.add_color_stop_rgb(0, *inner)
+    g.add_color_stop_rgb(1, *outer)
+    return g
 
 
 # The weather's places (the gear menu's choice): (key, name shown, latitude, longitude).
@@ -7224,87 +7329,137 @@ def _temp_color(t: float) -> str:
     return "#ff6b5a"
 
 
-def weather_lines(w: dict, place: str) -> list:
-    """Two lines of Pango markup: the sky (the moon in its phase on a clear night), the temperature, the day's
-    lowest and highest, the humidity; then what the sky's doing, the place and the moon's phase."""
+def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
+    """What the weather view shows: the sky (an emoji, or the moon drawn as it is there now on a clear night,
+    with a cloud over it when partly cloudy), a line of Pango markup with the temperature, the day's lowest and
+    highest and the humidity, another with the sky in words, the place and the moon's phase (a small moon drawn
+    after it)."""
     sky, words = WMO.get(w["code"], ("🌡️", ""))
-    moon, moon_name = moon_phase()
+    moon = moon_sky(lat, lon)
+    big = {"emoji": sky, "moon": None, "cloud": False}
     if not w["day"]:
-        sky = {0: moon, 1: moon, 2: moon + "☁️", 51: "🌧️", 53: "🌧️", 55: "🌧️", 80: "🌧️", 81: "🌧️"}.get(w["code"], sky)
+        if w["code"] in (0, 1, 2):
+            big = {"emoji": None, "moon": moon, "cloud": w["code"] == 2}
+        elif w["code"] in (51, 53, 55, 80, 81):
+            big["emoji"] = "🌧️"
     esc = GLib.markup_escape_text
     t, lo, hi = round(w["temp"]), round(w["min"]), round(w["max"])
-    one = (f"{sky} <span foreground='{_temp_color(w['temp'])}'>{t} °C</span>  "
+    one = (f"<span foreground='{_temp_color(w['temp'])}'>{t} °C</span>  "
            f"<span foreground='{_temp_color(w['min'])}'>↓{lo}°</span> "
            f"<span foreground='{_temp_color(w['max'])}'>↑{hi}°</span>  "
            f"<span foreground='#7fd8ff'>💧{round(w['hum'])} %</span>")
-    two = " · ".join(p for p in (esc(words), esc(place), f"{moon} {esc(moon_name)}") if p)
-    return [one, two]
+    two = " · ".join(p for p in (esc(words), esc(place), esc(moon["name"])) if p)
+    return {"sky": big, "lines": [one, two], "moon": moon}
 
 
 class WeatherView(Gtk.Widget):
-    """The weather beside the logo: two lines (the bigger one first), each as big as fits its room, on the
-    left of it; white with a shadow like the song info, the temperatures and the humidity in their colors."""
+    """The weather beside the logo: the sky big on the left (the sun, clouds, rain… as colored emoji; on a clear
+    night the moon, drawn as it is in the sky there), then two lines, each as big as fits (the first bigger),
+    white with a shadow like the song info, the temperatures and the humidity in their colors; a small moon in
+    its phase after the second."""
 
     def __init__(self, **kw):
         super().__init__(can_target=False, **kw)
-        self.lines, self.room, self.font, self.lays = [], (0, 0), None, None
+        self.info, self.room, self.font, self.lays, self.sky_lay = None, (0, 0), None, None, None
 
-    def set_lines(self, lines: list, font: str = None) -> None:
-        if lines != self.lines or font != self.font:
-            self.lines, self.font, self.lays = lines, font, None
+    @property
+    def lines(self):
+        return self.info["lines"] if self.info else []
+
+    def set_info(self, info: dict | None, font: str = None) -> None:
+        if info != self.info or font != self.font:
+            self.info, self.font = info, font
             self._fit()
 
     def set_room(self, w: int, h: int) -> None:
         if (w, h) != self.room:
-            self.room, self.lays = (w, h), None
+            self.room = (w, h)
             self._fit()
 
     def do_measure(self, orientation, for_size):
         n = self.room[0] if orientation == Gtk.Orientation.HORIZONTAL else self.room[1]
         return n, n, -1, -1
 
+    def _layout(self, markup: str, px: float, font: str = None):
+        lay = self.create_pango_layout(None)
+        desc = Pango.FontDescription.from_string(font or self.font or "Sans")
+        desc.set_weight(Pango.Weight.SEMIBOLD)
+        desc.set_absolute_size(px * Pango.SCALE)
+        lay.set_font_description(desc)
+        lay.set_markup(markup, -1)
+        return lay, lay.get_pixel_extents()[1]
+
     def _fit(self) -> None:
         w, h = self.room
-        if not self.lines or w < 20 or h < 12:
-            self.lays = None
+        self.lays = self.sky_lay = None
+        if not self.info or w < 40 or h < 12:
             self.queue_resize()
             return
-        shares = (0.58, 0.36)[:len(self.lines)]
+        sky = self.info["sky"]
+        self.icon = h  # the sky: a square as tall as the view
+        if sky["emoji"]:
+            lay, ink = self._layout(sky["emoji"], 100, "Noto Color Emoji")
+            px = 100 * 0.95 * min(self.icon / max(1, ink.width), self.icon / max(1, ink.height))
+            self.sky_lay = self._layout(sky["emoji"], px, "Noto Color Emoji")
+        x0 = self.icon + h * 0.18
+        tw = w - x0
+        moon_small = h * 0.30  # the small moon after the second line
         lays, y, first = [], 0.0, None
-        for text, share in zip(self.lines, shares):
-            lay = self.create_pango_layout(None)
-            desc = Pango.FontDescription.from_string(self.font or "Sans")
-            desc.set_weight(Pango.Weight.SEMIBOLD)
-
-            def ink_at(px):
-                desc.set_absolute_size(px * Pango.SCALE)
-                lay.set_font_description(desc)
-                lay.set_markup(text, -1)
-                return lay.get_pixel_extents()[1]
-            ink = ink_at(100)
-            px = 100 * 0.97 * min(w / max(1, ink.width), h * share / max(1, ink.height))
+        for i, (text, share) in enumerate(zip(self.info["lines"], (0.56, 0.34))):
+            room_w = tw - (moon_small * 1.3 if i == 1 else 0)
+            ink = self._layout(text, 100)[1]
+            px = 100 * 0.97 * min(room_w / max(1, ink.width), h * share / max(1, ink.height))
             if first is not None:
                 px = min(px, first * 0.75)  # the second line never bigger than the first
             first = px if first is None else first
-            ink = ink_at(px)
-            lays.append((lay, ink, y))
-            y += ink.height + h * 0.06
-        self.lays = lays
+            lay, ink = self._layout(text, px)
+            lays.append((lay, ink, x0, y))
+            y += ink.height + h * 0.08
+        # the lines in the middle of the height
+        top = (h - (y - h * 0.08)) / 2
+        self.lays = [(lay, ink, x, yy + top) for lay, ink, x, yy in lays]
         self.queue_resize()
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
         if not self.lays:
             return
+        w, h = self.room
+        sky = self.info["sky"]
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.9), -1, 2, 3
         snap.push_shadow([shadow])
-        for lay, ink, y in self.lays:
+        if self.sky_lay:
+            lay, ink = self.sky_lay
             snap.save()
-            snap.translate(Graphene.Point().init(-ink.x, y - ink.y))
+            snap.translate(Graphene.Point().init((self.icon - ink.width) / 2 - ink.x, (h - ink.height) / 2 - ink.y))
+            snap.append_layout(lay, _rgba(255, 255, 255, 1))
+            snap.restore()
+        for lay, ink, x, y in self.lays:
+            snap.save()
+            snap.translate(Graphene.Point().init(x - ink.x, y - ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, 0.95))
             snap.restore()
         snap.pop()
+        moon = self.info["moon"]
+        if sky["moon"]:  # the big moon (a cloud over part of it when partly cloudy)
+            rad = self.icon * 0.42
+            cr = snap.append_cairo(Graphene.Rect().init(0, 0, self.icon, h))
+            cr.translate(self.icon / 2, h / 2)
+            draw_moon(cr, rad, moon)
+            if sky["cloud"]:
+                lay, ink = self._layout("☁️", self.icon * 0.55, "Noto Color Emoji")
+                snap.save()
+                snap.translate(Graphene.Point().init(self.icon * 0.45 - ink.x, h * 0.5 - ink.y))
+                snap.append_layout(lay, _rgba(255, 255, 255, 1))
+                snap.restore()
+        if len(self.lays) > 1:  # the small moon after the phase's name
+            lay, ink, x, y = self.lays[1]
+            rad = h * 0.15
+            cx, cy = x + ink.width + rad * 1.6, y + ink.height / 2
+            cr = snap.append_cairo(Graphene.Rect().init(cx - rad - 1, cy - rad - 1, 2 * rad + 2, 2 * rad + 2))
+            cr.translate(cx, cy)
+            draw_moon(cr, rad, moon)
 
 
 class FitText(Gtk.Widget):
@@ -9166,9 +9321,9 @@ class Window(Adw.ApplicationWindow):
         x0 = lb.get_x() + lb.get_width() + self.WEATHER_GAP
         y0 = max(6.0, lb.get_y())
         right = (cover[0] - self.INFO_GAP) if cover else W * 0.45
-        # the logo's band: the song info starts below the header the logo is in (its box may start a little
-        # higher than its letters: not the limit, or there'd be no room at all)
-        h = lb.get_height()
+        # the logo's band and a little more: the song info starts below the header the logo is in (its box may
+        # start higher than its letters: not the limit, or there'd be no room at all)
+        h = lb.get_height() * 1.12
         w = right - x0
         if w < 90 or h < 16:
             view.set_visible(False)
@@ -9181,9 +9336,9 @@ class Window(Adw.ApplicationWindow):
         view.set_room(int(w), int(h))
         view.set_visible(True)
 
-    def show_weather(self, lines: list | None) -> None:
+    def show_weather(self, info: dict | None) -> None:
         beat = self.app.settings.get("font", "beat") == "beat" and self.app.fonts_ok
-        self.weather_view.set_lines(lines or [], "Oswald" if beat else None)
+        self.weather_view.set_info(info, "Oswald" if beat else None)
         self._place_weather()
 
     def _make_puddle(self, overlay, scrim) -> None:
@@ -10335,24 +10490,24 @@ class App(Adw.Application):
         if getattr(self, "_weather_busy", False):
             return
         self._weather_busy = True
-        _, name, lat, lon = weather_spot(self.settings.get("weather_place", "oprechtice"))
+        spot = weather_spot(self.settings.get("weather_place", "oprechtice"))
 
         def work():
             w, err = None, None
             try:
-                w = weather_now(lat, lon)
+                w = weather_now(spot[2], spot[3])
             except (OSError, ValueError, KeyError, TypeError) as e:
                 err = e
-            GLib.idle_add(self._weather_done, name, w, err)
+            GLib.idle_add(self._weather_done, spot, w, err)
         threading.Thread(target=work, daemon=True).start()
 
-    def _weather_done(self, name, w, err):
+    def _weather_done(self, spot, w, err):
         self._weather_busy = False
         if err:
             print("Rádio Beat: počasí:", err, file=sys.stderr)
         if self.win:
             if w:
-                self.win.show_weather(weather_lines(w, name))
+                self.win.show_weather(weather_lines(w, spot[1], spot[2], spot[3]))
             elif not getattr(self.win.weather_view, "lines", None):
                 self.win.show_weather(None)
         return False
