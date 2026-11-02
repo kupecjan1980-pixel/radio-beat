@@ -4,6 +4,7 @@
 
 ## 0.26 — Počasí
 
+- **0.26.4** (2026-11-02) Počasí větší; kapka vlhkosti je opravdové sklo jako nabídky (lom obrazu za ní, modrý nádech, okraj a odlesk); všechno sklo (tlačítka, pilulka, panely, nabídky) má realističtější odlesk: měkká záře s jasným bodem vlevo nahoře a světlo soustředěné uvnitř vpravo dole
 - **0.26.3** (2026-11-02) Počasí v jednom řádku jen obrázky a čísla: obloha (v noci Měsíc ve své fázi), teplota, nejnižší ↓ a nejvyšší ↑, skleněná kapka a vlhkost v %; bez popisu, místa a názvu fáze
 - **0.26.2** (2026-11-02) Počasí větší, obloha velká vlevo přes oba řádky; Měsíc kreslený jako skutečný (modrošedý, moře, krátery Tycho a Koperník s paprsky), osvětlený a natočený tak, jak ho teď vidíš z vybraného místa; fáze počítaná přesně (podle polohy Slunce a Měsíce: teď couvající srpek, ne poslední čtvrť); malý Měsíc i za názvem fáze
 - **0.26.1** (2026-11-02) Počasí se opravdu ukáže vedle loga (místo pro ně se počítalo od rámečku informací o skladbě, který začíná výš než jejich písmena: vyšlo nic); v nastavení je vybrané místo vidět celé (pod nadpisem)

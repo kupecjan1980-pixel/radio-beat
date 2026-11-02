@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.3"
+APP_VERSION = "0.26.4"
 
 import collections
 import ctypes
@@ -5756,6 +5756,9 @@ class GlassCard(Gtk.Box):
             node, Graphene.Rect().init(0, 0, ew * k, eh * k)), box))
         return self._flat_cache[1]
 
+    def _glare(self, snap, w: float, h: float) -> None:
+        glass_glare(snap, w, h, self.radius)
+
     def _finish(self, snap, w: float, h: float, box, rr, rim: float) -> None:
         """Over the lens: the flash, the shading, the light on the edges (cheap, drawn each time)."""
         if self.flash > 0:
@@ -5787,6 +5790,7 @@ class GlassCard(Gtk.Box):
             snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.28), 0, 0, 6, min(w, h) * 0.12)
             snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.55), 0, 2.5, 0, 2.5)  # the thick top edge, lit
             snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.22), 0, -2, 0, 3)  # light out at the bottom edge
+        self._glare(snap, w, h)
         if not self.frame:
             snap.pop()
             return
@@ -5805,6 +5809,97 @@ class GlassCard(Gtk.Box):
         edge = [_rgba(255, 255, 255, 0.30), _rgba(255, 255, 255, 0.12),
                 _rgba(255, 255, 255, 0.08), _rgba(255, 255, 255, 0.12)]  # top, right, bottom, left
         snap.append_border(rr, [1.0, 1.0, 1.0, 1.0], edge)
+
+
+def _glare_on(snap, cx, cy, rx, ry, turn, stops) -> None:
+    """A soft elliptical light (radial gradient) centred on (cx, cy), turned `turn` degrees."""
+    snap.save()
+    snap.translate(Graphene.Point().init(cx, cy))
+    snap.rotate(turn)
+    snap.append_radial_gradient(Graphene.Rect().init(-rx, -ry, 2 * rx, 2 * ry), Graphene.Point().init(0, 0),
+                                rx, ry, 0, 1, stops)
+    snap.restore()
+
+
+def glass_glare(snap, w: float, h: float, radius: float) -> None:
+    """The light a window catches on curved glass, as one sees it on a real drop or lens: a soft bright glare
+    near the top left corner (a sharper hot spot in it), and light gathered inside the bottom right edge (a
+    faint caustic). Sized by the corner's curve: strong on small round glass, faint on the big panels."""
+    m = min(w, h)
+    r = max(4.0, min(radius, m / 2))
+    big = m > 160  # the panels and menus: only a hint, the text stays readable
+    a = 0.22 if big else 0.5
+    rx, ry = max(r * 0.95, m * 0.16), max(r * 0.38, m * 0.06)
+    if big:
+        rx, ry = min(rx, 90.0), min(ry, 26.0)
+    cx, cy = r * 0.55 + rx * 0.55, r * 0.35 + ry * 0.6
+    _glare_on(snap, cx, cy, rx, ry, -24, [_stop(0.0, 255, 255, 255, a), _stop(0.45, 255, 255, 255, a * 0.45),
+                                          _stop(1.0, 255, 255, 255, 0.0)])
+    _glare_on(snap, cx - rx * 0.25, cy - ry * 0.1, rx * 0.32, ry * 0.4, -24,  # the hot spot
+              [_stop(0.0, 255, 255, 255, min(0.95, a * 1.8)), _stop(1.0, 255, 255, 255, 0.0)])
+    crx, cry = max(r * 0.8, m * 0.14), max(r * 0.3, m * 0.05)  # the caustic, bluish
+    if big:
+        crx, cry = min(crx, 80.0), min(cry, 20.0)
+    _glare_on(snap, w - r * 0.45 - crx * 0.55, h - r * 0.3 - cry * 0.7, crx, cry, -24,
+              [_stop(0.0, 225, 240, 255, a * 0.5), _stop(1.0, 225, 240, 255, 0.0)])
+
+
+class DropGlass(GlassCard):
+    """The weather's humidity: a drop of water made of the app's glass, blue-tinted, bending what's behind it
+    like the buttons (magnifying), lit at its rim, a glare on it."""
+
+    def __init__(self, behind: list, **kw):
+        super().__init__(behind, **kw)
+        self.mag = 1.45
+        self.color = (60, 150, 255, 0.28)
+        self.depth = False
+        self.set_can_target(False)
+
+    def do_size_allocate(self, width, height, baseline):
+        self.radius = width / 2
+        Gtk.Box.do_size_allocate(self, width, height, baseline)
+
+    def _glare(self, snap, w: float, h: float) -> None:
+        """On the drop's round body (its tip is too narrow): a soft glare up left, a hot spot in it, the light
+        gathered at the bottom right inside."""
+        r = w / 2
+        cy = h - r
+        _glare_on(snap, r * 0.72, cy - r * 0.38, r * 0.42, r * 0.22, -35,
+                  [_stop(0.0, 255, 255, 255, 0.75), _stop(0.5, 255, 255, 255, 0.3), _stop(1.0, 255, 255, 255, 0.0)])
+        _glare_on(snap, r * 0.66, cy - r * 0.42, r * 0.14, r * 0.09, -35,
+                  [_stop(0.0, 255, 255, 255, 0.98), _stop(1.0, 255, 255, 255, 0.0)])
+        _glare_on(snap, r * 1.25, cy + r * 0.55, r * 0.5, r * 0.2, -30,
+                  [_stop(0.0, 200, 235, 255, 0.55), _stop(1.0, 200, 235, 255, 0.0)])
+
+    @staticmethod
+    def path(w: float, h: float):
+        r = w / 2
+        cy = h - r  # the round body's centre
+        k = 0.5523 * r
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(r, 0)
+        pb.cubic_to(r + w * 0.08, h * 0.18, w, cy - r * 0.9, w, cy)
+        pb.cubic_to(w, cy + k, r + k, h, r, h)
+        pb.cubic_to(r - k, h, 0, cy + k, 0, cy)
+        pb.cubic_to(0, cy - r * 0.9, r - w * 0.08, h * 0.18, r, 0)
+        pb.close()
+        return pb.to_path()
+
+    def do_snapshot(self, snap) -> None:
+        w, h = self.get_width(), self.get_height()
+        if w < 4 or h < 4:
+            return
+        path = self.path(w, h)
+        snap.push_fill(path, Gsk.FillRule.WINDING)
+        GlassCard.do_snapshot(self, snap)
+        snap.pop()
+        # its own rim, the drop's shape: lit at the top left, in shade at the bottom right
+        snap.push_stroke(path, Gsk.Stroke.new(max(1.0, w * 0.045)))
+        snap.append_linear_gradient(Graphene.Rect().init(0, 0, w, h), Graphene.Point().init(0, 0),
+                                    Graphene.Point().init(w, h),
+                                    [_stop(0.0, 255, 255, 255, 0.95), _stop(0.5, 200, 230, 255, 0.5),
+                                     _stop(1.0, 10, 30, 60, 0.7)])
+        snap.pop()
 
 
 class PillGlass(GlassCard):
@@ -7349,48 +7444,6 @@ def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
             "moon": moon, "place": place}
 
 
-def draw_drop(cr, size: float) -> None:
-    """A drop of water made of glass, centered on (0, 0), `size` tall: clear, a light rim at the top left, a
-    darker edge below, a glint and a bright caustic inside at the bottom."""
-    import cairo
-    k = size / 2
-    cr.save()
-    cr.scale(k, k)
-
-    def body():
-        cr.move_to(0, -1)
-        cr.curve_to(0.15, -0.6, 0.68, -0.15, 0.68, 0.32)
-        cr.arc(0, 0.32, 0.68, 0, math.pi)
-        cr.curve_to(-0.68, -0.15, -0.15, -0.6, 0, -1)
-        cr.close_path()
-    body()
-    g = cairo.LinearGradient(0, -1, 0, 1)
-    g.add_color_stop_rgba(0, 0.85, 0.95, 1.0, 0.10)
-    g.add_color_stop_rgba(1, 0.55, 0.80, 1.0, 0.32)
-    cr.set_source(g)
-    cr.fill_preserve()
-    rim = cairo.LinearGradient(-0.7, -0.6, 0.7, 1.0)  # lit from the top left, darker towards the bottom right
-    rim.add_color_stop_rgba(0, 1, 1, 1, 0.95)
-    rim.add_color_stop_rgba(0.55, 0.75, 0.88, 1.0, 0.55)
-    rim.add_color_stop_rgba(1, 0.05, 0.15, 0.30, 0.75)
-    cr.set_source(rim)
-    cr.set_line_width(0.09)
-    cr.stroke()
-    cr.save()  # the glint
-    cr.translate(-0.28, 0.05)
-    cr.rotate(0.35)
-    cr.scale(0.11, 0.30)
-    cr.arc(0, 0, 1, 0, 2 * math.pi)
-    cr.restore()
-    cr.set_source_rgba(1, 1, 1, 0.85)
-    cr.fill()
-    cr.set_line_width(0.07)  # the caustic: light gathered at the bottom, inside
-    cr.set_source_rgba(0.85, 0.97, 1.0, 0.8)
-    cr.arc(0, 0.32, 0.48, math.radians(25), math.radians(120))
-    cr.stroke()
-    cr.restore()
-
-
 class WeatherView(Gtk.Widget):
     """The weather beside the logo, in one row, pictures and numbers only: the sky (the sun, clouds, rain… as
     colored emoji; on a clear night the moon, drawn as it is in the sky there), the temperature, the day's
@@ -7438,8 +7491,8 @@ class WeatherView(Gtk.Widget):
         # the numbers as tall as 60 % of it at most, all of it as wide as the room at most
         a_ink, b_ink = self._layout(self.info["temps"], 100)[1], self._layout(self.info["hum"], 100)[1]
         tall = max(a_ink.height, b_ink.height)
-        px = 100 * h * 0.6 / max(1, tall)
-        gap = h * 0.22
+        px = 100 * h * 0.74 / max(1, tall)
+        gap = h * 0.14
         for _ in range(2):
             scale = px / 100
             drop = tall * scale * 1.15
@@ -7493,10 +7546,13 @@ class WeatherView(Gtk.Widget):
                 snap.translate(Graphene.Point().init(icon * 0.45 - ink.x, h * 0.5 - ink.y))
                 snap.append_layout(lay, _rgba(255, 255, 255, 1))
                 snap.restore()
-        drop, x = P["drop"]
-        cr = snap.append_cairo(Graphene.Rect().init(x - 2, (h - drop) / 2 - 2, drop + 4, drop + 4))
-        cr.translate(x + drop * 0.36, h / 2)
-        draw_drop(cr, drop)
+
+    def drop_rect(self):
+        """Where the glass drop goes (x, y, w, h) in its coordinates: the window puts a DropGlass there."""
+        if not self.parts:
+            return None
+        drop, x = self.parts["drop"]
+        return x, (self.room[1] - drop) / 2, drop * 0.72, drop
 
 
 class FitText(Gtk.Widget):
@@ -8612,6 +8668,12 @@ class Window(Adw.ApplicationWindow):
         # the weather beside the logo (over the header's empty middle; not clickable)
         self.weather_view = WeatherView(halign=Gtk.Align.START, valign=Gtk.Align.START, visible=False)
         overlay.add_overlay(self.weather_view)
+        self.weather_drop = DropGlass([(self.backdrop, 0.45), (self.cover, 0.0)], halign=Gtk.Align.START,
+                                      valign=Gtk.Align.START, visible=False)
+        self.weather_drop.scrim = scrim
+        self.backdrop.watchers.append(self.weather_drop)
+        self.cover.watchers.append(self.weather_drop)
+        overlay.add_overlay(self.weather_drop)
 
         self.set_content(overlay)
         self._apply_scale()
@@ -9352,18 +9414,21 @@ class Window(Adw.ApplicationWindow):
             return
         cover, W = self.cover_rect(), self.get_width()
         ok_l, lb = self.logo.compute_bounds(self)
+        drop = self.weather_drop
         if not (ok_l and view.lines and self.app.settings.get("weather", True)):
             view.set_visible(False)
+            drop.set_visible(False)
             return
         x0 = lb.get_x() + lb.get_width() + self.WEATHER_GAP
         y0 = max(6.0, lb.get_y())
         right = (cover[0] - self.INFO_GAP) if cover else W * 0.45
         # the logo's band and a little more: the song info starts below the header the logo is in (its box may
         # start higher than its letters: not the limit, or there'd be no room at all)
-        h = lb.get_height() * 1.12
+        h = lb.get_height() * 1.2
         w = right - x0
         if w < 90 or h < 16:
             view.set_visible(False)
+            drop.set_visible(False)
             print(f"Rádio Beat: počasí skryto (místo {w:.0f}×{h:.0f} px)", file=sys.stderr) \
                 if getattr(self, "_weather_said", None) != (round(w), round(h)) else None
             self._weather_said = (round(w), round(h))
@@ -9372,6 +9437,12 @@ class Window(Adw.ApplicationWindow):
         view.set_margin_top(int(y0))
         view.set_room(int(w), int(h))
         view.set_visible(True)
+        r = view.drop_rect()
+        if r:
+            drop.set_margin_start(int(x0 + r[0]))
+            drop.set_margin_top(int(y0 + r[1]))
+            drop.set_size_request(max(4, int(r[2])), max(4, int(r[3])))
+        drop.set_visible(bool(r))
 
     def show_weather(self, info: dict | None) -> None:
         beat = self.app.settings.get("font", "beat") == "beat" and self.app.fonts_ok
@@ -10098,6 +10169,7 @@ class Window(Adw.ApplicationWindow):
         self.look_css.load_from_data(css.encode())
         waters = [g for w in getattr(self, "waters", []) for g in (w.body, w.neck)]
         pill = [self.quality_pill] if getattr(self, "quality_pill", None) else []  # (it was always at full: black)
+        pill += [self.weather_drop] if getattr(self, "weather_drop", None) else []
         for card in (self.show_card, *self.discs, *self.head_glass, *waters, *pill):
             card.shade = k
             card.queue_draw()
