@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.8"
+APP_VERSION = "0.25.9"
 
 import collections
 import ctypes
@@ -5397,6 +5397,8 @@ class GlassCard(Gtk.Box):
         """Where the window starts in its coordinates, when the falling motifs are seen through it."""
         return False, None
 
+    SNOW_FAINT = 0.4  # the falling motifs behind glass this faint: the menus' and panels' text stays readable
+
     def _snow_through(self, snap, w: float, h: float) -> None:
         """The falling motifs seen through it: magnified like its middle, fading out towards the edges, where
         those just beyond are mirrored in the rim; drawn every frame over the lens."""
@@ -5413,11 +5415,11 @@ class GlassCard(Gtk.Box):
         # all over it, fading out only towards the edges (into the rim's mirror), not cut off at the rim: each
         # fainter by how near its edge it's seen (magnified about the middle); no masks (each one a picture the
         # renderer draws apart every frame: a third of the work at 60 Hz)
-        f, mag = max(1.0, m * 0.7), self.mag
+        f, mag, faint = max(1.0, m * 0.7), self.mag, self.SNOW_FAINT
 
         def middle(fx, fy):
             px, py = w / 2 + (fx - gx - w / 2) * mag, h / 2 + (fy - gy - h / 2) * mag
-            return max(0.0, min(1.0, min(px, w - px, py, h - py) / f))
+            return faint * max(0.0, min(1.0, min(px, w - px, py, h - py) / f))
         snap.save()
         snap.translate(Graphene.Point().init(w / 2, h / 2))
         snap.scale(mag, mag)
@@ -5431,7 +5433,7 @@ class GlassCard(Gtk.Box):
         reach = m / squeeze
 
         def beyond(d):
-            return 0.95 * max(0.0, 1.0 - max(0.0, d) / reach)
+            return 0.95 * faint * max(0.0, 1.0 - max(0.0, d) / reach)
         for band, flip, view, fade in (  # (view: those beyond that edge, on the window)
                 ((0, 0, w, m), (0, 0, 1, -squeeze), (gx - e, gy - e, w + 2 * e, e + 2),
                  lambda fx, fy: beyond(gy - fy)),  # above the top edge

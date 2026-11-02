@@ -4,6 +4,7 @@
 
 ## 0.25 — Padající ozdoby
 
+- **0.25.9** (2026-11-02) Padající ozdoby za sklem všech nabídek a panelů slabší (asi na 40 %): text v nich je čitelnější, okno mimo sklo beze změny
 - **0.25.8** (2026-11-02) Opraveno rozbité vytížení GPU u posledního vylepšeného obrázku („vytížení GPU 7vytížení GPU 7 %“ místo „vytížení GPU 77 %“); už rozbité záznamy se zobrazí správně
 - **0.25.7** (2026-11-02) Úspornější padající ozdoby (každý snímek spočítané jednou pro okno i všechna skla, sklo kreslí jen ty, které ukazuje, bez masek), aby stačily i na 120–165 Hz; otevření nabídky kvality a dne bez zaškobrtnutí: sklo snímá jen okolí nabídky, ne celé okno (pětina práce); GPU sklo se zahřeje hned po spuštění, ne až při prvním otevření
 - **0.25.6** (2026-11-02) Nabídka kvality přesně mezi pravým okrajem obalu a pravým okrajem obrazovky (s mezerou z obou stran)
