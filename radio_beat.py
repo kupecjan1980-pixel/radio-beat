@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.0"
+APP_VERSION = "0.26.1"
 
 import collections
 import ctypes
@@ -8529,7 +8529,7 @@ class Window(Adw.ApplicationWindow):
         self.weather_row.set_active(self.app.settings.get("weather", True))
         self.weather_row.connect("notify::active", lambda r, _: self.app.set_weather(on=r.get_active()))
         group.add(self.weather_row)
-        self.weather_place_row = Adw.ComboRow(title="Místo pro počasí",
+        self.weather_place_row = Adw.ComboRow(title="Místo pro počasí", use_subtitle=True,
                                               model=Gtk.StringList.new([p[1] for p in WEATHER_PLACES]))
         keys = [p[0] for p in WEATHER_PLACES]
         now = self.app.settings.get("weather_place", "oprechtice")
@@ -9160,18 +9160,21 @@ class Window(Adw.ApplicationWindow):
             return
         cover, W = self.cover_rect(), self.get_width()
         ok_l, lb = self.logo.compute_bounds(self)
-        ok_i, ib = self.info.compute_bounds(self)
         if not (ok_l and view.lines and self.app.settings.get("weather", True)):
             view.set_visible(False)
             return
         x0 = lb.get_x() + lb.get_width() + self.WEATHER_GAP
         y0 = max(6.0, lb.get_y())
         right = (cover[0] - self.INFO_GAP) if cover else W * 0.45
-        below = ib.get_y() - self.WEATHER_GAP if ok_i else y0 + lb.get_height()
-        h = min(below - y0, lb.get_height() * 1.5)
+        # the logo's band: the song info starts below the header the logo is in (its box may start a little
+        # higher than its letters: not the limit, or there'd be no room at all)
+        h = lb.get_height()
         w = right - x0
-        if w < 90 or h < 20:
+        if w < 90 or h < 16:
             view.set_visible(False)
+            print(f"Rádio Beat: počasí skryto (místo {w:.0f}×{h:.0f} px)", file=sys.stderr) \
+                if getattr(self, "_weather_said", None) != (round(w), round(h)) else None
+            self._weather_said = (round(w), round(h))
             return
         view.set_margin_start(int(x0))
         view.set_margin_top(int(y0))

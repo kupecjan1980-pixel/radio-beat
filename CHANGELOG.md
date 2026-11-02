@@ -4,6 +4,7 @@
 
 ## 0.26 — Počasí
 
+- **0.26.1** (2026-11-02) Počasí se opravdu ukáže vedle loga (místo pro ně se počítalo od rámečku informací o skladbě, který začíná výš než jejich písmena: vyšlo nic); v nastavení je vybrané místo vidět celé (pod nadpisem)
 - **0.26.0** (2026-11-02) Počasí vedle loga vlevo nahoře (mezi logem a obalem, nad informacemi o skladbě, od horního okraje s mezerou): barevná obloha (slunce, slunce za mrakem, déšť…, v noci Měsíc v jeho fázi), teplota, nejnižší a nejvyšší za den, vlhkost, popis, místo a fáze Měsíce; místo v nastavení (Oprechtice, Ostrava-Přívoz, Ostrava-Poruba, Praha; výchozí Oprechtice); data z Open-Meteo, každých 20 minut
 
 ## 0.25 — Padající ozdoby
