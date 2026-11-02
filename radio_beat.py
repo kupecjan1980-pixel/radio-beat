@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.7"
+APP_VERSION = "0.26.8"
 
 import collections
 import ctypes
@@ -7631,6 +7631,102 @@ class WeatherView(Gtk.Widget):
         return x, (self.room[1] - drop) / 2, drop * 0.72, drop
 
 
+def moon_next(lat: float, lon: float, t: float = None) -> tuple:
+    """(time, moon_sky at it) of the moon's next main phase (new, first quarter, full, last quarter): its
+    elongation passing the next multiple of 90°, found hour by hour, then to the minute."""
+    t = time.time() if t is None else t
+    e0 = moon_sky(lat, lon, t)["elong"]
+    goal = (math.floor(e0 / 90) + 1) * 90 % 360
+
+    def past(tt):
+        return (moon_sky(lat, lon, tt)["elong"] - goal) % 360 < 180
+    hi = t
+    for _ in range(24 * 9):
+        hi += 3600
+        if past(hi):
+            break
+    lo = hi - 3600
+    while hi - lo > 60:
+        mid = (lo + hi) / 2
+        lo, hi = (lo, mid) if past(mid) else (mid, hi)
+    m = moon_sky(lat, lon, hi)
+    m["k"] = (1 - math.cos(math.radians(goal))) / 2  # exactly that phase
+    m["name"] = {0: "nov", 90: "první čtvrť", 180: "úplněk", 270: "poslední čtvrť"}[goal]
+    return hi, m
+
+
+class MoonView(Gtk.Widget):
+    """Left of the 'i' button: the moon now (as it is in the sky from the weather's place), an arrow, and its next
+    main phase (drawn north up, as one knows it: waxing lit on the right, waning on the left), with the day it
+    comes when there's room."""
+
+    def __init__(self, **kw):
+        super().__init__(can_target=False, **kw)
+        self.room, self.now, self.next, self.when = (0, 0), None, None, 0.0
+
+    def set_moon(self, now: dict, nxt: dict, when: float) -> None:
+        self.now, self.next, self.when = now, nxt, when
+        self.queue_draw()
+
+    def set_room(self, w: int, h: int) -> None:
+        if (w, h) != self.room:
+            self.room = (w, h)
+            self.queue_resize()
+            self.queue_draw()
+
+    def do_measure(self, orientation, for_size):
+        n = self.room[0] if orientation == Gtk.Orientation.HORIZONTAL else self.room[1]
+        return n, n, -1, -1
+
+    def need(self, h: float) -> float:
+        return h * (0.88 * 2 + 0.75 + 0.2)
+
+    def do_snapshot(self, snap) -> None:
+        w, h = self.room
+        if not (self.now and self.next) or w < 20 or h < 10:
+            return
+        rad = h * 0.42
+        x = w - self.need(h)  # right-aligned, beside the button
+        date = time.strftime("%-d. %-m.", time.localtime(self.when))
+        lay = self.create_pango_layout(date)
+        desc = Pango.FontDescription.from_string("Oswald Bold")
+        desc.set_absolute_size(h * 0.36 * Pango.SCALE)
+        lay.set_font_description(desc)
+        ink = lay.get_pixel_extents()[1]
+        show_date = x - ink.width - h * 0.15 >= 0
+        if show_date:
+            x -= ink.width + h * 0.15
+        cr = snap.append_cairo(Graphene.Rect().init(0, 0, w, h))
+        cr.translate(x + rad + h * 0.04, h / 2)
+        draw_moon(cr, rad, self.now)
+        # the arrow
+        cr.translate(rad + h * 0.12, 0)
+        a = h * 0.5
+        cr.set_line_width(max(1.5, h * 0.07))
+        cr.set_line_cap(1)
+        cr.set_source_rgba(0, 0, 0, 0.6)
+        for dx, dy, col in ((-1, 1.5, (0, 0, 0, 0.6)), (0, 0, (1, 1, 1, 0.9))):
+            cr.set_source_rgba(*col)
+            cr.move_to(dx, dy)
+            cr.line_to(a + dx, dy)
+            cr.move_to(a - h * 0.16 + dx, -h * 0.14 + dy)
+            cr.line_to(a + dx, dy)
+            cr.line_to(a - h * 0.16 + dx, h * 0.14 + dy)
+            cr.stroke()
+        cr.translate(a + h * 0.12 + rad, 0)
+        canon = dict(self.next, q=0.0)  # north up
+        draw_moon(cr, rad, canon)
+        if show_date:
+            shadow = Gsk.Shadow()
+            shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.9), -1, 2, 3
+            snap.push_shadow([shadow])
+            snap.save()
+            snap.translate(Graphene.Point().init(w - ink.width - ink.x, (h - ink.height) / 2 - ink.y))
+            snap.append_layout(lay, _rgba(255, 255, 255, 0.95))
+            snap.restore()
+            snap.pop()
+
+
 class FitText(Gtk.Widget):
     """One line of small text (the status) as big as fits its room, no bigger than MAX_PT, in the middle of it."""
 
@@ -8750,6 +8846,8 @@ class Window(Adw.ApplicationWindow):
         self.backdrop.watchers.append(self.weather_drop)
         self.cover.watchers.append(self.weather_drop)
         overlay.add_overlay(self.weather_drop)
+        self.moon_view = MoonView(halign=Gtk.Align.START, valign=Gtk.Align.START, visible=False)
+        overlay.add_overlay(self.moon_view)
 
         self.set_content(overlay)
         self._apply_scale()
@@ -8867,6 +8965,11 @@ class Window(Adw.ApplicationWindow):
         self.weather_place_row.connect("notify::selected",
                                        lambda r, _: self.app.set_weather(place=keys[r.get_selected()]))
         group.add(self.weather_place_row)
+        moon_row = Adw.SwitchRow(title="Měsíc vlevo od tlačítka ⓘ", subtitle_lines=0,
+                                 subtitle="Jak je teď vidět z vybraného místa, šipka a jeho příští fáze s datem")
+        moon_row.set_active(self.app.settings.get("moon", True))
+        moon_row.connect("notify::active", lambda r, _: self.app.set_weather(moon=r.get_active()))
+        group.add(moon_row)
         auto_up = Adw.SwitchRow(title="Automatické aktualizace",
                                 subtitle="Každých 5 minut zkontroluje novou verzi, nainstaluje ji a spustí se znovu",
                                 subtitle_lines=0)
@@ -9478,6 +9581,7 @@ class Window(Adw.ApplicationWindow):
             l.set_size_request(-1, 0 if on else -1)
         self.info_stack.set_visible(on)
         self._place_weather()
+        self._place_moon()
         return False
 
     WEATHER_GAP = 14  # from the logo, the cover and the song info
@@ -9519,6 +9623,40 @@ class Window(Adw.ApplicationWindow):
             drop.set_margin_top(int(y0 + r[1]))
             drop.set_size_request(max(4, int(r[2])), max(4, int(r[3])))
         drop.set_visible(bool(r))
+
+    def _place_moon(self) -> None:
+        """Left of the 'i' button, as tall as the logo's band, from the cover's right edge (a gap) to the button:
+        never over the cover, the date below or the screen's top edge."""
+        view = getattr(self, "moon_view", None)
+        if view is None:
+            return
+        cover = self.cover_rect()
+        tiles = [t for t in self.head_glass if t.get_mapped()]
+        boxes = [b for ok, b in (t.compute_bounds(self) for t in tiles) if ok]
+        ok_l, lb = self.logo.compute_bounds(self)
+        if not (boxes and ok_l and view.now and self.app.settings.get("moon", True)):
+            view.set_visible(False)
+            return
+        btn = min(boxes, key=lambda b: b.get_x())
+        h = min(lb.get_height() * 1.2, btn.get_height() * 1.1)
+        y0 = max(6.0, btn.get_y() + (btn.get_height() - h) / 2)
+        left = (cover[2] + self.INFO_GAP) if cover else self.get_width() * 0.55
+        x1 = btn.get_x() - self.WEATHER_GAP
+        w = x1 - left
+        if w < view.need(h) or h < 16:
+            view.set_visible(False)
+            return
+        view.set_margin_start(int(left))
+        view.set_margin_top(int(y0))
+        view.set_room(int(w), int(h))
+        view.set_visible(True)
+
+    def show_moon(self, now: dict | None, nxt: dict | None, when: float) -> None:
+        if now and nxt:
+            self.moon_view.set_moon(now, nxt, when)
+        else:
+            self.moon_view.now = None
+        self._place_moon()
 
     def show_weather(self, info: dict | None) -> None:
         beat = self.app.settings.get("font", "beat") == "beat" and self.app.fonts_ok
@@ -10658,7 +10796,9 @@ class App(Adw.Application):
                 w.unfullscreen()
 
     # updates / tray placement
-    def set_weather(self, on: bool = None, place: str = None) -> None:
+    def set_weather(self, on: bool = None, place: str = None, moon: bool = None) -> None:
+        if moon is not None:
+            self.settings["moon"] = moon
         if on is not None:
             self.settings["weather"] = on
         if place is not None:
@@ -10667,7 +10807,15 @@ class App(Adw.Application):
         self.weather_tick()
 
     def weather_tick(self) -> None:
-        """The weather fetched anew (in a thread), then shown beside the logo."""
+        """The weather fetched anew (in a thread), then shown beside the logo; the moon (now, and its next phase)
+        worked out for the same place."""
+        spot = weather_spot(self.settings.get("weather_place", "oprechtice"))
+        if self.win:
+            if self.settings.get("moon", True):
+                when, nxt = moon_next(spot[2], spot[3])
+                self.win.show_moon(moon_sky(spot[2], spot[3]), nxt, when)
+            else:
+                self.win.show_moon(None, None, 0)
         if not self.settings.get("weather", True):
             if self.win:
                 self.win.show_weather(None)

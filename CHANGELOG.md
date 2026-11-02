@@ -4,6 +4,7 @@
 
 ## 0.26 — Počasí
 
+- **0.26.8** (2026-11-03) Měsíc vlevo od tlačítka ⓘ (mezi obalem a tlačítky, nad datem): jak je teď vidět z vybraného místa, šipka a jeho příští fáze (nov, první čtvrť, úplněk, poslední čtvrť) s datem, když je místo; vypínač v nastavení
 - **0.26.7** (2026-11-03) Den japonské kultury (3. listopadu) jako zvláštní den s vlastními padajícími ozdobami, napůl s podzimními: katany, samurajské masky, sakury a japonské vlajky
 - **0.26.6** (2026-11-03) Počasí bez °C a ° (jen čísla a šipky, % zůstává), kapka menší: čísla větší
 - **0.26.5** (2026-11-03) Čísla počasí tučná a vyšší (protažená do výšky jako informace o skladbě, šířku hlídá okraj obalu), kapka stejně vysoká jako čísla; odlesk na velkém skle panelů a nabídek výraznější (dlouhá záře vlevo nahoře, světlo vpravo dole)
