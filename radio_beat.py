@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.2"
+APP_VERSION = "0.25.3"
 
 import collections
 import ctypes
@@ -5335,7 +5335,7 @@ class GlassCard(Gtk.Box):
     def _lens_key(self, w: float, h: float):
         """What the lens shows depends on: which pictures, where they lie, the glass's size and shape."""
         key = [w, h, self.radius, self.mag, self.sharp_bars, self.edge_mirror,
-               TEXT_MAP["version"] if self.edge_mirror else 0]
+               TEXT_MAP["version"] if self.edge_mirror else 0, getattr(self, "_tex_version", None)]
         for view, _ in self.behind:
             for wdg in (view, view.get_parent()):
                 ok, p = self._where(wdg)
@@ -5434,11 +5434,14 @@ class GlassCard(Gtk.Box):
             ftex, box = flat
             g = self._gpu
             if g.get("flat") is not ftex:
+                t0 = time.perf_counter()
                 old = g.get("src", 0)
                 if old and g.get("size") != (ftex.get_width(), ftex.get_height()):
                     GPU.forget(old)
                     old = 0
                 g.update(src=GPU.upload(ftex, old), flat=ftex, size=(ftex.get_width(), ftex.get_height()), out=None)
+                took = time.perf_counter() - t0  # (the live window's pictures: how often they can be afforded)
+                self._live_cost = took if not getattr(self, "_live_cost", 0) else 0.7 * self._live_cost + 0.3 * took
             key = (w, h, k, self.radius, round(self.mag, 4), rx, ry, self.curve, lens, box.get_x(), box.get_y())
             if g.get("key") != key or g.get("out") is None:
                 u = {"w": w, "h": h, "box": (box.get_x(), box.get_y(), box.get_width(), box.get_height()),
@@ -5451,6 +5454,32 @@ class GlassCard(Gtk.Box):
             GPU.ok, GPU.why = False, f"selhalo ({e})"
             print("Rádio Beat: GPU sklo vypnuto:", e, file=sys.stderr)
             return None
+
+    LIVE_FPS = 15  # the window seen through it, moving (the falling motifs): pictured anew this often at most
+
+    def _live(self) -> None:
+        """What's on the window behind it changed: pictured anew, at most LIVE_FPS times a second (each time a
+        picture taken off the graphics card and put back for the lens: ~12 ms), once a second without the GPU
+        (the lens built bit by bit)."""
+        if getattr(self, "_late", None):
+            return
+        gap = 1.0 / self.LIVE_FPS if EFFECTS["gpu"] and GPU.ok is not False else 1.0
+        gap = max(gap, 4 * getattr(self, "_live_cost", 0.0))  # a quarter of a CPU core at most (big glass at 4K)
+        wait = gap - (time.monotonic() - getattr(self, "_live_at", 0.0))
+        if wait <= 0:
+            self._live_now()
+        else:
+            self._late = GLib.timeout_add(max(1, int(wait * 1000)), self._live_late)
+
+    def _live_now(self) -> None:
+        self._live_at = time.monotonic()
+        self._tex_version += 1
+        self.queue_draw()
+
+    def _live_late(self) -> bool:
+        self._late = None
+        self._live_now()
+        return False
 
     def _what_behind(self) -> tuple:
         """Which pictures (and which lettering map) a lens shows."""
@@ -5655,18 +5684,6 @@ class MenuGlass(GlassCard):
         self._tex_version = 0  # the window's content changed this many times (a new picture of it then)
         self._tex_key = None
         self.connect("unmap", lambda *_: setattr(self, "_tex", None))  # (closed: its picture let go)
-        # the falling motifs still while it's open (it pictures the window anew whenever that changes)
-        self.connect("map", lambda *_: self._still(True))
-        self.connect("unmap", lambda *_: self._still(False))
-
-    shown = 0  # menus open now
-
-    def _still(self, on: bool) -> None:
-        MenuGlass.shown = max(0, MenuGlass.shown + (1 if on else -1))
-        snow = getattr(getattr(self.win, "scrim", None), "snow", None)
-        if snow is not None and snow.frozen != (MenuGlass.shown > 0):
-            snow.frozen = MenuGlass.shown > 0
-            snow.update()
 
     def _where(self, widget):
         pop = self.get_native()
@@ -5817,9 +5834,10 @@ class MenuGlass(GlassCard):
             snap.pop()
 
     def _window_changed(self, *_) -> None:
-        self._tex_version += 1
         if self.get_mapped():
-            self.queue_draw()
+            self._live()
+        else:
+            self._tex_version += 1  # (pictured anew when it opens)
 
     def do_snapshot(self, snap) -> None:
         self.shade = 1.0  # always readable, whatever Background shade is
@@ -5868,7 +5886,7 @@ SEASON_COLORS = {
     "spring": ("#f8bbd0", "#f48fb1", "#ffffff", "#e1bee7", "#fff59d", "#ffccbc", "#c5e1a5"),
     "summer": ("#ffd54f", "#ffb300", "#ff7043", "#4fc3f7", "#26c6da", "#81c784", "#fff176"),
 }
-SEASON_KINDS = {"autumn": ("maple", "maple", "leaf", "leaf", "leaf"), "winter": ("flake", "flake", "frost"),
+SEASON_KINDS = {"autumn": ("maple", "maple", "maple", "maple", "leaf"), "winter": ("flake", "flake", "frost"),
                 "spring": ("blossom", "blossom", "blossom", "bud", "sprig"), "summer": ("sun", "palm", "palm", "shell")}
 
 
@@ -7051,8 +7069,8 @@ class SnowFall:
     """The season's motifs (a special day's instead, Advent's half and half; in a season's last month more and
     more of the next one's) falling slowly like snow, each turning a little its own way, behind the date and
     time, the top buttons, the quality pill, the volume slider and the names: right of the cover, the window's
-    whole height. Drawn by the shaded panel (Scrim) over its shading, under the buttons and the slider; still
-    while a glass menu is open (it pictures the window: a moving one would be pictured again every frame)."""
+    whole height. Drawn by the shaded panel (Scrim) over its shading, under the buttons and the slider; seen
+    moving through the glass menus and panels too."""
 
     SPRITES = 24  # different pictures (each drawn once a day into a texture)
 
@@ -7065,7 +7083,6 @@ class SnowFall:
         self._tick = None
         self._last = None
         self._drawn = 0.0
-        self.frozen = False
 
     def set_area(self, area) -> None:
         if area != self.area:
@@ -7077,8 +7094,8 @@ class SnowFall:
             self.update()
 
     def update(self) -> None:
-        """Ticking only when it moves: on, animations on, seen, and no glass menu open."""
-        want = bool(EFFECTS["season"] and EFFECTS["anim"] and self.area and not self.frozen)
+        """Ticking only when it moves: on, animations on, with room."""
+        want = bool(EFFECTS["season"] and EFFECTS["anim"] and self.area)
         if want and self._tick is None:
             self._last = None
             self._tick = self.widget.add_tick_callback(self._step)
@@ -7418,6 +7435,85 @@ class Puddle(GlassCard):
         self.neck = neck
         self.reveal = 0.0
         self.frame = not neck  # the neck is water between the two: no edge of its own
+        self.win = None  # see_window(): what's on the window seen through it too, live
+        self._layers = None  # (version, texture, rect in the window)
+        self._tex_version = None
+
+    def see_window(self, win) -> None:
+        """Like the quality menu: through it not only the cover but what's on the window, as it moves: the
+        date and time, the falling motifs, the song info and the buttons (the top buttons: mirrored)."""
+        self.win, self._tex_version = win, 0
+        self._paints = []
+        for w in (win.scrim, win.clock, win.names, win.status_view):
+            paint = Gtk.WidgetPaintable.new(w)
+            paint.connect("invalidate-contents", self._layers_changed)
+            self._paints.append((w, paint))
+
+    def _layers_changed(self, *_) -> None:
+        if self.reveal > 0 and self.get_mapped():
+            self._live()
+
+    def _layers_texture(self):
+        """What's on the window around it (the glass's bend reaches a little past its edges), without the
+        shading under the buttons (the glass has that copied in already), at the screen's scale."""
+        win, native = self.win, self.get_native()
+        ok, b = self.compute_bounds(win)
+        if not ok or not native:
+            return None
+        W, H = win.get_width(), win.get_height()
+        mx, my = b.get_width() * 0.4 + 20, b.get_height() * 0.4 + 20
+        x0, y0 = max(0.0, b.get_x() - mx), max(0.0, b.get_y() - my)
+        x1, y1 = min(W, b.get_x() + b.get_width() + mx), min(H, b.get_y() + b.get_height() + my)
+        if x1 - x0 < 1 or y1 - y0 < 1:
+            return None
+        surf = native.get_surface()
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+        s = Gtk.Snapshot()
+        s.scale(k, k)
+        s.translate(Graphene.Point().init(-x0, -y0))
+        for w, paint in self._paints:
+            if not w.get_mapped():
+                continue
+            ok, p = w.compute_point(win, Graphene.Point().init(0, 0))
+            if not ok:
+                continue
+            if w is win.scrim:  # its falling motifs and what's on it, not its shading
+                w.snow.draw(s)
+                c = w.get_first_child()
+                while c is not None:
+                    ok, cp = c.compute_point(win, Graphene.Point().init(0, 0))
+                    if ok and c.get_mapped():
+                        s.save()
+                        s.translate(cp)
+                        Gtk.WidgetPaintable.new(c).snapshot(s, c.get_width(), c.get_height())
+                        s.restore()
+                    c = c.get_next_sibling()
+                continue
+            s.save()
+            s.translate(p)
+            paint.snapshot(s, w.get_width(), w.get_height())
+            s.restore()
+        node = s.to_node()
+        if node is None:
+            return None
+        rect = Graphene.Rect().init(x0, y0, x1 - x0, y1 - y0)
+        return native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, (x1 - x0) * k, (y1 - y0) * k)), rect
+
+    def _behind(self, snap, w: float, h: float, sx: float, sy: float) -> None:
+        GlassCard._behind(self, snap, w, h, sx, sy)
+        lay = self._layers
+        if not lay or not lay[1]:
+            return
+        ok, p = self.win.compute_point(self, Graphene.Point().init(0, 0))
+        if not ok:
+            return
+        tex, r = lay[1]
+        snap.save()
+        snap.translate(Graphene.Point().init(w / 2, h / 2))
+        snap.scale(sx, sy)
+        snap.translate(Graphene.Point().init(-w / 2, -h / 2))
+        snap.append_texture(tex, Graphene.Rect().init(p.x + r.get_x(), p.y + r.get_y(), r.get_width(), r.get_height()))
+        snap.restore()
 
     def _neck_path(self, w: float, h: float):
         """As wide as the button at the top, drawn in at the waist, spreading out into the body below:
@@ -7438,7 +7534,10 @@ class Puddle(GlassCard):
     def do_snapshot(self, snap) -> None:
         r = self.reveal
         if r <= 0:
+            self._layers = None
             return
+        if self.win is not None and (self._layers is None or self._layers[0] != self._tex_version):
+            self._layers = (self._tex_version, self._layers_texture())
         w, h = self.get_width(), self.get_height()
         if self.neck:
             snap.push_clip(Graphene.Rect().init(0, 0, w, max(1.0, h * r)))
@@ -7488,6 +7587,7 @@ class Water:
         body.edge_mirror = True  # its top and bottom edges mirror what lies beyond them, upside down
         # the top buttons and the quality pill (AAC 128 kbps) seen through its glass upside down, like KVALITA's
         body.mirrors = [*win.head_glass, win.quality_pill]
+        body.see_window(win)  # and the date and time, the falling motifs, the song info: live
         # its own scrolling stays its own: not the window's volume
         block = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         block.connect("scroll", lambda *_: True)
