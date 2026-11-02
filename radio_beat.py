@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.9"
+APP_VERSION = "0.25.10"
 
 import collections
 import ctypes
@@ -5397,7 +5397,7 @@ class GlassCard(Gtk.Box):
         """Where the window starts in its coordinates, when the falling motifs are seen through it."""
         return False, None
 
-    SNOW_FAINT = 0.4  # the falling motifs behind glass this faint: the menus' and panels' text stays readable
+    SNOW_FAINT = 1.0  # the falling motifs behind glass as bright as beside it (the glass darker instead)
 
     def _snow_through(self, snap, w: float, h: float) -> None:
         """The falling motifs seen through it: magnified like its middle, fading out towards the edges, where
@@ -5820,7 +5820,7 @@ class MenuGlass(GlassCard):
         self.paint = None  # the window's content, live
         self._tex = None
         self.cache_lens = False  # it shows the live window, a new texture each time anyway
-        self.tint = 0.42  # a little darker than the show card: the menu's small text stays readable
+        self.tint = 0.54  # darker than the show card: the menu's small text stays readable on a bright cover
         self.sharp_bars = True
         self.depth = False  # the popup's own shadow does it
         self._tex_version = 0  # the window's content changed this many times (a new picture of it then)
@@ -7666,6 +7666,7 @@ class Puddle(GlassCard):
     def __init__(self, behind: list, neck: bool = False, **kw):
         super().__init__(behind, **kw)
         self.neck = neck
+        self.tint = 0.52  # darker than the show card: the panels' small text readable on a bright, busy cover
         self.reveal = 0.0
         self.frame = not neck  # the neck is water between the two: no edge of its own
         self.win = None  # see_window(): what's on the window seen through it too, live
