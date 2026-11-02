@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.6"
+APP_VERSION = "0.25.7"
 
 import collections
 import ctypes
@@ -5406,48 +5406,43 @@ class GlassCard(Gtk.Box):
         squeeze = 0.6  # the rim shows what's beyond its edge squeezed: 1/0.6 as far out as it's wide
         e = m / squeeze + 2
         gx, gy = -o.x, -o.y  # where it lies on the window
-        # all over it, fading out only towards the edges (into the rim's mirror), not cut off at the rim
-        f = max(1.0, m * 0.7)
-        box = Graphene.Rect().init(0, 0, w, h)
-        for p0, p1, size in (((0, 0), (w, 0), w), ((0, 0), (0, h), h)):
-            snap.push_mask(Gsk.MaskMode.ALPHA)
-            snap.append_linear_gradient(box, Graphene.Point().init(*p0), Graphene.Point().init(*p1),
-                                        [_stop(0.0, 255, 255, 255, 0.0), _stop(min(0.45, f / size), 255, 255, 255, 1.0),
-                                         _stop(max(0.55, 1 - f / size), 255, 255, 255, 1.0),
-                                         _stop(1.0, 255, 255, 255, 0.0)])
-            snap.pop()
+        # all over it, fading out only towards the edges (into the rim's mirror), not cut off at the rim: each
+        # fainter by how near its edge it's seen (magnified about the middle); no masks (each one a picture the
+        # renderer draws apart every frame: a third of the work at 60 Hz)
+        f, mag = max(1.0, m * 0.7), self.mag
+
+        def middle(fx, fy):
+            px, py = w / 2 + (fx - gx - w / 2) * mag, h / 2 + (fy - gy - h / 2) * mag
+            return max(0.0, min(1.0, min(px, w - px, py, h - py) / f))
         snap.save()
         snap.translate(Graphene.Point().init(w / 2, h / 2))
-        snap.scale(self.mag, self.mag)
+        snap.scale(mag, mag)
         snap.translate(Graphene.Point().init(-w / 2, -h / 2))
-        snow.draw(snap, o.x, o.y, (gx, gy, w, h))
+        snow.draw(snap, o.x, o.y, (gx, gy, w, h), middle)
         snap.restore()
-        snap.pop()
-        snap.pop()
         if m < 2 or not EFFECTS.get("mirror", True):
             return
         # In the rim, those just beyond each edge mirrored (like the date and time there): upside down, the
         # nearest right at the edge, fading out inwards where the middle's magnified view takes over.
-        for band, flip, far, near, view in (  # (view: those beyond that edge, on the window)
-                ((0, 0, w, m), (0, 0, 1, -squeeze), (0, 0), (0, m), (gx - e, gy - e, w + 2 * e, e + 2)),  # above
-                ((0, h - m, w, m), (0, h * (1 + squeeze), 1, -squeeze), (0, h), (0, h - m),
-                 (gx - e, gy + h - 2, w + 2 * e, e + 2)),  # below the bottom edge
-                ((0, 0, m, h), (0, 0, -squeeze, 1), (0, 0), (m, 0), (gx - e, gy - e, e + 2, h + 2 * e)),  # left
-                ((w - m, 0, m, h), (w * (1 + squeeze), 0, -squeeze, 1), (w, 0), (w - m, 0),
-                 (gx + w - 2, gy - e, e + 2, h + 2 * e))):  # right of the right edge
-            rect = Graphene.Rect().init(*band)
-            snap.push_clip(rect)
-            snap.push_mask(Gsk.MaskMode.ALPHA)
-            snap.append_linear_gradient(rect, Graphene.Point().init(*far), Graphene.Point().init(*near),
-                                        [_stop(0.0, 255, 255, 255, 0.95), _stop(0.5, 255, 255, 255, 0.7),
-                                         _stop(1.0, 255, 255, 255, 0.0)])
-            snap.pop()
+        reach = m / squeeze
+
+        def beyond(d):
+            return 0.95 * max(0.0, 1.0 - max(0.0, d) / reach)
+        for band, flip, view, fade in (  # (view: those beyond that edge, on the window)
+                ((0, 0, w, m), (0, 0, 1, -squeeze), (gx - e, gy - e, w + 2 * e, e + 2),
+                 lambda fx, fy: beyond(gy - fy)),  # above the top edge
+                ((0, h - m, w, m), (0, h * (1 + squeeze), 1, -squeeze), (gx - e, gy + h - 2, w + 2 * e, e + 2),
+                 lambda fx, fy: beyond(fy - gy - h)),  # below the bottom edge
+                ((0, 0, m, h), (0, 0, -squeeze, 1), (gx - e, gy - e, e + 2, h + 2 * e),
+                 lambda fx, fy: beyond(gx - fx)),  # left of the left edge
+                ((w - m, 0, m, h), (w * (1 + squeeze), 0, -squeeze, 1), (gx + w - 2, gy - e, e + 2, h + 2 * e),
+                 lambda fx, fy: beyond(fx - gx - w))):  # right of the right edge
+            snap.push_clip(Graphene.Rect().init(*band))
             snap.save()
             snap.translate(Graphene.Point().init(flip[0], flip[1]))
             snap.scale(flip[2], flip[3])
-            snow.draw(snap, o.x, o.y, view)
+            snow.draw(snap, o.x, o.y, view, fade)
             snap.restore()
-            snap.pop()
             snap.pop()
 
     def _lens_key(self, w: float, h: float):
@@ -5883,7 +5878,21 @@ class MenuGlass(GlassCard):
                 s.restore()
         self._blur_card_text(s, content)
         node = s.to_node()
-        return native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, cw * k, ch * k)) if node else None
+        if node is None:
+            return None
+        # only around the glass (as far as its rim reaches, and then some), not the whole window: a fifth of
+        # the pixels to render, take off the graphics card and put back for the lens (opening it: a frame lost)
+        x0, y0, x1, y1 = 0.0, 0.0, cw, ch
+        ok, p = self._where(content)
+        w, h = self.get_width(), self.get_height()
+        if ok and w > 0 and h > 0:
+            mx, my = w * 0.6 + 48, h * 0.6 + 48
+            x0, y0 = max(0.0, math.floor(-p.x - mx)), max(0.0, math.floor(-p.y - my))
+            x1, y1 = min(cw, math.ceil(-p.x + w + mx)), min(ch, math.ceil(-p.y + h + my))
+            if x1 - x0 < 8 or y1 - y0 < 8:
+                x0, y0, x1, y1 = 0.0, 0.0, cw, ch
+        self._tex_rect = Graphene.Rect().init(x0, y0, x1 - x0, y1 - y0)
+        return native.get_renderer().render_texture(node, Graphene.Rect().init(x0 * k, y0 * k, (x1 - x0) * k, (y1 - y0) * k))
 
     def _blur_card_text(self, s, content) -> None:
         """Under the menu the show card is out of focus, glass, edges and text: what lies under it drawn
@@ -5927,8 +5936,10 @@ class MenuGlass(GlassCard):
     def _window(self, snap, win) -> None:
         """The window's picture; with edge mirrors also mirrored past its edges (the rim near the screen's edge
         shows no emptiness)."""
+        r = getattr(self, "_tex_rect", None) or Graphene.Rect().init(0, 0, win.get_width(), win.get_height())
         if not (self.edge_mirror and self._flat_mirror):
-            snap.append_texture(self._tex, win)
+            snap.append_texture(self._tex, Graphene.Rect().init(win.get_x() + r.get_x(), win.get_y() + r.get_y(),
+                                                                r.get_width(), r.get_height()))
             return
         x, y, ww, wh = win.get_x(), win.get_y(), win.get_width(), win.get_height()
         for mx in (-1, 0, 1):
@@ -5936,7 +5947,7 @@ class MenuGlass(GlassCard):
                 snap.save()
                 snap.translate(Graphene.Point().init(x + (2 * ww if mx == 1 else 0), y + (2 * wh if my == 1 else 0)))
                 snap.scale(-1 if mx else 1, -1 if my else 1)
-                snap.append_texture(self._tex, Graphene.Rect().init(0, 0, ww, wh))
+                snap.append_texture(self._tex, r)
                 snap.restore()
 
     BOTTOM_STRETCH = 2.2  # the bottom edge's mirror: what's below drawn this much taller (the slider is thin)
@@ -6002,7 +6013,9 @@ class MenuGlass(GlassCard):
     def do_snapshot(self, snap) -> None:
         self.shade = 1.0  # always readable, whatever Background shade is
         content = self.win.get_content()
-        key = (self._tex_version, content.get_width() if content else 0, content.get_height() if content else 0)
+        ok, p = self._where(content) if content else (False, None)
+        key = (self._tex_version, content.get_width() if content else 0, content.get_height() if content else 0,
+               (round(p.x), round(p.y), self.get_width(), self.get_height()) if ok else None)
         if self._tex is None or self._tex_key != key:  # the window as it is now (only when it changed)
             self._tex, self._tex_key = self._window_texture(), key
         GlassCard.do_snapshot(self, snap)
@@ -7246,6 +7259,9 @@ class SnowFall:
         self._tick = None
         self._last = None
         self.viewers: set = set()  # glass showing it (menus, panels): redrawn with it
+        self._frame = 0  # frames moved
+        self._node = (None, [])  # (key, [(x, y, reach, node, alpha)]): as they are this frame, built once a frame
+        self._tex_nodes = (None, [])  # (sprites, a render node of each)
 
     def set_area(self, area, field=None) -> None:
         field = (field or area) if area else None
@@ -7340,6 +7356,7 @@ class SnowFall:
             return True
         x, y, w, h = self.field
         base = self._base()
+        self._frame += 1
         for f in self.flakes:
             f["t"] += dt
             f["y"] += f["vy"] * dt
@@ -7356,9 +7373,10 @@ class SnowFall:
             GlassCard.own_redraw -= 1
         return True
 
-    def draw(self, snap, dx: float = 0.0, dy: float = 0.0, view=None) -> None:
+    def draw(self, snap, dx: float = 0.0, dy: float = 0.0, view=None, fade=None) -> None:
         """Into `snap`, shifted by (dx, dy) (the drawing widget isn't where the area's coordinates start): those
-        inside `view` (x, y, w, h; the area right of the cover by default; the glass: what it sees)."""
+        inside `view` (x, y, w, h; the area right of the cover by default; the glass: what it sees), each
+        fainter by fade(x, y) 0..1 if given (the glass's edges)."""
         if not EFFECTS["season"] or not self.area:
             return
         x, y, w, h = view or self.area
@@ -7375,26 +7393,50 @@ class SnowFall:
         while len(self.flakes) < want:
             self.flakes.append(self._sow(base, True))
         del self.flakes[want:]
+        nodes = []
+        Opacity, Turn = Gsk.OpacityNode.new, Gsk.TransformNode.new
+        for fx, fy, r, tex, tr, alpha in self._all():  # those inside it only: the renderer has less to do
+            if fx + r < x or fx - r > x + w or fy + r < y or fy - r > y + h:
+                continue
+            a = alpha * fade(fx, fy) if fade else alpha
+            if a > 0.02:  # (faded, then turned: the other way round each would be drawn apart first)
+                nodes.append(Turn(Opacity(tex, a), tr))
+        if not nodes:
+            return
         snap.save()
         snap.translate(Graphene.Point().init(dx, dy))
         snap.push_clip(Graphene.Rect().init(x, y, w, h))
-        for f in self.flakes:
-            tex, box, upright = self.sprites[f["sprite"] % len(self.sprites)]
-            fx = f["x"] + f["sway"] * math.sin(f["t"] * f["freq"] * 6.283 + f["phase"])
-            r = box * f["scale"] * 0.75  # (its picture turned: within this of where it is)
-            if fx + r < x or fx - r > x + w or f["y"] + r < y or f["y"] - r > y + h:
-                continue  # (outside: not drawn at all)
-            snap.save()
-            snap.translate(Graphene.Point().init(fx, f["y"]))
-            # pictures that stand (palms, candles, pumpkins): rocking a little, the rest turning round slowly
-            snap.rotate(18 * math.sin(f["t"] * f["freq"] * 4 + f["phase"]) if upright else f["angle"])
-            snap.scale(f["scale"], f["scale"])
-            snap.push_opacity(f["alpha"])
-            snap.append_texture(tex, Graphene.Rect().init(-box / 2, -box / 2, box, box))
-            snap.pop()
-            snap.restore()
+        group = Gsk.ContainerNode.new(nodes)
+        # as one group (drawn once, then put in place): turned pictures under the glass's round corners would
+        # otherwise each be drawn apart first, the renderer can't round them off turned (3x the work)
+        snap.append_node(Gsk.OpacityNode.new(group, 0.999) if fade else group)
         snap.pop()
         snap.restore()
+
+    def _all(self) -> list:
+        """[(x, y, reach, picture node, transform, alpha)]: each as it is now (moved, turned, sized), worked out once a
+        frame, whoever draws them (the window, and every glass up to five times: its middle and four mirrored
+        edges), each picking those it shows: at 165 Hz too (a frame is 6 ms)."""
+        key = (self._frame, len(self.flakes), id(self.sprites), self.field)
+        if self._node[0] == key:
+            return self._node[1]
+        sprites, n = self.sprites, len(self.sprites)
+        if self._tex_nodes[0] is not sprites:
+            self._tex_nodes = (sprites, [Gsk.TextureNode.new(t, Graphene.Rect().init(-b / 2, -b / 2, b, b))
+                                         for t, b, _ in sprites])
+        tex_nodes = self._tex_nodes[1]
+        P, T, sin = Graphene.Point, Gsk.Transform, math.sin
+        out = []
+        for f in self.flakes:
+            i = f["sprite"] % n
+            _, box, upright = sprites[i]
+            fx = f["x"] + f["sway"] * sin(f["t"] * f["freq"] * 6.283 + f["phase"])
+            # pictures that stand (palms, candles, pumpkins): rocking a little, the rest turning round slowly
+            turn = 18 * sin(f["t"] * f["freq"] * 4 + f["phase"]) if upright else f["angle"]
+            tr = T.new().translate(P().init(fx, f["y"])).rotate(turn).scale(f["scale"], f["scale"])
+            out.append((fx, f["y"], box * f["scale"] * 0.75, tex_nodes[i], tr, f["alpha"]))
+        self._node = (key, out)
+        return out
 
     def bytes(self) -> int:
         return sum(tex_bytes(t) for t, _, _ in self.sprites)
@@ -8462,6 +8504,28 @@ class Window(Adw.ApplicationWindow):
         pop.set_pointing_to(r)
         GLib.idle_add(lambda: (pop.get_child().queue_draw(), False)[1])
 
+    def _warm_glass(self) -> bool:
+        """Once, soon after start: a small piece of the window pictured, taken off the graphics card and bent
+        by the GPU lens, so their first time (shaders built, buffers set up: ~20 ms) isn't when a glass menu
+        or panel first opens (a stutter then)."""
+        try:
+            content, native = self.get_content(), self.get_native()
+            if not (EFFECTS["gpu"] and GPU.start() and content and native and content.get_width() > 0):
+                return False
+            s = Gtk.Snapshot()
+            Gtk.WidgetPaintable.new(content).snapshot(s, content.get_width(), content.get_height())
+            node = s.to_node()
+            if node is None:
+                return False
+            tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, 128, 128))
+            src = GPU.upload(tex)
+            GPU.lens(src, 64, 64, {"w": 64, "h": 64, "box": (0, 0, 128, 128), "radius": 16.0, "mag": 1.1,
+                                   "rx": 0.8, "ry": 0.8, "depth": 10.0, "curve": 3.0})
+            GPU.forget(src)
+        except Exception as e:  # (only a warm-up)
+            print("Rádio Beat: zahřátí skla:", e, file=sys.stderr)
+        return False
+
     def toggle_full(self) -> None:
         if self.is_fullscreen():
             self.unfullscreen()
@@ -9018,6 +9082,7 @@ class Window(Adw.ApplicationWindow):
         water.body.fresh()  # never an earlier picture's lens or mirror while it opens: drawn anew
         self.refresh_effects()
         GLib.timeout_add_seconds(3, lambda: (self.refresh_effects(), False)[1])  # the strips' memory, once built
+        GLib.timeout_add_seconds(4, self._warm_glass)
         water.show()
         if water is self.gear_water:  # from the top (a control taking the focus scrolled it a row down)
             GLib.idle_add(lambda: (self.menu_content.get_vadjustment().set_value(0), False)[1])

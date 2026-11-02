@@ -4,6 +4,7 @@
 
 ## 0.25 — Padající ozdoby
 
+- **0.25.7** (2026-11-02) Úspornější padající ozdoby (každý snímek spočítané jednou pro okno i všechna skla, sklo kreslí jen ty, které ukazuje, bez masek), aby stačily i na 120–165 Hz; otevření nabídky kvality a dne bez zaškobrtnutí: sklo snímá jen okolí nabídky, ne celé okno (pětina práce); GPU sklo se zahřeje hned po spuštění, ne až při prvním otevření
 - **0.25.6** (2026-11-02) Nabídka kvality přesně mezi pravým okrajem obalu a pravým okrajem obrazovky (s mezerou z obou stran)
 - **0.25.5** (2026-11-02) Za sklem nabídek a panelů víc padajících ozdob (padají za celým sklem, ne jen u data; k okrajům se jen pozvolna vytrácejí) a u okrajů skla zrcadlově odražené ty vedle něj, jako datum a čas; žádné cukání každou sekundu či dvě: sklo okno znovu nesnímá kvůli blikající dvojtečce času, jen když se opravdu něco změní
 - **0.25.4** (2026-11-02) Padající ozdoby plynule v plné snímkové frekvenci obrazovky (60 Hz a víc), i za sklem nabídek a panelů (kreslené do skla každý snímek, zvětšené jako jeho střed); pod sklem už žádné posunuté dvojníky: tlačítka a pilulka kvality jen zrcadlově, okraje bez starých kopií
