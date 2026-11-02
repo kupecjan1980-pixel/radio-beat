@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.27.1"
+APP_VERSION = "0.27.2"
 
 import collections
 import ctypes
@@ -7437,7 +7437,7 @@ class SeasonDecor:
     @staticmethod
     def _menpo(s, rng, size, color, _sea):
         """A samurai's lacquered face mask: red, fierce brows, dark eyes, a black moustache and white teeth."""
-        red = _hex(rng.choice(("#c62828", "#b71c1c", "#212121")), 0.97)
+        red = _hex(rng.choice(("#d32f2f", "#c62828", "#e53935")), 0.97)  # lacquered red, always
         SeasonDecor._oval(s, 0, 0, size * 0.32, size * 0.4, red)
         SeasonDecor._oval(s, 0, size * 0.33, size * 0.16, size * 0.1, red)  # the chin
         gold = _hex("#c9a227")
