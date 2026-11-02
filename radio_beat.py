@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.4"
+APP_VERSION = "0.25.5"
 
 import collections
 import ctypes
@@ -4829,6 +4829,38 @@ def draw_layers(s, layers, ref, skip=()) -> None:
         draw(w, paint)
 
 
+def widget_sig(w, out: list) -> None:
+    """What `w` and what's in it show, into `out`: compared before the glass pictures the window anew (a
+    picture of it is ~12 ms; asked for whenever anything seems changed, even when nothing visible did). Its
+    place, size, state, text and value; this app's own widgets' public state too (the clock's colon, blinking,
+    left out: SIG_SKIP)."""
+    if not w.get_visible():
+        out.append(None)
+        return
+    par = w.get_parent()
+    ok, b = w.compute_bounds(par) if par is not None else (False, None)
+    out += [type(w), w.get_mapped(), w.get_opacity(), int(w.get_state_flags()), tuple(w.get_css_classes()),
+            (round(b.get_x(), 1), round(b.get_y(), 1), round(b.get_width(), 1), round(b.get_height(), 1)) if ok else None]
+    if isinstance(w, Gtk.Label):
+        out.append(w.get_label())
+    elif isinstance(w, Gtk.Range):
+        out.append(w.get_value())
+    elif isinstance(w, Gtk.Image):
+        out += [w.get_icon_name(), w.get_paintable()]
+    elif isinstance(w, Gtk.Picture):
+        out.append(w.get_paintable())
+    if type(w).__module__ == __name__:
+        skip = getattr(w, "SIG_SKIP", ())
+        for k, v in vars(w).items():
+            if k[0] != "_" and k not in skip and not callable(v) and not isinstance(v, (dict, set)):
+                out.append((k, tuple(v) if isinstance(v, list) else v))
+    c = w.get_first_child()
+    while c is not None:
+        if not isinstance(c, (Gtk.Popover, Gtk.Native)):  # (menus hanging from it: their own surface)
+            widget_sig(c, out)
+        c = c.get_next_sibling()
+
+
 class GlassCard(Gtk.Box):
     """A liquid-glass panel: what's behind it (the backdrop and the cover) is
     not blurred but refracted, like through a lens: sharp and true in the
@@ -5362,8 +5394,8 @@ class GlassCard(Gtk.Box):
         return False, None
 
     def _snow_through(self, snap, w: float, h: float) -> None:
-        """The falling motifs seen through it: magnified like its middle, inside the rim (the rim squeezes
-        what's beyond; they'd look stuck on there), drawn every frame over the lens."""
+        """The falling motifs seen through it: magnified like its middle, fading out towards the edges, where
+        those just beyond are mirrored in the rim; drawn every frame over the lens."""
         snow = getattr(getattr(self, "win", None), "snow", None)
         if snow is None or not snow.area:
             return
@@ -5371,14 +5403,52 @@ class GlassCard(Gtk.Box):
         if not ok:
             return
         m = min(getattr(self, "_edge_reach", 0.0) * 0.8, w / 3, h / 3)
-        snap.push_rounded_clip(self._rounded(m, m, w - 2 * m, h - 2 * m, max(2.0, self.radius - m * 0.5)))
+        squeeze = 0.6  # the rim shows what's beyond its edge squeezed: 1/0.6 as far out as it's wide
+        e = m / squeeze + 2
+        gx, gy = -o.x, -o.y  # where it lies on the window
+        # all over it, fading out only towards the edges (into the rim's mirror), not cut off at the rim
+        f = max(1.0, m * 0.7)
+        box = Graphene.Rect().init(0, 0, w, h)
+        for p0, p1, size in (((0, 0), (w, 0), w), ((0, 0), (0, h), h)):
+            snap.push_mask(Gsk.MaskMode.ALPHA)
+            snap.append_linear_gradient(box, Graphene.Point().init(*p0), Graphene.Point().init(*p1),
+                                        [_stop(0.0, 255, 255, 255, 0.0), _stop(min(0.45, f / size), 255, 255, 255, 1.0),
+                                         _stop(max(0.55, 1 - f / size), 255, 255, 255, 1.0),
+                                         _stop(1.0, 255, 255, 255, 0.0)])
+            snap.pop()
         snap.save()
         snap.translate(Graphene.Point().init(w / 2, h / 2))
         snap.scale(self.mag, self.mag)
         snap.translate(Graphene.Point().init(-w / 2, -h / 2))
-        snow.draw(snap, o.x, o.y)
+        snow.draw(snap, o.x, o.y, (gx, gy, w, h))
         snap.restore()
         snap.pop()
+        snap.pop()
+        if m < 2 or not EFFECTS.get("mirror", True):
+            return
+        # In the rim, those just beyond each edge mirrored (like the date and time there): upside down, the
+        # nearest right at the edge, fading out inwards where the middle's magnified view takes over.
+        for band, flip, far, near, view in (  # (view: those beyond that edge, on the window)
+                ((0, 0, w, m), (0, 0, 1, -squeeze), (0, 0), (0, m), (gx - e, gy - e, w + 2 * e, e + 2)),  # above
+                ((0, h - m, w, m), (0, h * (1 + squeeze), 1, -squeeze), (0, h), (0, h - m),
+                 (gx - e, gy + h - 2, w + 2 * e, e + 2)),  # below the bottom edge
+                ((0, 0, m, h), (0, 0, -squeeze, 1), (0, 0), (m, 0), (gx - e, gy - e, e + 2, h + 2 * e)),  # left
+                ((w - m, 0, m, h), (w * (1 + squeeze), 0, -squeeze, 1), (w, 0), (w - m, 0),
+                 (gx + w - 2, gy - e, e + 2, h + 2 * e))):  # right of the right edge
+            rect = Graphene.Rect().init(*band)
+            snap.push_clip(rect)
+            snap.push_mask(Gsk.MaskMode.ALPHA)
+            snap.append_linear_gradient(rect, Graphene.Point().init(*far), Graphene.Point().init(*near),
+                                        [_stop(0.0, 255, 255, 255, 0.95), _stop(0.5, 255, 255, 255, 0.7),
+                                         _stop(1.0, 255, 255, 255, 0.0)])
+            snap.pop()
+            snap.save()
+            snap.translate(Graphene.Point().init(flip[0], flip[1]))
+            snap.scale(flip[2], flip[3])
+            snow.draw(snap, o.x, o.y, view)
+            snap.restore()
+            snap.pop()
+            snap.pop()
 
     def _lens_key(self, w: float, h: float):
         """What the lens shows depends on: which pictures, where they lie, the glass's size and shape."""
@@ -5506,29 +5576,27 @@ class GlassCard(Gtk.Box):
     LIVE_FPS = 15  # the window seen through it, moving (the falling motifs): pictured anew this often at most
 
     own_redraw = 0  # > 0: glass redrawing itself (a menu hangs from the clock or the pill: they'd seem changed)
-    snow_at = 0.0  # when the falling motifs last moved (the glass redrawn for them: the window seems changed then)
 
     def _live(self) -> None:
-        """What's on the window behind it changed: pictured anew, at most LIVE_FPS times a second (each time a
-        picture taken off the graphics card and put back for the lens: ~12 ms), once a second without the GPU
-        (the lens built bit by bit)."""
+        """What's on the window behind it seems changed: looked at (is anything it shows really different?),
+        and if so pictured anew, at most LIVE_FPS times a second (each time a picture taken off the graphics
+        card and put back for the lens: ~12 ms, a frame of the falling motifs lost), once a second without the
+        GPU (the lens built bit by bit). The clock's colon blinking every second, or the glass redrawn for the
+        falling motifs (the clock or the pill a menu hangs from seeming changed with it), don't count: they
+        made the motifs stutter every second or two."""
         if getattr(self, "_late", None) or GlassCard.own_redraw:
             return
-        if time.monotonic() - GlassCard.snow_at < 0.1:
-            # (the falling motifs moving: the glass redrawn for them every frame, the clock or the pill it hangs
-            # from seemingly changed with it; whatever really changed meanwhile shows within a second)
-            self._late = GLib.timeout_add(1000, self._live_late)
-            return
         gap = 1.0 / self.LIVE_FPS if EFFECTS["gpu"] and GPU.ok is not False else 1.0
-        gap = max(gap, 4 * getattr(self, "_live_cost", 0.0))  # a quarter of a CPU core at most (big glass at 4K)
+        gap = max(gap, 4 * getattr(self, "_live_cost", 0.0), 0.15)  # (a quarter of a CPU core at most)
         wait = gap - (time.monotonic() - getattr(self, "_live_at", 0.0))
         if wait <= 0:
-            self._live_now()
+            self._live_late()
         else:
             self._late = GLib.timeout_add(max(1, int(wait * 1000)), self._live_late)
 
     def _live_now(self) -> None:
         self._live_at = time.monotonic()
+        self._live_sig = self._layers_sig()
         self._tex_version += 1
         GlassCard.own_redraw += 1
         try:
@@ -5538,8 +5606,21 @@ class GlassCard(Gtk.Box):
 
     def _live_late(self) -> bool:
         self._late = None
-        self._live_now()
+        self._live_at = time.monotonic()  # (looked at no more often than pictured)
+        if self._layers_sig() != getattr(self, "_live_sig", None):
+            self._live_now()
         return False
+
+    def _live_layers(self) -> list:
+        """The widgets on the window it pictures live."""
+        return []
+
+    def _layers_sig(self) -> tuple:
+        win = getattr(self, "win", None)
+        out = [win.get_width(), win.get_height()] if win is not None else []
+        for wdg in self._live_layers():
+            widget_sig(wdg, out)
+        return tuple(out)
 
     def _what_behind(self) -> tuple:
         """Which pictures (and which lettering map) a lens shows."""
@@ -5906,6 +5987,9 @@ class MenuGlass(GlassCard):
             if gain != 1.0:
                 snap.pop()
             snap.pop()
+
+    def _live_layers(self) -> list:
+        return [c for c, _ in self.paint] if self.paint else []
 
     def _window_changed(self, *_) -> None:
         if GlassCard.own_redraw:
@@ -6971,6 +7055,8 @@ class ClockView(Gtk.Widget):
     the fonts' line boxes), all made smaller together when they wouldn't fit its height; never touching.
     In the Beat Radio fonts, white with a shadow like the song info's."""
 
+    SIG_SKIP = ("colon",)  # (blinking every second: not a change the glass pictures anew for)
+
     FONTS = (("Anton", Pango.Weight.NORMAL),) + (("Oswald", Pango.Weight.SEMIBOLD),) * 7
     # top to bottom: weekday, day, month, the special day's name (one to three rows, when there is one), year, time
     ORDER = (1, 2, 3, 5, 6, 7, 4, 0)
@@ -7152,7 +7238,8 @@ class SnowFall:
 
     def __init__(self, widget):
         self.widget = widget  # draws it, ticks it
-        self.area = None  # (x, y, w, h) in its coordinates
+        self.area = None  # (x, y, w, h) in its coordinates: where the window shows them (right of the cover)
+        self.field = None  # where they fall (the whole window): the glass shows them all over, not just there
         self.flakes: list = []
         self.sprites: list = []  # [(texture, box px, upright)]
         self._key = None
@@ -7160,12 +7247,13 @@ class SnowFall:
         self._last = None
         self.viewers: set = set()  # glass showing it (menus, panels): redrawn with it
 
-    def set_area(self, area) -> None:
-        if area != self.area:
-            old, self.area = self.area, area
+    def set_area(self, area, field=None) -> None:
+        field = (field or area) if area else None
+        if area != self.area or field != self.field:
+            old, self.area, self.field = self.field, area, field
             if not area:
                 self.flakes = []
-            elif not old or abs(old[2] * old[3] - area[2] * area[3]) > 0.15 * max(1, old[2] * old[3]):
+            elif not old or abs(old[2] * old[3] - field[2] * field[3]) > 0.15 * max(1, old[2] * old[3]):
                 self.flakes = []  # much bigger or smaller: sown again
             self.update()
 
@@ -7226,7 +7314,7 @@ class SnowFall:
             self.sprites.append((tex, box, kind in UPRIGHT))
 
     def _sow(self, base: float, anywhere: bool) -> dict:
-        x, y, w, h = self.area
+        x, y, w, h = self.field
         rng = random
         near = rng.random()  # 0 far (small, slow, paler) .. 1 near
         scale = 0.5 + 0.55 * near
@@ -7241,7 +7329,8 @@ class SnowFall:
 
     def _count(self, base: float) -> int:
         x, y, w, h = self.area
-        return max(10, min(100, int(w * h / (base * 2.1) ** 2)))
+        here = max(10, min(100, int(w * h / (base * 2.1) ** 2)))  # as many right of the cover as before
+        return min(400, int(here * self.field[2] * self.field[3] / max(1.0, w * h)))  # the same all over
 
     def _step(self, widget, clock) -> bool:
         now = clock.get_frame_time() / 1e6
@@ -7249,7 +7338,7 @@ class SnowFall:
         self._last = now
         if not self.area:
             return True
-        x, y, w, h = self.area
+        x, y, w, h = self.field
         base = self._base()
         for f in self.flakes:
             f["t"] += dt
@@ -7258,7 +7347,6 @@ class SnowFall:
             if f["y"] > y + h + base * 1.2:  # gone below: a new one from above
                 f.update(self._sow(base, False))
         widget.queue_draw()  # every frame the screen shows (60 a second and more)
-        GlassCard.snow_at = time.monotonic()
         GlassCard.own_redraw += 1  # (the glass redrawn for them: not a change on the window to picture anew)
         try:
             for v in self.viewers:  # the glass it's seen through
@@ -7268,11 +7356,12 @@ class SnowFall:
             GlassCard.own_redraw -= 1
         return True
 
-    def draw(self, snap, dx: float = 0.0, dy: float = 0.0) -> None:
-        """Into `snap`, shifted by (dx, dy) (the drawing widget isn't where the area's coordinates start)."""
+    def draw(self, snap, dx: float = 0.0, dy: float = 0.0, view=None) -> None:
+        """Into `snap`, shifted by (dx, dy) (the drawing widget isn't where the area's coordinates start): those
+        inside `view` (x, y, w, h; the area right of the cover by default; the glass: what it sees)."""
         if not EFFECTS["season"] or not self.area:
             return
-        x, y, w, h = self.area
+        x, y, w, h = view or self.area
         if w < 20 or h < 20:
             return
         native = self.widget.get_native()
@@ -7291,9 +7380,12 @@ class SnowFall:
         snap.push_clip(Graphene.Rect().init(x, y, w, h))
         for f in self.flakes:
             tex, box, upright = self.sprites[f["sprite"] % len(self.sprites)]
+            fx = f["x"] + f["sway"] * math.sin(f["t"] * f["freq"] * 6.283 + f["phase"])
+            r = box * f["scale"] * 0.75  # (its picture turned: within this of where it is)
+            if fx + r < x or fx - r > x + w or f["y"] + r < y or f["y"] - r > y + h:
+                continue  # (outside: not drawn at all)
             snap.save()
-            snap.translate(Graphene.Point().init(f["x"] + f["sway"] * math.sin(f["t"] * f["freq"] * 6.283 + f["phase"]),
-                                                 f["y"]))
+            snap.translate(Graphene.Point().init(fx, f["y"]))
             # pictures that stand (palms, candles, pumpkins): rocking a little, the rest turning round slowly
             snap.rotate(18 * math.sin(f["t"] * f["freq"] * 4 + f["phase"]) if upright else f["angle"])
             snap.scale(f["scale"], f["scale"])
@@ -7545,6 +7637,9 @@ class Puddle(GlassCard):
 
     def _snow_origin(self):
         return self.win.compute_point(self, Graphene.Point().init(0, 0)) if self.win is not None else (False, None)
+
+    def _live_layers(self) -> list:
+        return [w for w, _ in self._paints] if self.win is not None else []
 
     def _layers_changed(self, *_) -> None:
         if self.reveal > 0 and self.get_mapped():
@@ -8594,7 +8689,7 @@ class Window(Adw.ApplicationWindow):
         cover, W, H = self.cover_rect(), self.get_width(), self.get_height()
         # the falling motifs: right of the cover, the window's whole height
         left = cover[2] if cover else W
-        self.snow.set_area((left, 0, W - left, H) if W - left >= 40 and H >= 40 else None)
+        self.snow.set_area((left, 0, W - left, H) if W - left >= 40 and H >= 40 else None, (0, 0, W, H))
         ok, vol = self.vol.compute_bounds(self)
         if not cover or not ok or not getattr(self, "_clock_texts", None):
             self.clock.set_visible(False)
