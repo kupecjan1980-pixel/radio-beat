@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.11"
+APP_VERSION = "0.25.12"
 
 import collections
 import ctypes
@@ -4150,7 +4150,11 @@ scale.vol-slider slider { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px
 .overlay-header button.close-button { color: white; }
 .overlay-header button.info-button { color: white; font-weight: 900; font-size: 1.25em; font-family: serif;
                                      padding-left: 0; padding-right: 0; }  /* square, like the gear's */
-.puddle label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
+/* the panels' and menus' text: a dark halo round the letters themselves (readable on a bright cover), the glass
+   as clear as ever */
+.puddle label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), 0 0 1px rgba(0,0,0,1), 0 0 3px rgba(0,0,0,1), 0 0 7px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.9), 0 0 14px rgba(0,0,0,0.85), 0 0 22px rgba(0,0,0,0.75); }
+.puddle button.puddle-tab label { text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
+.puddle switch, popover.glass-menu switch { box-shadow: 0 0 6px rgba(0,0,0,0.75); }
 .puddle .puddle-now label { font-weight: 700; }
 .puddle .boxed-list, .puddle .boxed-list > row { background: rgba(255,255,255,0.04); }
 .puddle button.puddle-tab { padding: 4px 14px; min-height: 0; border-radius: 999px; color: white;
@@ -4173,7 +4177,7 @@ button.quality-tab label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.
 
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
 popover.glass-menu .boxed-list, popover.glass-menu .boxed-list > row { background: rgba(255,255,255,0.04); }
-popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8); }
+popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8), 0 0 1px rgba(0,0,0,1), 0 0 3px rgba(0,0,0,1), 0 0 7px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.9), 0 0 14px rgba(0,0,0,0.85), 0 0 22px rgba(0,0,0,0.75); }
 .overlay-header:backdrop, .overlay-header:backdrop * { opacity: 1; filter: none; }  /* not faded when unfocused */
 
 /* Under the mouse: pause, stop, the speaker and close pump once a second; the gear ticks round like a watch's
@@ -5820,7 +5824,7 @@ class MenuGlass(GlassCard):
         self.paint = None  # the window's content, live
         self._tex = None
         self.cache_lens = False  # it shows the live window, a new texture each time anyway
-        self.tint = 0.54  # darker than the show card: the menu's small text stays readable on a bright cover
+        self.tint = 0.42  # a little darker than the show card: the menu's small text stays readable
         self.sharp_bars = True
         self.depth = False  # the popup's own shadow does it
         self._tex_version = 0  # the window's content changed this many times (a new picture of it then)
@@ -7666,7 +7670,6 @@ class Puddle(GlassCard):
     def __init__(self, behind: list, neck: bool = False, **kw):
         super().__init__(behind, **kw)
         self.neck = neck
-        self.tint = 0.52  # darker than the show card: the panels' small text readable on a bright, busy cover
         self.reveal = 0.0
         self.frame = not neck  # the neck is water between the two: no edge of its own
         self.win = None  # see_window(): what's on the window seen through it too, live
@@ -9707,11 +9710,8 @@ class Window(Adw.ApplicationWindow):
         self.refresh_effects()
         self.look_css.load_from_data(css.encode())
         waters = [g for w in getattr(self, "waters", []) for g in (w.body, w.neck)]
-        for card in (self.show_card, *self.discs, *self.head_glass):
+        for card in (self.show_card, *self.discs, *self.head_glass, *waters):
             card.shade = k
-            card.queue_draw()
-        for card in waters:  # the panels: always readable, like the menus, whatever Background shade is
-            card.shade = 1.0
             card.queue_draw()
         if getattr(self, "quality_pill", None):
             self.quality_pill.queue_draw()  # (its shadow on or off)

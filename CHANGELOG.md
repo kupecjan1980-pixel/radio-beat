@@ -4,6 +4,7 @@
 
 ## 0.25 — Padající ozdoby
 
+- **0.25.12** (2026-11-02) Sklo panelů a nabídek zase jako dřív (průhledné, Ztmavení pozadí platí i pro panely); čitelnost místo toho dává tmavá záře kolem samotných písmen a přepínačů
 - **0.25.11** (2026-11-02) Panely ⓘ a ⚙ ztmavené vždy, jako nabídky: jejich text je čitelný i při Ztmavení pozadí 0 % (to dál řídí jen plochy za textem okna)
 - **0.25.10** (2026-11-02) Sklo panelů ⓘ a ⚙ a nabídek tmavší, text čitelnější i na světlém obalu; padající ozdoby za sklem zase naplno
 - **0.25.9** (2026-11-02) Padající ozdoby za sklem všech nabídek a panelů slabší (asi na 40 %): text v nich je čitelnější, okno mimo sklo beze změny
