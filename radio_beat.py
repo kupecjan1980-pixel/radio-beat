@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.0"
+APP_VERSION = "0.25.1"
 
 import collections
 import ctypes
@@ -6176,7 +6176,7 @@ def day_summary() -> list:
             more = ", ".join(p for p in (f"vyhlásil(a) {by}" if by else "", f"od {since}" if since else "") if p)
             rows.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else ""))
         out.append(("text", "\n".join(rows)))
-    if not holidays_today() and EFFECTS.get("season"):
+    if EFFECTS.get("season"):  # (the season's fall every day, a special day's with them)
         season = season_today()[0]
         out.append(("text", f"<i>Padají: {esc(SEASON_CZ[season][2])} ({SEASON_CZ[season][0]})</i>"))
     return out
@@ -6195,14 +6195,13 @@ def season_text(clock_bytes: int = None) -> str:
     season, nxt, share = season_today()
     name, _, motifs = SEASON_CZ[season]
     days = holidays_today()
-    if days:
-        name = " + ".join(HOLIDAYS[d][0] for d in days)
-        motifs = ", ".join(HOLIDAYS[d][1] for d in days)
-        share = 0.0
+    if days:  # the season's always, the day's as many again
+        name += " + " + " + ".join(HOLIDAYS[d][0] for d in days)
+        motifs += "; napůl s: " + ", ".join(HOLIDAYS[d][1] for d in days)
     text = (f"Padají pomalu jako sníh a pootáčejí se za datem a časem, tlačítky, kvalitou, hlasitostí a jmény "
             f"(písmena jen v barvách měsíce, čitelnější); bez animací stojí; klik na datum je vypne a zapne; "
             f"každý den trochu jinak; o svátcích a zvláštních dnech (české, americké i světové: Vánoce, Halloween, "
-            f"4. červenec, Velikonoce, Den rocku…) jejich vlastní · dnes: {name} ({motifs})")
+            f"4. červenec, Velikonoce, Den rocku…) napůl i jejich vlastní · dnes: {name} ({motifs})")
     if share > 0:
         text += f", přidává se {round(share * 100)} % {SEASON_CZ[nxt][1]}"
     if clock_bytes is not None:
@@ -7055,7 +7054,7 @@ class SnowFall:
     whole height. Drawn by the shaded panel (Scrim) over its shading, under the buttons and the slider; still
     while a glass menu is open (it pictures the window: a moving one would be pictured again every frame)."""
 
-    SPRITES = 18  # different pictures (each drawn once a day into a texture)
+    SPRITES = 24  # different pictures (each drawn once a day into a texture)
 
     def __init__(self, widget):
         self.widget = widget  # draws it, ticks it
@@ -7090,7 +7089,7 @@ class SnowFall:
 
     def _base(self) -> float:
         x, y, w, h = self.area
-        return max(14.0, min(40.0, min(w, h) * 0.075))
+        return max(18.0, min(60.0, min(w, h) * 0.11))
 
     def _make_sprites(self, base: float, k: float) -> None:
         t = time.localtime()
@@ -7100,10 +7099,6 @@ class SnowFall:
         self._key, self.sprites = key, []
         season, nxt, share = season_today()
         days = holidays_today()
-        special = [d for d in days if d not in HOLIDAY_PERIODS]
-        pool = special or None  # a special day: its motifs instead of the season's
-        if days and not special:  # only a period (Advent): half of it, half the season
-            nxt, share = days[0], 0.5
         rng = random.Random(t.tm_year * 1000 + t.tm_yday)
         native = self.widget.get_native()
         if not native:
@@ -7111,7 +7106,13 @@ class SnowFall:
         size = base * 1.3  # the biggest flakes' size: drawn sharp at it, smaller ones scaled down
         box = size * 1.7  # pieces reach a little past their size (stems, rays)
         for i in range(self.SPRITES):
-            sea = rng.choice(pool) if pool else (nxt if i < round(self.SPRITES * share) else season)
+            # the season's always (in its last month more and more of the next one's); a special day's (Advent's,
+            # Halloween's…) as many again: half and half
+            if days and i % 2 == 0:
+                sea = days[(i // 2) % len(days)]
+            else:
+                j = i // 2 if days else i
+                sea = nxt if j < round((self.SPRITES // (2 if days else 1)) * share) else season
             kind = rng.choice(SEASON_KINDS[sea])
             color = _hex(rng.choice(SEASON_COLORS[sea]), rng.uniform(0.85, 0.97))
             s = Gtk.Snapshot()
@@ -7140,7 +7141,7 @@ class SnowFall:
 
     def _count(self, base: float) -> int:
         x, y, w, h = self.area
-        return max(8, min(70, int(w * h / (base * 3.4) ** 2)))
+        return max(10, min(100, int(w * h / (base * 2.1) ** 2)))
 
     def _step(self, widget, clock) -> bool:
         now = clock.get_frame_time() / 1e6
