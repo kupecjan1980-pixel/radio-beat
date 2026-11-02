@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.9"
+APP_VERSION = "0.27.0"
 
 import collections
 import ctypes
@@ -6482,7 +6482,9 @@ def day_summary() -> list:
         rows = []
         for name, by, since in days:
             more = ", ".join(p for p in (f"vyhlásil(a) {by}" if by else "", f"od {since}" if since else "") if p)
-            rows.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else ""))
+            pics = " ".join(DAY_EMOJI.get(name) or ()) if EFFECTS.get("season") else ""
+            rows.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else "")
+                        + (f" {pics}" if pics else ""))
         out.append(("text", "\n".join(rows)))
     if EFFECTS.get("season"):  # (the season's fall every day, a special day's with them)
         season = season_today()[0]
@@ -6492,6 +6494,533 @@ def day_summary() -> list:
 
 for _hid, _h in HOLIDAYS.items():  # each day's motifs and colors, like a season's
     SEASON_KINDS[_hid], SEASON_COLORS[_hid] = _h[3], _h[4]
+
+# Every day of the Czech calendar's own pictures (colored emoji), falling half and half with the season's like a
+# special day's: "name|emoji emoji…". Remembrance days (victims, genocide, slavery, violence…): quiet ones,
+# candles, doves, white flowers, ribbons.
+DAY_EMOJI_TEXT = """
+Autistický den hrdosti|♾️ 🧩 🌈
+Darwinův den|🐒 🐢 🦎 🌿
+Den Afriky|🌍 🦁 🐘 🥁
+Den Austrálie|🦘 🐨 🇦🇺 🌞
+Den Cosmopolitanu|🍸 🍒 🍋
+Den Evropy|🇪🇺 ⭐ 🌍
+Den Garfielda|🐈 🍝 😼
+Den Sherlocka Holmese|🔍 🎩 🕵️ 🎻
+Den Spojených národů|🇺🇳 🕊️ 🌍
+Den Star Wars|⭐ 🚀 🌌 🤖
+Den Stevea Irwina|🐊 🦎 🐍 🦘
+Den UNICEF|🧒 💙 🎈
+Den Země|🌍 🌳 🌱 💧
+Den absurdit|🤪 🙃 🎭 🦄
+Den adopce želv|🐢 🐢 💚
+Den afrického dítěte|🌍 🧒 📚 🎈
+Den aligátorů|🐊 🐊 🌿
+Den ananasu|🍍 🍍 🌴
+Den anglického jazyka|🇬🇧 📖 🔤
+Den avokáda|🥑 🥑 🌮
+Den bez pesticidů|🌱 🐝 🐞 🥕
+Den bisexuality|💗 💜 💙
+Den blogerů|💻 ✍️ 📝
+Den bílé čokolády|🍫 🤍 🍫
+Den bílého vína|🥂 🍇 🍾
+Den cheesecakeu|🍰 🍓 🍰
+Den choreografů|💃 🕺 🩰
+Den církevního školství|⛪ 📚 ✏️
+Den dcer|👧 💗 🌸
+Den dinosaurů|🦕 🦖 🦴 🌋
+Den divokých zvířat|🦁 🐯 🐘 🦒
+Den docenění mývalů|🦝 🦝 🌙
+Den doktorů|🩺 💊 ❤️
+Den dortů|🎂 🍰 🧁
+Den draků|🐉 🐲 🔥
+Den dámského spodního prádla|👙 🎀 💗
+Den dýňových semínek|🎃 🌰 🎃
+Den dětí ulice|🧒 💙 🏠
+Den farmářů|🚜 🌾 🐄 🥕
+Den finanční gramotnosti|💰 🪙 📈 🐷
+Den fotografií přírody|📷 🌲 🦋 🌄
+Den gin tonicu|🍸 🍋 🧊 🌿
+Den gumových žížalek|🪱 🍬 🌈
+Den horníků|⛏️ 💎 🪨 🔦
+Den hrdosti geeků|🤓 💻 🎮 🖖
+Den hub|🍄 🍄 🌲
+Den hůlek|🥢 🍜 🍣
+Den industrializace Afriky|🌍 🏭 ⚙️
+Den jabloní|🍎 🌳 🍏 🌸
+Den jackfruitu|🍈 🌴 🍈
+Den jahodové zmrzliny|🍓 🍦 🍨
+Den japonské kultury|🎌 🌸 🗡️ 🏯
+Den jezevců|🦡 🦡 🍂
+Den kancelářských sponek|📎 📎 🗂️
+Den karamelu|🍮 🍬 🍯
+Den kempování|⛺ 🔥 🌲 🌙
+Den kešu|🥜 🥜 🌰
+Den kocoviny|🤕 🥤 💤 💊
+Den koláčů|🥧 🍰 🍒
+Den kozího sýra|🐐 🧀 🧀
+Den koňaku|🥃 🍇 🥃
+Den kreativity|🎨 💡 ✏️ 🖌️
+Den kreslení ptactva|✏️ 🐦 🦜 🦉
+Den kánoí|🛶 🌊 🌲
+Den kávové zmrzliny|☕ 🍦 🍨
+Den kříženců|🐕 🐈 💗
+Den křížovek|✏️ 🔠 🧩
+Den lam|🦙 🦙 🏔️
+Den latté|☕ 🥛 ☕
+Den leváků|✍️ 🤚 ✋
+Den lidských práv|🕊️ ⚖️ 🤝
+Den loterie|🎟️ 🍀 🎰 💰
+Den lásky k domácím mazlíčkům|🐶 🐱 🐹 💗
+Den majáků|🗼 🌊 ⚓ ⛵
+Den makadamových ořechů|🥜 🌰 🥜
+Den malování mandal|🎨 🌀 🖍️ 🌸
+Den malých a středních podniků|🏪 💼 📈
+Den marcipánu|🍬 🍑 🐷
+Den margarity|🍹 🍋 🧂
+Den mazlíčků|🐶 🐱 🐰 🐹
+Den menstruační hygieny|🩸 🌸 💗
+Den milovníků knih|📚 📖 🔖 ☕
+Den milovníků sýru|🧀 🧀 🍷
+Den mimozemšťanů|👽 🛸 🌌 👾
+Den mléčné čokolády|🍫 🥛 🍫
+Den nadšenců zoo|🦓 🦒 🐘 🦁
+Den nosálů|🦝 🌿 🦝
+Den nulové diskriminace|🤝 🌈 💙
+Den námořníků|⚓ ⛵ 🌊 🧭
+Den návštěv zoo|🦓 🦁 🐧 🦒
+Den ochrany osobních údajů|🔒 🛡️ 💻
+Den opery|🎭 🎶 🎼
+Den orchidejí|🌸 🌺 🪻
+Den pand|🐼 🐼 🎋
+Den parmazánu|🧀 🇮🇹 🍝
+Den pastelek|🖍️ 🎨 🖍️ 🌈
+Den pečených kaštanů|🌰 🔥 🌰 🍂
+Den pikniků|🧺 🥪 🍉 🌞
+Den pistácií|🥜 💚 🥜
+Den plyšových medvědů|🧸 🧸 💗
+Den plísňových sýrů|🧀 🍷 🧀
+Den pokrývek hlavy|🎩 👒 🧢 👑
+Den pokémonů|⚡ 🐭 🔴 ⭐
+Den ponožek|🧦 🧦 🧦
+Den popcornu|🍿 🍿 🎬
+Den požární bezpečnosti zvířat|🐕 🚒 🧯
+Den pracovníků knihoven|📚 📖 🏛️
+Den preclíků|🥨 🥨 🍺
+Den psacích strojů|⌨️ 📄 ✍️
+Den psaní recenzí|⭐ ✍️ 📝
+Den psů|🐕 🐶 🦴 🐾
+Den punče|🍹 🍊 🍒
+Den pí|🥧 π 🔢
+Den přáníček|💌 💐 🎁
+Den původních odrůd jablek|🍎 🍏 🍎 🌳
+Den quinoy|🌾 🥗 🌾
+Den retrívrů|🐕 🦮 🎾 🐾
+Den ruského jazyka|🇷🇺 📖 🔤
+Den salátu Caesar|🥗 🥬 🧀
+Den sangrie|🍷 🍊 🍋
+Den sardinek|🐟 🐟 🥫
+Den sbírání kamenů|🪨 💎 🪨
+Den scenáristů|🎬 ✍️ 📜
+Den sci-fi|🚀 👽 🤖 🌌
+Den sedmikrásek|🌼 🌼 🌱
+Den skořice|🌰 🥐 ☕
+Den sladkostí|🍬 🍭 🍫 🍩
+Den snění|💭 🌙 ⭐ ☁️
+Den sourozenců|👫 👬 💗
+Den stromů|🌳 🌲 🌴 🍃
+Den suchého zipu|🧷 👟 🧥
+Den svatého Patrika|☘️ 🍀 🍺 🎩
+Den sázení květin|🌷 🌱 🌻 🪴
+Den sýrové pizzy|🍕 🧀 🍕
+Den tabulek|📊 📈 🧮
+Den taco|🌮 🌮 🌶️
+Den upcyklace|♻️ 🧵 🪛
+Den učitelů|🍎 📚 ✏️ 🎓
+Den vaflí|🧇 🍓 🍯
+Den vanilkové zmrzliny|🍦 🍨 🌼
+Den videoher|🎮 👾 🕹️
+Den virtuálních objetí virtuálních asistentů|🤗 🤖 💬
+Den vlašských ořechů|🌰 🥜 🌰
+Den vodky|🍸 🧊 🍸
+Den vytí na měsíc|🐺 🌕 🌙
+Den válečných veteránů|🎖️ 🌺 🕊️
+Den vánočních světýlek|💡 🎄 ✨ ⭐
+Den vězněných spisovatelů|✍️ 📖 🕊️
+Den všech svatých|🕯️ 💐 ✨
+Den wombatů|🐻 🌿 🐾
+Den zachraňování orlů|🦅 🦅 🏔️
+Den zachraňování žab|🐸 🐸 🌿
+Den červené ruky|✋ 🕊️ 🤍
+Den červených růží|🌹 🌹 🥀
+Den čistokrevných psů|🐕 🐩 🦮
+Den čokoládové pěny|🍫 🍮 🍫
+Den čokoládové zmrzliny|🍫 🍦 🍨
+Den čokoládových cupcakeů|🧁 🍫 🧁
+Den čokolády|🍫 🍫 🍬
+Den čínského jazyka|🇨🇳 🀄 🏮
+Den šampaňského|🍾 🥂 ✨
+Den šatů|👗 👗 👠
+Den špaget|🍝 🍝 🍅
+Den šperků|💍 💎 📿
+Den švýcarských sýrů|🧀 🇨🇭 🧀
+Den žvýkaček|🫧 🍬 💗
+Den žádostí o ruku|💍 💗 🌹
+Dneska chodí Mikuláš|⭐ 😇 😈 🎁
+Dušičky|🕯️ 💐 🕯️
+Evropský den bez aut|🚲 🚶 🌳 🚋
+Evropský den jazyků|🇪🇺 💬 🔤 🌍
+Evropský den mozku|🧠 💡 🧠
+Evropský den obětí zločinu|🕯️ 🤍 🕊️
+Evropský den památky obětí stalinismu a nacismu (Mezinárodní den černé stuhy)|🖤 🎗️ 🕯️ 🕊️
+Evropský den památky obětí terorismu|🕯️ 🤍 🕊️ 💐
+Evropský den parků|🌳 🦆 🌷 🍃
+Evropský den pro rovnoprávnost osob se zdravotním postižením|♿ 🤝 💙
+Evropský den recyklace baterií|🔋 ♻️ 🔋
+Halloween|🎃 🦇 👻 🕷️
+Mezinárodní den Alzheimerovy choroby|🧠 💜 🤝
+Mezinárodní den Cabernetu|🍷 🍇 🍷
+Mezinárodní den Falun Dafa|🧘 🪷 ☯️
+Mezinárodní den Harryho Pottera|⚡ 🧙 🦉 🪄
+Mezinárodní den Nelsona Mandely|🌍 🕊️ ✊
+Mezinárodní den Romů|🎻 🌍 💙 💚
+Mezinárodní den absintu|🍸 💚 🧚
+Mezinárodní den akcí pro řeky a proti přehradám|🏞️ 🐟 💧 🌊
+Mezinárodní den archivů|🗄️ 📜 📚
+Mezinárodní den arganie|🌳 🫒 🐐
+Mezinárodní den asteroidů|☄️ 🪐 🌌 🔭
+Mezinárodní den bahna (International Mud Day)|🟤 🐷 👢 💦
+Mezinárodní den balbutiků|💬 🗣️ 💙
+Mezinárodní den bank|🏦 💰 🪙
+Mezinárodní den bez kalhotek|🎀 😜 💗
+Mezinárodní den bez podprsenky|🎀 😜 💗
+Mezinárodní den biologické rozmanitosti|🦋 🌿 🐸 🐝
+Mezinárodní den boje lékařů za mír|🩺 🕊️ ❤️
+Mezinárodní den boje proti kolonialismu|✊ 🌍 🕊️
+Mezinárodní den boje proti kolonialismu (pouze menšinové zdroje)|✊ 🌍 🕊️
+Mezinárodní den boje proti nezákonnému, nehlášenému a neregulovanému rybolovu|🐟 🌊 🎣
+Mezinárodní den boje proti násilí na ženách|🧡 🎗️ 🕊️
+Mezinárodní den boje proti popáleninám|🧯 🩹 ❤️
+Mezinárodní den boje proti zneužívání drog a nezákonnému obchodování s nimi|🚫 💊 🤝
+Mezinárodní den boje spisovatelů za mír|✍️ 🕊️ 📖
+Mezinárodní den boje za bezpečný potrat|💚 🎗️ 🤝
+Mezinárodní den boje za vymýcení otroctví|⛓️ 🕊️ ✊
+Mezinárodní den bílé hole|🦯 🤍 🤝
+Mezinárodní den celníků|🛂 🧳 📦
+Mezinárodní den charity|💝 🤝 🎁
+Mezinárodní den civilní ochrany|🦺 🚨 🛡️
+Mezinárodní den civilního letectví|✈️ 🛫 ☁️
+Mezinárodní den darování knih|📚 🎁 📖
+Mezinárodní den delfínů|🐬 🐬 🌊
+Mezinárodní den demokracie|🗳️ 🕊️ 🤝
+Mezinárodní den deštníků|☂️ 🌂 🌧️ ☔
+Mezinárodní den dobrovolníků|🙋 🤝 💗
+Mezinárodní den dívek|👧 💪 🌸
+Mezinárodní den dětské knihy|📚 🧒 🐻 📖
+Mezinárodní den dětí|🎈 🧸 🍭 ⭐
+Mezinárodní den dětí, které se staly obětí agrese|🕯️ 🧸 🕊️
+Mezinárodní den energy drinků|⚡ 🥤 ⚡
+Mezinárodní den epidemické připravenosti|🧼 😷 🩺
+Mezinárodní den gramotnosti|📖 ✏️ 🔤
+Mezinárodní den hasičů|🚒 🧯 🔥 👨‍🚒
+Mezinárodní den hor|🏔️ ⛰️ 🥾 🦅
+Mezinárodní den horké čokolády|☕ 🍫 🧁
+Mezinárodní den hudby|🎵 🎸 🎹 🎶
+Mezinárodní den hygieny rukou|🧼 🙌 💧
+Mezinárodní den imunologie|💉 🧬 🛡️
+Mezinárodní den informovanosti o fibromyalgii|💜 🤝 🦋
+Mezinárodní den invalidů|♿ 🤝 💙
+Mezinárodní den jazzu|🎷 🎺 🎹 🎶
+Mezinárodní den jógy|🧘 🪷 🕉️
+Mezinárodní den kamenů|🪨 💎 🪨
+Mezinárodní den koní|🐎 🐴 🏇
+Mezinárodní den kosmonautiky|🚀 👨‍🚀 🛰️ 🌕
+Mezinárodní den koček|🐈 🐱 🧶 🐾
+Mezinárodní den kuchařů|👨‍🍳 🍳 🥘 🔪
+Mezinárodní den kuřecích křidýlek|🍗 🍗 🌶️
+Mezinárodní den kávy|☕ ☕ 🫘
+Mezinárodní den ledních medvědů|🐻‍❄️ 🧊 ❄️
+Mezinárodní den lepších vztahů v práci|🤝 💼 😊
+Mezinárodní den lesů|🌲 🌳 🦌 🍄
+Mezinárodní den lidské solidarity|🤝 💗 🌍
+Mezinárodní den lidského bratrství|🤝 🕊️ 💗
+Mezinárodní den lidí s postižením|♿ 🤝 💙
+Mezinárodní den loutkového divadla|🎭 🪀 🤡
+Mezinárodní den lékařů|🩺 💊 ❤️
+Mezinárodní den mateřského jazyka|💬 🔤 📖
+Mezinárodní den migrantů|🌍 🧳 🤝
+Mezinárodní den mládeže|🎒 🎸 🛹 ⭐
+Mezinárodní den mobilizace proti jaderné válce|🕊️ ☮️ 🕊️
+Mezinárodní den mrkve|🥕 🥕 🐰
+Mezinárodní den muffinů|🧁 🧁 🫐
+Mezinárodní den muzeí|🏛️ 🖼️ 🏺
+Mezinárodní den míru|🕊️ ☮️ 🌍
+Mezinárodní den nebinárních lidí|💛 🤍 💜 🖤
+Mezinárodní den nenarozeného dítěte|👶 💗 🌸
+Mezinárodní den nevidomých|🦯 🤍 🤝
+Mezinárodní den nulové tolerance ženské obřízky|🚫 💜 🤝
+Mezinárodní den objímání|🤗 💗 🤗
+Mezinárodní den obláčkových leopardů|🐆 🌿 🐆
+Mezinárodní den obětí chemických válek|🕯️ 🕊️ 🤍
+Mezinárodní den obětí násilného zmizení|🕯️ 🕊️ 🤍
+Mezinárodní den ochrany ozónové vrstvy|🌍 ☀️ 🛡️
+Mezinárodní den odpůrců vojenské služby|☮️ 🕊️
+Mezinárodní den orangutanů|🦧 🦧 🌳
+Mezinárodní den památek a sídel|🏰 🏛️ ⛪
+Mezinárodní den památky obětí holokaustu|🕯️ 🕊️ 🤍 🕯️
+Mezinárodní den památky obětí obchodu s otroky|⛓️ 🕯️ 🕊️
+Mezinárodní den památky obětí otroctví a transatlantického obchodu s otroky|⛓️ 🕯️ 🕊️ 🌊
+Mezinárodní den parlamentarismu|🏛️ 🗳️ ⚖️
+Mezinárodní den piercingu|💍 ✨ 💎
+Mezinárodní den pití vína|🍷 🍇 🥂
+Mezinárodní den pizzy|🍕 🍕 🍅
+Mezinárodní den plemene corgi|🐕 🐶 👑
+Mezinárodní den podpory nemocných s chronickým únavovým syndromem|💙 🤝
+Mezinárodní den podpory obětem násilí|🤝 💜 🕊️
+Mezinárodní den porodních asistentek|👶 🍼 💗
+Mezinárodní den prasklých těsnění|🔧 💧 🛠️
+Mezinárodní den prevence ničení životního prostředí v průběhu válek a ozbrojených konfliktů|🌳 🕊️ 🌍
+Mezinárodní den prosecca|🥂 🍾 ✨
+Mezinárodní den prostitutek|❤️ ☂️ 🤝
+Mezinárodní den proti dietám|🍰 🍕 😋
+Mezinárodní den proti homofobii, bifobii a transfobii|🌈 🏳️‍🌈 💗
+Mezinárodní den proti jaderným zkouškám|☮️ 🕊️
+Mezinárodní den proti korupci|⚖️ 🚫
+Mezinárodní den proti nášlapným minám|🚫 🕊️ 🦵
+Mezinárodní den proti policejní brutalitě|✊ ⚖️ 🕊️
+Mezinárodní den proti zapomínání|🧠 💭 💜
+Mezinárodní den průvodců cestovního ruchu|🗺️ 🧳 🏰
+Mezinárodní den ptactva|🐦 🦜 🦉 🕊️
+Mezinárodní den překladatelů|💬 📖 🌍
+Mezinárodní den přátelství|🤝 💗 👫
+Mezinárodní den příslušníků mírových operací OSN|🇺🇳 🕊️ 🪖
+Mezinárodní den původního obyvatelstva|🪶 🌍 🏕️
+Mezinárodní den radioamatérů|📻 📡 🎙️
+Mezinárodní den rodiny|👨‍👩‍👧‍👦 🏠 💗
+Mezinárodní den rumu|🥃 🏴‍☠️ 🥥
+Mezinárodní den rysů|🐈 🌲 🐾
+Mezinárodní den seniorů|👵 👴 💗 ☕
+Mezinárodní den skateboardingu|🛹 🛹 ⭐
+Mezinárodní den skautů a skautek|⚜️ ⛺ 🔥 🧭
+Mezinárodní den smutku|🖤 🕯️ 🥀
+Mezinárodní den solidarity osvobození politických vězňů|🕊️ ✊
+Mezinárodní den solidarity s lidem Palestiny|🕊️ 🫒 🤝
+Mezinárodní den solidarity se zadržovanými a nezvěstnými členy mírových misí|🇺🇳 🕊️ 🕯️
+Mezinárodní den soudkyň|⚖️ 👩‍⚖️ 🏛️
+Mezinárodní den spolupráce jih-jih|🌍 🤝 🌏
+Mezinárodní den sportu za rozvoj a mír|⚽ 🏀 🕊️ 🏅
+Mezinárodní den studentstva|🎓 📚 ✏️
+Mezinárodní den svobody tisku|📰 🗞️ 🕊️
+Mezinárodní den svědomí|🕊️ 💭 💗
+Mezinárodní den tance|💃 🕺 🩰 🎶
+Mezinárodní den tolerance|🤝 🌈 🌍
+Mezinárodní den triček|👕 👕 👕
+Mezinárodní den tropů|🌴 🦜 🍍 ☀️
+Mezinárodní den trpaslíků|🧙 🍄 ⛏️
+Mezinárodní den tygrů|🐯 🐅 🌿
+Mezinárodní den umělců|🎨 🖌️ 🎭 🎼
+Mezinárodní den vaflí|🧇 🍓 🍯
+Mezinárodní den vdov|💐 🕯️ 🤍
+Mezinárodní den veganství|🥦 🥕 🥑 🌱
+Mezinárodní den vzdělání|🎓 📚 ✏️ 🍎
+Mezinárodní den vzpomínky na Černobyl|☢️ 🕯️ 🌻
+Mezinárodní den vína|🍷 🍇 🥂
+Mezinárodní den za odstranění chudoby|🤝 🍞 💗
+Mezinárodní den za odstranění rasové diskriminace|🤝 🌍 💙
+Mezinárodní den za omezení přírodních katastrof|🛡️ 🌍 🦺
+Mezinárodní den za právo na pravdu o hrubém porušování lidských práv a na důstojnost obětí|⚖️ 🕯️ 🕊️
+Mezinárodní den za úplné odstranění jaderných zbraní|☮️ 🕊️
+Mezinárodní den zdravotních sester|👩‍⚕️ 🩺 💗
+Mezinárodní den zdravého spánku|😴 🌙 🛏️ 💤
+Mezinárodní den zdraví mysli a těla|🧘 💪 🧠 🍏
+Mezinárodní den ztracených dětí|🕯️ 🧸 💙
+Mezinárodní den zvířat|🐾 🐶 🐱 🐰
+Mezinárodní den čaje|🍵 🫖 🍃
+Mezinárodní den čistého ovzduší za modrou oblohu|☁️ 🌬️ 💙 🌍
+Mezinárodní den čokolády|🍫 🍫 🍬
+Mezinárodní den šachu|♟️ ♞ ♛ ♜
+Mezinárodní den švihlé chůze|🚶 🎩 🦵
+Mezinárodní den žen|💐 🌷 💗
+Mezinárodní den žen a dívek ve vědě|🔬 🧪 👩‍🔬 🧬
+Mezinárodní den ženského orgasmu|💗 💋 🍑
+Mezinárodní noc pro netopýry|🦇 🦇 🌙
+Mezinárodní visegrádský den|🇨🇿 🇸🇰 🇵🇱 🇭🇺
+Mikuláš|⭐ 😇 😈 🎁
+Noc otevřených lahví|🍾 🍷 🥂
+OSN pro den veřejné služby|🇺🇳 🤝 🏛️
+Ručníkový den|🧻 🌌 🐬 🚀
+Světový den Braillova písma|⠃ 🦯 📖
+Světový den Downova syndromu|🧦 💛 💙
+Světový den Parkinsonovy choroby|🌷 💙 🤝
+Světový den UFO|🛸 👽 🌌
+Světový den afro|💇 🌍 ✊
+Světový den antikoncepce|💊 💗
+Světový den audiovizuálního dědictví|🎞️ 📼 🎬
+Světový den barmanů|🍸 🍹 🥃
+Světový den bez tabáku|🚭 🌱 💨
+Světový den bezdomovců|🏠 🤝 💙
+Světový den bezpečnosti a ochrany zdraví při práci|🦺 ⛑️ 🛠️
+Světový den bezpečnosti potravin|🥗 🧼 🍎
+Světový den boje proti AIDS|🎗️ ❤️ 🤝
+Světový den boje proti artritidě|💙 🦴 🤝
+Světový den boje proti epilepsii (Purple Day)|💜 💜 🤝
+Světový den boje proti nádorům mozku|🎗️ 🧠 💙
+Světový den boje proti rakovině|🎗️ 💗 🤝
+Světový den boje proti suchu a rozšiřování pouští|🏜️ 💧 🌱
+Světový den boje proti tuberkulóze|🫁 🎗️ 💙
+Světový den boje proti vzteklině|🐕 💉 🦊
+Světový den boje proti žloutence|🎗️ 💛 🩺
+Světový den boje za zákaz jaderných zbraní|☮️ 🕊️
+Světový den cestovního ruchu|🧳 ✈️ 🗺️ 🏝️
+Světový den chobotnic|🐙 🐙 🌊
+Světový den chronické obstrukční plicní nemoci|🫁 💙 🤝
+Světový den cideru|🍏 🍺 🍎
+Světový den delegátů|💼 🤝 🗂️
+Světový den deštných pralesů|🌴 🦜 🐸 🐒
+Světový den diabetiků|💙 🩸 🍏
+Světový den divadla|🎭 🎟️ 🎭
+Světový den divadla pro děti a mládež|🎭 🧸 🎈
+Světový den divoké přírody|🦁 🦒 🐘 🌿
+Světový den duševního vlastnictví|💡 ©️ 📜
+Světový den duševního zdraví|💚 🧠 🤗
+Světový den dárců krve|🩸 ❤️ 💉
+Světový den dětství|🧸 🎈 🪁
+Světový den dětí|🎈 🧸 🍭 ⭐
+Světový den frankofonie|🇫🇷 🥐 🗼
+Světový den grafiky|🎨 🖌️ 🖼️
+Světový den hemofilie|🩸 ❤️ 🤝
+Světový den her|🎲 🎮 🧩 ♟️
+Světový den hlasu|🎤 🗣️ 🎶
+Světový den hospodářských zvířat|🐄 🐖 🐑 🐓
+Světový den hrochů|🦛 🦛 💧
+Světový den hudby|🎵 🎸 🎹 🎶
+Světový den humanitárních pracovníků|🤝 🩺 🌍
+Světový den hypertenze|❤️ 🩺 💙
+Světový den investičních fondů|📈 💰 💼
+Světový den jízdního kola|🚲 🚴 🚲
+Světový den jódu|🧂 🌊 🐟
+Světový den knihy|📚 📖 🔖
+Světový den kokosu|🥥 🌴 🥥
+Světový den koktejlů|🍹 🍸 🍒
+Světový den komárů|🦟 🦟 🦟
+Světový den kreativity a inovací|💡 🎨 🚀
+Světový den kulturní rozmanitosti|🌍 🎭 🤝 🎶
+Světový den křečků|🐹 🐹 🌻
+Světový den laboratorních zvířat|🐭 🐰 💙
+Světový den lidských sídel|🏘️ 🏙️ 🏠
+Světový den luštěnin|🫘 🫛 🌱
+Světový den lvů|🦁 🦁 🌾
+Světový den léčby zvukem|🔔 🎶 🧘
+Světový den malárie|🦟 💉 🛡️
+Světový den manty|🌊 🐟 🐠
+Světový den marihuany|🌿 🍃 🌿
+Světový den medvědů|🐻 🐻 🍯
+Světový den meteorologie|⛅ 🌡️ 🌦️ 🌈
+Světový den metrologie|📏 ⚖️ ⏱️
+Světový den mimů|🤡 🎭 🤍
+Světový den mléka|🥛 🐄 🥛
+Světový den mokřadů|🦆 🐸 🌾 💧
+Světový den monitoringu diabetiků|💙 🩸 🍏
+Světový den morčat|🐹 🐹 🥬
+Světový den mrtvice|🧠 ❤️ 🤝
+Světový den míru|🕊️ ☮️ 🌍
+Světový den nemocných|💐 🤝 🩺
+Světový den nenásilí|☮️ 🕊️ 🤝
+Světový den nálepek|🏷️ ⭐ 🦄
+Světový den oceánů|🌊 🐋 🐠 🐚
+Světový den olivovníku|🫒 🌳 🫒
+Světový den origami|🦢 📄 🦢
+Světový den poezie|📜 ✍️ 🌹
+Světový den polibku|💋 💗 💋
+Světový den pomoci malomocným|🤝 💙 🩺
+Světový den populace|🌍 👨‍👩‍👧‍👦 🏙️
+Světový den potkanů|🐀 🐀 🧀
+Světový den pozdravů|👋 😊 👋
+Světový den počítačové gramotnosti|💻 🖱️ ⌨️
+Světový den pošty|✉️ 📮 📬
+Světový den prevence sebevražd|💛 🤝 🫂
+Světový den prevence týrání a zneužívání dětí|🧸 💙 🤝
+Světový den pro rozvoj informací|📡 💻 🌍
+Světový den proti dětské práci|🧒 🚫 📚
+Světový den proti mozkové mrtvici|🧠 ❤️ 🤝
+Světový den proti násilí na seniorech|👵 💜 🤝
+Světový den proti osteoporóze|🦴 🥛 💪
+Světový den proti trestu smrti|⚖️ 🕊️ 🚫
+Světový den psaní dopisů|✉️ ✍️ 💌
+Světový den páteře|🦴 🧘 💪
+Světový den předčasně narozených dětí|👶 💜 🍼
+Světový den půdy|🌱 🪱 🌾
+Světový den recyklace|♻️ 🌍 🗑️
+Světový den rodičů|👨‍👩‍👧 💗 🏠
+Světový den rorýsů|🐦 🐦 ☁️
+Světový den rostlinného mléka|🥛 🌱 🥥
+Světový den rybářství|🎣 🐟 🚣
+Světový den rádia|📻 🎙️ 🎶
+Světový den secese|🖼️ 🌸 🏛️
+Světový den slonů|🐘 🐘 🌿
+Světový den sociální spravedlnosti|⚖️ 🤝 🌍
+Světový den spotřebitelských práv|🛒 ⚖️ 🧾
+Světový den spoření|🐷 🪙 💰
+Světový den srdce|❤️ 💓 🫀
+Světový den standardů|📏 ✅ ⚙️
+Světový den statistiky|📊 📈 🔢
+Světový den telekomunikací a informační společnosti|📡 📱 🌐
+Světový den televize|📺 📺 🎬
+Světový den toalet|🚽 🧻 🧼
+Světový den tučňáků|🐧 🐧 ❄️
+Světový den tuňáků|🐟 🌊 🐟
+Světový den umění|🎨 🖼️ 🗿 🎭
+Světový den uprchlíků|🤝 🏠 🌍
+Světový den učitelů|🍎 📚 ✏️ 🎓
+Světový den vegetariánství|🥗 🥦 🍅 🌱
+Světový den vitamínu C|🍊 🍋 🥝
+Světový den vitamínu D|☀️ 🐟 🥛
+Světový den vody|💧 🌊 🚰
+Světový den vrabců|🐦 🐦 🌾
+Světový den výživy|🥗 🍎 🥕
+Světový den včel|🐝 🍯 🌼
+Světový den vědy pro mír a rozvoj|🔬 🕊️ 🧪
+Světový den větru|🌬️ 💨 🪁 🌀
+Světový den whisky|🥃 🥃 🧊
+Světový den zamyšlení (Den sesterství)|💭 👭 ⚜️
+Světový den zdraví|🩺 🍏 💪
+Světový den zeměměřičů|📐 🗺️ 📏
+Světový den zvýšení povědomí o autismu|🧩 💙 ♾️
+Světový den úrazů|🩹 🚑 🦺
+Světový den Červeného kříže|❤️ 🩺 🤝
+Světový den španělského jazyka|🇪🇸 💬 💃
+Světový den štěstí|😊 🍀 🌈 ⭐
+Světový den štěňat|🐶 🐶 🐾
+Světový den želv|🐢 🐢 🌊
+Světový den žen žijících na venkově|👩‍🌾 🌾 🏡
+Světový den životního prostředí|🌍 🌳 💧 ♻️
+Udržitelný den v astronomii|🔭 🌌 ⭐
+Vzpomínka na genocidu ve Rwandě|🕯️ 💜 🕊️
+svatý Martin|🐎 🍷 🦢 ❄️
+tzv. Mezinárodní den proti McDonald’s|🥗 🍔 🚫
+"""
+DAY_EMOJI = {}
+for _line in DAY_EMOJI_TEXT.strip().splitlines():
+    _name, _, _pics = _line.partition("|")
+    DAY_EMOJI[_name] = tuple(_pics.split())
+    if DAY_EMOJI[_name]:
+        SEASON_KINDS["day:" + _name] = tuple("emoji:" + e for e in DAY_EMOJI[_name])
+        SEASON_COLORS["day:" + _name] = ("#ffffff",)
+# the calendar's days a special day (HOLIDAYS, drawn motifs) stands for already
+CALENDAR_THEMED = {"Den japonské kultury", "Halloween", "Dušičky", "Den všech svatých", "Mikuláš",
+                   "Dneska chodí Mikuláš", "Den Země", "Den svatého Patrika", "Den Star Wars", "Den pí",
+                   "Mezinárodní den žen", "Světový den rádia", "Mezinárodní den hudby"}
+
+
+def calendar_days_today(most: int = 3) -> list:
+    """Today's days of the Czech calendar that have pictures of their own (as "day:" ids), not those a special
+    day already dresses the date for; at most `most`."""
+    themed = set(holidays_today())
+    out = []
+    for name, _by, _since in day_cz().get("days") or []:
+        if DAY_EMOJI.get(name) and not (name in CALENDAR_THEMED and themed):
+            out.append("day:" + name)
+    return out[:most]
 
 SEASON_CZ = {"autumn": ("podzim", "podzimu", "listí"), "winter": ("zima", "zimy", "vločky a jinovatka"),
              "spring": ("jaro", "jara", "květy, poupata a větvičky"), "summer": ("léto", "léta", "slunce, palmy a mušle")}
@@ -6503,9 +7032,11 @@ def season_text(clock_bytes: int = None) -> str:
     season, nxt, share = season_today()
     name, _, motifs = SEASON_CZ[season]
     days = holidays_today()
-    if days:  # the season's always, the day's as many again
-        name += " + " + " + ".join(HOLIDAYS[d][0] for d in days)
-        motifs += "; napůl s: " + ", ".join(HOLIDAYS[d][1] for d in days)
+    cal = calendar_days_today()
+    if days or cal:  # the season's always, the day's as many again
+        name += " + " + " + ".join([HOLIDAYS[d][0] for d in days] + [c[4:] for c in cal])
+        motifs += "; napůl s: " + ", ".join([HOLIDAYS[d][1] for d in days]
+                                          + [" ".join(DAY_EMOJI[c[4:]]) for c in cal])
     text = (f"Padají pomalu jako sníh a pootáčejí se za datem a časem, tlačítky, kvalitou, hlasitostí a jmény "
             f"(písmena jen v barvách měsíce, čitelnější); bez animací stojí; klik na datum je vypne a zapne; "
             f"každý den trochu jinak; o svátcích a zvláštních dnech (české, americké i světové: Vánoce, Halloween, "
@@ -7866,7 +8397,7 @@ class SnowFall:
             return
         self._key, self.sprites = key, []
         season, nxt, share = season_today()
-        days = holidays_today()
+        days = holidays_today() + calendar_days_today()
         rng = random.Random(t.tm_year * 1000 + t.tm_yday)
         native = self.widget.get_native()
         if not native:
@@ -7892,13 +8423,22 @@ class SnowFall:
             near = Gsk.Shadow()  # (and a tighter one: the edge lit, not only a haze)
             near.color, near.dx, near.dy, near.radius = _rgba(255, 250, 235, 0.7), 0, 0, max(1.5, size * 0.03)
             s.push_shadow([glow, near])
-            getattr(SeasonDecor, "_" + kind)(s, rng, size, color, sea)
+            if kind.startswith("emoji:"):  # a calendar day's picture: the emoji, colored, as big as a motif
+                lay = self.widget.create_pango_layout(kind[6:])
+                desc = Pango.FontDescription.from_string("Noto Color Emoji")
+                desc.set_absolute_size(size * 0.85 * Pango.SCALE)
+                lay.set_font_description(desc)
+                ink = lay.get_pixel_extents()[1]
+                s.translate(Graphene.Point().init(-ink.x - ink.width / 2, -ink.y - ink.height / 2))
+                s.append_layout(lay, _hex("#ffffff"))
+            else:
+                getattr(SeasonDecor, "_" + kind)(s, rng, size, color, sea)
             s.pop()
             node = s.to_node()
             if node is None:
                 continue
             tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, box * k, box * k))
-            self.sprites.append((tex, box, kind in UPRIGHT))
+            self.sprites.append((tex, box, kind in UPRIGHT or kind.startswith("emoji:")))
 
     def _sow(self, base: float, anywhere: bool) -> dict:
         x, y, w, h = self.field

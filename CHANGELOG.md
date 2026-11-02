@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.27 — Obrázky všech dnů
+
+- **0.27.0** (2026-11-03) Každý den z kalendáře (499 mezinárodních a významných dnů) má vlastní padající obrázky (barevné emoji: štěňata, jazz, špagety, Harry Potter…), napůl s ozdobami ročního období jako svátky; pietní dny (oběti, genocidy, otroctví, násilí) tiché obrázky: svíčky, holubice, bílé květy a stužky; v okénku dne jsou u každého dne jeho obrázky
+
 ## 0.26 — Počasí
 
 - **0.26.9** (2026-11-03) Měsíc u tlačítka ⓘ se při úzkém místě (celá obrazovka, široký obal) zmenší, místo aby zmizel
