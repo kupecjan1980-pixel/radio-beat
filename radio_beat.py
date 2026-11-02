@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.7"
+APP_VERSION = "0.25.8"
 
 import collections
 import ctypes
@@ -2398,7 +2398,11 @@ def cz_steps(text: str) -> str:
     text = re.sub(r"(\d)\.(\d+) (s|MB|GB)\b", r"\1,\2 \3", text)  # Czech decimal commas
     # the first Czech wording of what a step waited for, as it reads now
     text = re.sub(r"GPU vytížená (\d+) %", r"vytížení GPU \1 %", text)
-    text = re.sub(r"(?<!GPU )(\d+) % (?:% )?při ", r"vytížení GPU \1 % při ", text)  # ("45 % % při": a slip)
+    # (a number glued back together first: the rule below once matched the last digit of "GPU 15 %" alone,
+    # "GPU 1vytížení GPU 5 %", again on every showing)
+    while re.search(r"\d+vytížení GPU \d", text):
+        text = re.sub(r"(\d+)vytížení GPU (\d)", r"\1\2", text)
+    text = re.sub(r"(?<!GPU )(?<![\d,])(\d+) % (?:% )?při ", r"vytížení GPU \1 % při ", text)  # ("45 % % při")
     text = text.replace(" for detail", " pro detail").replace("zostřen", "zaostřen").replace("zostřov", "zaostřov")
     text = re.sub(r"(?<!CPU )čekal na: ", "CPU čekal na: ", text)
     text = text.replace("na GPU (procesor ji jen zásobuje daty)", "GPU (CPU ji jen zásobuje daty)")
