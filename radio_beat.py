@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.4"
+APP_VERSION = "0.26.5"
 
 import collections
 import ctypes
@@ -5827,11 +5827,11 @@ def glass_glare(snap, w: float, h: float, radius: float) -> None:
     faint caustic). Sized by the corner's curve: strong on small round glass, faint on the big panels."""
     m = min(w, h)
     r = max(4.0, min(radius, m / 2))
-    big = m > 160  # the panels and menus: only a hint, the text stays readable
-    a = 0.22 if big else 0.5
+    big = m > 160  # the panels and menus: a long soft glare along the top left, not over the text
+    a = 0.4 if big else 0.5
     rx, ry = max(r * 0.95, m * 0.16), max(r * 0.38, m * 0.06)
     if big:
-        rx, ry = min(rx, 90.0), min(ry, 26.0)
+        rx, ry = min(max(rx, w * 0.16), 220.0), min(ry, 34.0)
     cx, cy = r * 0.55 + rx * 0.55, r * 0.35 + ry * 0.6
     _glare_on(snap, cx, cy, rx, ry, -24, [_stop(0.0, 255, 255, 255, a), _stop(0.45, 255, 255, 255, a * 0.45),
                                           _stop(1.0, 255, 255, 255, 0.0)])
@@ -5839,7 +5839,7 @@ def glass_glare(snap, w: float, h: float, radius: float) -> None:
               [_stop(0.0, 255, 255, 255, min(0.95, a * 1.8)), _stop(1.0, 255, 255, 255, 0.0)])
     crx, cry = max(r * 0.8, m * 0.14), max(r * 0.3, m * 0.05)  # the caustic, bluish
     if big:
-        crx, cry = min(crx, 80.0), min(cry, 20.0)
+        crx, cry = min(max(crx, w * 0.12), 180.0), min(cry, 26.0)
     _glare_on(snap, w - r * 0.45 - crx * 0.55, h - r * 0.3 - cry * 0.7, crx, cry, -24,
               [_stop(0.0, 225, 240, 255, a * 0.5), _stop(1.0, 225, 240, 255, 0.0)])
 
@@ -7475,7 +7475,7 @@ class WeatherView(Gtk.Widget):
     def _layout(self, markup: str, px: float, font: str = None):
         lay = self.create_pango_layout(None)
         desc = Pango.FontDescription.from_string(font or self.font or "Sans")
-        desc.set_weight(Pango.Weight.SEMIBOLD)
+        desc.set_weight(Pango.Weight.BOLD)
         desc.set_absolute_size(px * Pango.SCALE)
         lay.set_font_description(desc)
         lay.set_markup(markup, -1)
@@ -7488,20 +7488,16 @@ class WeatherView(Gtk.Widget):
             self.queue_resize()
             return
         icon = h  # the sky: a square as tall as the view
-        # the numbers as tall as 60 % of it at most, all of it as wide as the room at most
+        # the numbers as wide as the room lets them (the cover's edge is the limit), then stretched taller to 82 %
+        # of the height (like the song info: tall letters, not wider); the drop as tall as they are
         a_ink, b_ink = self._layout(self.info["temps"], 100)[1], self._layout(self.info["hum"], 100)[1]
         tall = max(a_ink.height, b_ink.height)
-        px = 100 * h * 0.74 / max(1, tall)
-        gap = h * 0.14
-        for _ in range(2):
-            scale = px / 100
-            drop = tall * scale * 1.15
-            need = icon + gap + (a_ink.width + b_ink.width) * scale + gap + drop + gap * 0.3
-            if need <= w:
-                break
-            px *= (w - icon - gap * 2.3) / max(1, need - icon - gap * 2.3) * 0.98
+        gap = h * 0.12
+        drop = h * 0.84
+        room = w - icon - gap * 2.3 - drop * 0.72
+        px = 100 * min(room / max(1, a_ink.width + b_ink.width), h * 0.82 / max(1, tall)) * 0.98
         a, b = self._layout(self.info["temps"], px), self._layout(self.info["hum"], px)
-        drop = max(a[1].height, b[1].height) * 1.15
+        self.sy = max(1.0, min(1.6, h * 0.82 / max(1, max(a[1].height, b[1].height))))
         sky = None
         if self.info["sky"]["emoji"]:
             ink = self._layout(self.info["sky"]["emoji"], 100, "Noto Color Emoji")[1]
@@ -7509,7 +7505,7 @@ class WeatherView(Gtk.Widget):
                                100 * 0.95 * icon / max(1, ink.width, ink.height), "Noto Color Emoji")
         x_a = icon + gap
         x_d = x_a + a[1].width + gap
-        x_b = x_d + drop * 0.75 + gap * 0.3
+        x_b = x_d + drop * 0.72 + gap * 0.3
         self.parts = {"icon": icon, "sky": sky, "a": (a, x_a), "b": (b, x_b), "drop": (drop, x_d)}
         self.queue_resize()
         self.queue_draw()
@@ -7529,10 +7525,12 @@ class WeatherView(Gtk.Widget):
             snap.translate(Graphene.Point().init((icon - ink.width) / 2 - ink.x, (h - ink.height) / 2 - ink.y))
             snap.append_layout(lay, _rgba(255, 255, 255, 1))
             snap.restore()
+        sy = getattr(self, "sy", 1.0)
         for key in ("a", "b"):
             (lay, ink), x = P[key]
             snap.save()
-            snap.translate(Graphene.Point().init(x - ink.x, (h - ink.height) / 2 - ink.y))
+            snap.translate(Graphene.Point().init(x - ink.x, (h - ink.height * sy) / 2 - ink.y * sy))
+            snap.scale(1, sy)
             snap.append_layout(lay, _rgba(255, 255, 255, 0.95))
             snap.restore()
         snap.pop()
