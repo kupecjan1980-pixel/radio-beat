@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.25.14"
+APP_VERSION = "0.26.0"
 
 import collections
 import ctypes
@@ -7173,6 +7173,140 @@ class ClockView(Gtk.Widget):
         return [cols[(i + self.SEED) % len(cols)] for i in self.order]
 
 
+# The weather beside the logo (Open-Meteo, free, no key), for the place chosen in the gear menu.
+WMO = {0: ("☀️", "jasno"), 1: ("🌤️", "skoro jasno"), 2: ("⛅", "polojasno"), 3: ("☁️", "zataženo"),
+       45: ("🌫️", "mlha"), 48: ("🌫️", "mlha s námrazou"), 51: ("🌦️", "slabé mrholení"), 53: ("🌦️", "mrholení"),
+       55: ("🌦️", "silné mrholení"), 56: ("🌧️", "mrznoucí mrholení"), 57: ("🌧️", "mrznoucí mrholení"),
+       61: ("🌧️", "slabý déšť"), 63: ("🌧️", "déšť"), 65: ("🌧️", "silný déšť"), 66: ("🌧️", "mrznoucí déšť"),
+       67: ("🌧️", "mrznoucí déšť"), 71: ("🌨️", "slabé sněžení"), 73: ("🌨️", "sněžení"), 75: ("🌨️", "silné sněžení"),
+       77: ("🌨️", "sněhová zrna"), 80: ("🌦️", "přeháňky"), 81: ("🌦️", "přeháňky"), 82: ("⛈️", "prudké přeháňky"),
+       85: ("🌨️", "sněhové přeháňky"), 86: ("🌨️", "sněhové přeháňky"), 95: ("⛈️", "bouřka"),
+       96: ("⛈️", "bouřka s kroupami"), 99: ("⛈️", "bouřka s kroupami")}
+MOON = (("🌑", "nov"), ("🌒", "dorůstající srpek"), ("🌓", "první čtvrť"), ("🌔", "dorůstající měsíc"),
+        ("🌕", "úplněk"), ("🌖", "couvající měsíc"), ("🌗", "poslední čtvrť"), ("🌘", "couvající srpek"))
+
+
+def moon_phase(t: float = None) -> tuple:
+    """(emoji, Czech name) of the moon's phase now: days since a known new moon, in synodic months."""
+    t = time.time() if t is None else t
+    age = ((t - 947182440) / 86400.0) % 29.530588853  # (new moon 2000-01-06 18:14 UTC)
+    return MOON[int(age / 29.530588853 * 8 + 0.5) % 8]
+
+
+# The weather's places (the gear menu's choice): (key, name shown, latitude, longitude).
+WEATHER_PLACES = (("oprechtice", "Oprechtice", 49.72608, 18.26488),
+                  ("privoz", "Ostrava-Přívoz", 49.85078, 18.25989),
+                  ("poruba", "Ostrava-Poruba", 49.83762, 18.15751),
+                  ("praha", "Praha", 50.08804, 14.42076))
+
+
+def weather_spot(key: str) -> tuple:
+    return next((p for p in WEATHER_PLACES if p[0] == key), WEATHER_PLACES[0])
+
+
+def weather_now(lat: float, lon: float) -> dict:
+    url = ("https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&timezone=auto&forecast_days=1"
+           "&current=temperature_2m,relative_humidity_2m,weather_code,is_day"
+           "&daily=temperature_2m_max,temperature_2m_min" % (lat, lon))
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=10) as r:
+        d = json.loads(r.read().decode())
+    c, day = d["current"], d["daily"]
+    return {"temp": c["temperature_2m"], "hum": c["relative_humidity_2m"], "code": int(c["weather_code"]),
+            "day": bool(c.get("is_day", 1)), "min": day["temperature_2m_min"][0], "max": day["temperature_2m_max"][0]}
+
+
+def _temp_color(t: float) -> str:
+    """Freezing blue … mild green … hot red."""
+    for top, col in ((-10, "#8fb8ff"), (0, "#a8d8ff"), (8, "#9ff0e0"), (16, "#c8f58a"), (24, "#ffd166"),
+                     (30, "#ff9f5a")):
+        if t < top:
+            return col
+    return "#ff6b5a"
+
+
+def weather_lines(w: dict, place: str) -> list:
+    """Two lines of Pango markup: the sky (the moon in its phase on a clear night), the temperature, the day's
+    lowest and highest, the humidity; then what the sky's doing, the place and the moon's phase."""
+    sky, words = WMO.get(w["code"], ("🌡️", ""))
+    moon, moon_name = moon_phase()
+    if not w["day"]:
+        sky = {0: moon, 1: moon, 2: moon + "☁️", 51: "🌧️", 53: "🌧️", 55: "🌧️", 80: "🌧️", 81: "🌧️"}.get(w["code"], sky)
+    esc = GLib.markup_escape_text
+    t, lo, hi = round(w["temp"]), round(w["min"]), round(w["max"])
+    one = (f"{sky} <span foreground='{_temp_color(w['temp'])}'>{t} °C</span>  "
+           f"<span foreground='{_temp_color(w['min'])}'>↓{lo}°</span> "
+           f"<span foreground='{_temp_color(w['max'])}'>↑{hi}°</span>  "
+           f"<span foreground='#7fd8ff'>💧{round(w['hum'])} %</span>")
+    two = " · ".join(p for p in (esc(words), esc(place), f"{moon} {esc(moon_name)}") if p)
+    return [one, two]
+
+
+class WeatherView(Gtk.Widget):
+    """The weather beside the logo: two lines (the bigger one first), each as big as fits its room, on the
+    left of it; white with a shadow like the song info, the temperatures and the humidity in their colors."""
+
+    def __init__(self, **kw):
+        super().__init__(can_target=False, **kw)
+        self.lines, self.room, self.font, self.lays = [], (0, 0), None, None
+
+    def set_lines(self, lines: list, font: str = None) -> None:
+        if lines != self.lines or font != self.font:
+            self.lines, self.font, self.lays = lines, font, None
+            self._fit()
+
+    def set_room(self, w: int, h: int) -> None:
+        if (w, h) != self.room:
+            self.room, self.lays = (w, h), None
+            self._fit()
+
+    def do_measure(self, orientation, for_size):
+        n = self.room[0] if orientation == Gtk.Orientation.HORIZONTAL else self.room[1]
+        return n, n, -1, -1
+
+    def _fit(self) -> None:
+        w, h = self.room
+        if not self.lines or w < 20 or h < 12:
+            self.lays = None
+            self.queue_resize()
+            return
+        shares = (0.58, 0.36)[:len(self.lines)]
+        lays, y, first = [], 0.0, None
+        for text, share in zip(self.lines, shares):
+            lay = self.create_pango_layout(None)
+            desc = Pango.FontDescription.from_string(self.font or "Sans")
+            desc.set_weight(Pango.Weight.SEMIBOLD)
+
+            def ink_at(px):
+                desc.set_absolute_size(px * Pango.SCALE)
+                lay.set_font_description(desc)
+                lay.set_markup(text, -1)
+                return lay.get_pixel_extents()[1]
+            ink = ink_at(100)
+            px = 100 * 0.97 * min(w / max(1, ink.width), h * share / max(1, ink.height))
+            if first is not None:
+                px = min(px, first * 0.75)  # the second line never bigger than the first
+            first = px if first is None else first
+            ink = ink_at(px)
+            lays.append((lay, ink, y))
+            y += ink.height + h * 0.06
+        self.lays = lays
+        self.queue_resize()
+        self.queue_draw()
+
+    def do_snapshot(self, snap) -> None:
+        if not self.lays:
+            return
+        shadow = Gsk.Shadow()
+        shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.9), -1, 2, 3
+        snap.push_shadow([shadow])
+        for lay, ink, y in self.lays:
+            snap.save()
+            snap.translate(Graphene.Point().init(-ink.x, y - ink.y))
+            snap.append_layout(lay, _rgba(255, 255, 255, 0.95))
+            snap.restore()
+        snap.pop()
+
+
 class FitText(Gtk.Widget):
     """One line of small text (the status) as big as fits its room, no bigger than MAX_PT, in the middle of it."""
 
@@ -8283,6 +8417,9 @@ class Window(Adw.ApplicationWindow):
         self._tick_clock()
         self._make_puddle(overlay, scrim)
         overlay.add_overlay(header)  # last: on top of the text
+        # the weather beside the logo (over the header's empty middle; not clickable)
+        self.weather_view = WeatherView(halign=Gtk.Align.START, valign=Gtk.Align.START, visible=False)
+        overlay.add_overlay(self.weather_view)
 
         self.set_content(overlay)
         self._apply_scale()
@@ -8386,6 +8523,20 @@ class Window(Adw.ApplicationWindow):
         start_full.set_active(self.app.settings.get("start_full", True))
         start_full.connect("notify::active", lambda r, _: self.app.set_look(start_full=r.get_active()))
         group.add(start_full)
+        self.weather_row = Adw.SwitchRow(title="Počasí vedle loga", subtitle_lines=0,
+                                         subtitle="Teplota, nejnižší a nejvyšší za den, vlhkost, obloha a fáze "
+                                                  "Měsíce (Open-Meteo)")
+        self.weather_row.set_active(self.app.settings.get("weather", True))
+        self.weather_row.connect("notify::active", lambda r, _: self.app.set_weather(on=r.get_active()))
+        group.add(self.weather_row)
+        self.weather_place_row = Adw.ComboRow(title="Místo pro počasí",
+                                              model=Gtk.StringList.new([p[1] for p in WEATHER_PLACES]))
+        keys = [p[0] for p in WEATHER_PLACES]
+        now = self.app.settings.get("weather_place", "oprechtice")
+        self.weather_place_row.set_selected(keys.index(now) if now in keys else 0)
+        self.weather_place_row.connect("notify::selected",
+                                       lambda r, _: self.app.set_weather(place=keys[r.get_selected()]))
+        group.add(self.weather_place_row)
         auto_up = Adw.SwitchRow(title="Automatické aktualizace",
                                 subtitle="Každých 5 minut zkontroluje novou verzi, nainstaluje ji a spustí se znovu",
                                 subtitle_lines=0)
@@ -8996,7 +9147,41 @@ class Window(Adw.ApplicationWindow):
             l.set_child_visible(not on)
             l.set_size_request(-1, 0 if on else -1)
         self.info_stack.set_visible(on)
+        self._place_weather()
         return False
+
+    WEATHER_GAP = 14  # from the logo, the cover and the song info
+
+    def _place_weather(self) -> None:
+        """Right of the logo, as tall as it (a little more if there's room above the song info), up to the
+        cover's left edge: never over the cover, the song info below or the screen's top edge."""
+        view = getattr(self, "weather_view", None)
+        if view is None:
+            return
+        cover, W = self.cover_rect(), self.get_width()
+        ok_l, lb = self.logo.compute_bounds(self)
+        ok_i, ib = self.info.compute_bounds(self)
+        if not (ok_l and view.lines and self.app.settings.get("weather", True)):
+            view.set_visible(False)
+            return
+        x0 = lb.get_x() + lb.get_width() + self.WEATHER_GAP
+        y0 = max(6.0, lb.get_y())
+        right = (cover[0] - self.INFO_GAP) if cover else W * 0.45
+        below = ib.get_y() - self.WEATHER_GAP if ok_i else y0 + lb.get_height()
+        h = min(below - y0, lb.get_height() * 1.5)
+        w = right - x0
+        if w < 90 or h < 20:
+            view.set_visible(False)
+            return
+        view.set_margin_start(int(x0))
+        view.set_margin_top(int(y0))
+        view.set_room(int(w), int(h))
+        view.set_visible(True)
+
+    def show_weather(self, lines: list | None) -> None:
+        beat = self.app.settings.get("font", "beat") == "beat" and self.app.fonts_ok
+        self.weather_view.set_lines(lines or [], "Oswald" if beat else None)
+        self._place_weather()
 
     def _make_puddle(self, overlay, scrim) -> None:
         behind = [(self.backdrop, 0.45), (self.cover, 0.0)]
@@ -10073,6 +10258,8 @@ class App(Adw.Application):
         GLib.timeout_add_seconds(5, self._watchdog)
         self._programme()
         GLib.timeout_add_seconds(60, self._programme_tick)
+        GLib.timeout_add_seconds(3, lambda: (self.weather_tick(), False)[1])
+        GLib.timeout_add_seconds(1200, lambda: (self.weather_tick(), True)[1])  # every 20 minutes
         try:
             self.mpris = Mpris(self)
         except GLib.Error as e:
@@ -10128,6 +10315,45 @@ class App(Adw.Application):
                 w.unfullscreen()
 
     # updates / tray placement
+    def set_weather(self, on: bool = None, place: str = None) -> None:
+        if on is not None:
+            self.settings["weather"] = on
+        if place is not None:
+            self.settings["weather_place"] = place
+        save_settings(self.settings)
+        self.weather_tick()
+
+    def weather_tick(self) -> None:
+        """The weather fetched anew (in a thread), then shown beside the logo."""
+        if not self.settings.get("weather", True):
+            if self.win:
+                self.win.show_weather(None)
+            return
+        if getattr(self, "_weather_busy", False):
+            return
+        self._weather_busy = True
+        _, name, lat, lon = weather_spot(self.settings.get("weather_place", "oprechtice"))
+
+        def work():
+            w, err = None, None
+            try:
+                w = weather_now(lat, lon)
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                err = e
+            GLib.idle_add(self._weather_done, name, w, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _weather_done(self, name, w, err):
+        self._weather_busy = False
+        if err:
+            print("Rádio Beat: počasí:", err, file=sys.stderr)
+        if self.win:
+            if w:
+                self.win.show_weather(weather_lines(w, name))
+            elif not getattr(self.win.weather_view, "lines", None):
+                self.win.show_weather(None)
+        return False
+
     def set_look(self, **changes) -> None:
         self.settings.update(changes)
         save_settings(self.settings)

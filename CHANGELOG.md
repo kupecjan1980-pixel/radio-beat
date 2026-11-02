@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.26 — Počasí
+
+- **0.26.0** (2026-11-02) Počasí vedle loga vlevo nahoře (mezi logem a obalem, nad informacemi o skladbě, od horního okraje s mezerou): barevná obloha (slunce, slunce za mrakem, déšť…, v noci Měsíc v jeho fázi), teplota, nejnižší a nejvyšší za den, vlhkost, popis, místo a fáze Měsíce; místo v nastavení (Oprechtice, Ostrava-Přívoz, Ostrava-Poruba, Praha; výchozí Oprechtice); data z Open-Meteo, každých 20 minut
+
 ## 0.25 — Padající ozdoby
 
 - **0.25.14** (2026-11-02) Přepínače v panelech a nabídkách s výrazným tmavým obrysem (dráha i kolečko): vidět i na bílém obalu
