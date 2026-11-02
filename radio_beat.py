@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.26.8"
+APP_VERSION = "0.26.9"
 
 import collections
 import ctypes
@@ -9643,7 +9643,11 @@ class Window(Adw.ApplicationWindow):
         left = (cover[2] + self.INFO_GAP) if cover else self.get_width() * 0.55
         x1 = btn.get_x() - self.WEATHER_GAP
         w = x1 - left
-        if w < view.need(h) or h < 16:
+        if w < view.need(h):  # narrower: smaller (in its band's middle), not hidden
+            h2 = w / view.need(1.0)
+            y0 += (h - h2) / 2
+            h = h2
+        if h < 14:
             view.set_visible(False)
             return
         view.set_margin_start(int(left))
