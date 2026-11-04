@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.27.6"
+APP_VERSION = "0.27.7"
 
 import collections
 import ctypes
@@ -2733,8 +2733,15 @@ class Enhancer:
         return max(t, self.tile_cap(), key=self.TILES.index)
 
     def tile_cap(self) -> int:
-        """The biggest tile allowed: the smallest one after a GPU reset during Real-ESRGAN."""
-        return self.TILES[-1] if os.path.exists(self.hang_file) else self.TILES[0]
+        """The biggest tile allowed. Integrated GPUs: only the smallest. A big tile is one long GPU job, and with
+        the window's glass drawing on the same GPU it can outlast the kernel's timeout; every timeout is a GPU
+        recovery, and when one fails the whole GPU resets and every program using it loses it (Vega 7730U:
+        39 timeouts on 2-3 Nov 2026 at 128, the last one a full reset; none in 135 pictures at 32). Any GPU after
+        a reset during Real-ESRGAN: the same."""
+        if os.path.exists(self.hang_file):
+            return self.TILES[-1]
+        integrated = self.gpu and not self.soft and not DISCRETE_GPU.search(self.gpu)
+        return self.TILES[-1] if integrated else self.TILES[0]
 
     def gpu_lost(self) -> None:
         """The GPU was reset (device lost): if Real-ESRGAN was working, it caused it, so small tiles for good."""
@@ -3189,18 +3196,11 @@ class Enhancer:
             return how if self._resize(big, size, out) else None
         res, err = self._esr(feed, big, model)
         while res is None and self.tile != self.TILES[-1]:
-            # The GPU timed out (black or failed): smaller tiles from now on, and again.
+            # The GPU timed out (black or failed): smaller tiles from now on, for good: never back up to the
+            # size that failed (trying it again is another GPU timeout, and one may end in a full reset).
             self.tile = self.TILES[self.TILES.index(self.tile) + 1]
-            self.tile_ok = 0
             self._save_tile()
             res, err = self._esr(feed, big, model)
-        if res and res != "killed" and self.tile != self.TILES[0]:
-            # Small tiles leave the GPU idle between them (it clocks down: a quarter of it busy): after a few
-            # pictures done right, the next bigger tile is tried again (a failure steps back down, as above).
-            self.tile_ok = getattr(self, "tile_ok", 0) + 1
-            if self.tile_ok >= 3 and self.TILES.index(self.tile) > self.TILES.index(self.tile_cap()):
-                self.tile, self.tile_ok = self.TILES[self.TILES.index(self.tile) - 1], 0
-                self._save_tile()
         if res == "killed":
             return "killed"
         if res is None or not self._resize(big, size, out):
@@ -3293,6 +3293,7 @@ class Enhancer:
 
     def _esr(self, src: str, out: str, model: str = ESR_MODEL) -> tuple[str | None, str]:
         """Real-ESRGAN 4x: (out, stderr); out None on failure, "killed" when stopped."""
+        self.tile = max(self.tile, self.tile_cap(), key=self.TILES.index)
         cmd = ["nice", "-n", "19", self.bin, "-i", src, "-o", out, "-n", model, "-s", "4", "-m", self.models,
                "-t", str(self.tile), "-f", "png"]
         if self.gpu_index is not None:

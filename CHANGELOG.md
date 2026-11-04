@@ -4,6 +4,7 @@
 
 ## 0.27 — Obrázky všech dnů
 
+- **0.27.7** (2026-11-04) Prevence zamrznutí: na integrovaných GPU běží AI zvětšování vždy po nejmenších dlaždicích a po selhání se už nikdy nevrací k větším (dlouhé úlohy GPU vypršely a jeden takový výpadek skončil resetem celé GPU)
 - **0.27.6** (2026-11-04) Tlačítko Zkontrolovat je stejná červená pilulka jako časy v HRÁLO; místo pro počasí pod myší se zvýrazní stejnou červenou
 - **0.27.5** (2026-11-04) Počasí i Měsíc se vypnou klepnutím na obrázek a zapnou klepnutím na jeho prázdné místo (pod myší je tam slabý obrázek); přepínače v nastavení to sledují
 - **0.27.4** (2026-11-04) Místo pro počasí: seznam se rozbalí přímo pod vybraným místem ve skle panelu, s celými názvy (žádná šedá nabídka na druhé straně)
