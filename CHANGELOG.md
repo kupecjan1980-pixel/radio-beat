@@ -4,6 +4,7 @@
 
 ## 0.27 — Obrázky všech dnů
 
+- **0.27.3** (2026-11-04) Po resetu GPU (VK_ERROR_DEVICE_LOST) okno nezamrzne: Rádio Beat se samo spustí znovu; když reset způsobilo AI zvětšování (Real-ESRGAN), dál jen nejmenší dlaždice (kratší úlohy, GPU nevyprší)
 - **0.27.2** (2026-11-03) Samurajské masky vždy červené (žádné černé)
 - **0.27.1** (2026-11-03) Den památky obětí holokaustu: kromě svíček, holubic a bílých srdcí padá zlatá Davidova hvězda (kreslená)
 - **0.27.0** (2026-11-03) Každý den z kalendáře (499 mezinárodních a významných dnů) má vlastní padající obrázky (barevné emoji: štěňata, jazz, špagety, Harry Potter…), napůl s ozdobami ročního období jako svátky; pietní dny (oběti, genocidy, otroctví, násilí) tiché obrázky: svíčky, holubice, bílé květy a stužky; v okénku dne jsou u každého dne jeho obrázky

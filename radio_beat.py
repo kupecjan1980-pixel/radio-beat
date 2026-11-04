@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.27.2"
+APP_VERSION = "0.27.3"
 
 import collections
 import ctypes
@@ -2470,6 +2470,9 @@ class Enhancer:
         self.bin = os.path.join(self.dir, "realesrgan-ncnn-vulkan")
         self.models = os.path.join(self.dir, "models")
         self.tile_file = os.path.join(self.dir, "tile")
+        # Written when the GPU was lost (reset) while Real-ESRGAN ran: the iGPU's compute timed out on a big tile
+        # (2026-11-03 on the Vega: ring comp_1.3.0 timeout → GPU reset). From then on only the smallest tiles.
+        self.hang_file = os.path.join(self.dir, "gpu-hang")
         self.own_ffmpeg = os.path.join(DATA_DIR, "ffmpeg", "ffmpeg")
         self.ffmpeg = shutil.which("ffmpeg")
         self.ai = None  # True: GPU found and tested; False: no usable GPU; None: not known yet
@@ -2724,9 +2727,27 @@ class Enhancer:
         try:
             with open(self.tile_file) as f:
                 t = int(f.read().strip())
-            return t if t in self.TILES else self.TILES[0]
+            t = t if t in self.TILES else self.TILES[0]
         except (OSError, ValueError):
-            return self.TILES[0]
+            t = self.TILES[0]
+        return max(t, self.tile_cap(), key=self.TILES.index)
+
+    def tile_cap(self) -> int:
+        """The biggest tile allowed: the smallest one after a GPU reset during Real-ESRGAN."""
+        return self.TILES[-1] if os.path.exists(self.hang_file) else self.TILES[0]
+
+    def gpu_lost(self) -> None:
+        """The GPU was reset (device lost): if Real-ESRGAN was working, it caused it, so small tiles for good."""
+        proc = self.proc
+        if not proc or proc.poll() is not None or "realesrgan" not in " ".join(map(str, proc.args)):
+            return
+        try:
+            with open(self.hang_file, "w") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S") + f" tile {self.tile}\n")
+        except OSError:
+            pass
+        self.tile = self.TILES[-1]
+        self._save_tile()
 
     def _save_tile(self) -> None:
         try:
@@ -2880,7 +2901,7 @@ class Enhancer:
             src = os.path.join(work, "t.png")
             with open(src, "wb") as f:
                 f.write(png)
-            start = self.TILES.index(self.tile)
+            start = max(self.TILES.index(self.tile), self.TILES.index(self.tile_cap()))
             for tile in self.TILES[start:]:
                 self.tile = tile
                 out, err = self._esr(src, os.path.join(work, "o.png"))
@@ -3177,7 +3198,7 @@ class Enhancer:
             # Small tiles leave the GPU idle between them (it clocks down: a quarter of it busy): after a few
             # pictures done right, the next bigger tile is tried again (a failure steps back down, as above).
             self.tile_ok = getattr(self, "tile_ok", 0) + 1
-            if self.tile_ok >= 3:
+            if self.tile_ok >= 3 and self.TILES.index(self.tile) > self.TILES.index(self.tile_cap()):
                 self.tile, self.tile_ok = self.TILES[self.TILES.index(self.tile) - 1], 0
                 self._save_tile()
         if res == "killed":
@@ -11268,6 +11289,7 @@ class App(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
+        threading.Thread(target=self._gpu_watch, daemon=True).start()
         # text as big as on this desktop everywhere (KDE says 1.0, Omarchy 1.64): the 'i' panel and the menus
         # look the same on the DeskMini's full HD as on a 4K screen at 2x
         Gtk.Settings.get_default().set_property("gtk-xft-dpi", int(96 * 1024 * self.TEXT_SCALE))
@@ -11815,6 +11837,49 @@ class App(Adw.Application):
             self._vol_cur = self._vol_target = 100 if on else self.settings["volume"]
             self.mpv.volume(self._vol_cur)
         self.update()
+
+    # GPU reset (amdgpu resets the whole GPU when a job hangs): GTK's Vulkan renderer can't come back from a
+    # lost device, the window freezes and can't even be closed. Seen in the log (GTK/Mesa write it to fd 2 →
+    # LOG): Rádio Beat starts itself again (the window as it was), the old one goes away whatever state it's in.
+    def _gpu_watch(self):
+        try:
+            pos = os.path.getsize(LOG)
+        except OSError:
+            return
+        started = time.monotonic()
+        while not getattr(self, "quitting", False):
+            time.sleep(2)
+            try:
+                with open(LOG, "rb") as f:
+                    f.seek(pos)
+                    new = f.read()
+                    pos = f.tell()
+            except OSError:
+                continue
+            if b"VK_ERROR_DEVICE_LOST" not in new:
+                continue
+            print("Rádio Beat: GPU byla resetována (VK_ERROR_DEVICE_LOST), okno by zamrzlo → spouští se znovu",
+                  file=sys.stderr)
+            enh = getattr(self, "enhancer", None)
+            if enh:
+                enh.gpu_lost()
+            if time.monotonic() - started < 60:  # lost again right after a restart: no restart loop
+                print("Rádio Beat: znovu hned po startu, nerestartuje se", file=sys.stderr)
+                return
+            win = getattr(self, "win", None)
+            shown = win is not None and win.get_visible()
+            subprocess.Popen(["sh", "-c", f"sleep 4; exec {launcher()}{'' if shown else ' --hidden'}"],
+                             start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            GLib.idle_add(lambda: (self.quit_all(), False)[1])
+            time.sleep(2.5)  # the main loop may be stuck in the renderer: then without it
+            for p in (getattr(getattr(self, "mpv", None), "proc", None), getattr(getattr(self, "tmpv", None), "proc", None),
+                      getattr(enh, "proc", None)):
+                try:
+                    p and p.kill()
+                except OSError:
+                    pass
+            os._exit(0)
 
     def quit_all(self):
         self.quitting = True
