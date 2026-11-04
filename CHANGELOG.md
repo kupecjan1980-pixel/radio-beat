@@ -4,6 +4,7 @@
 
 ## 0.27 — Obrázky všech dnů
 
+- **0.27.5** (2026-11-04) Počasí i Měsíc se vypnou klepnutím na obrázek a zapnou klepnutím na jeho prázdné místo (pod myší je tam slabý obrázek); přepínače v nastavení to sledují
 - **0.27.4** (2026-11-04) Místo pro počasí: seznam se rozbalí přímo pod vybraným místem ve skle panelu, s celými názvy (žádná šedá nabídka na druhé straně)
 - **0.27.3** (2026-11-04) Po resetu GPU (VK_ERROR_DEVICE_LOST) okno nezamrzne: Rádio Beat se samo spustí znovu; když reset způsobilo AI zvětšování (Real-ESRGAN), dál jen nejmenší dlaždice (kratší úlohy, GPU nevyprší)
 - **0.27.2** (2026-11-03) Samurajské masky vždy červené (žádné černé)

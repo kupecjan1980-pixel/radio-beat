@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.27.4"
+APP_VERSION = "0.27.5"
 
 import collections
 import ctypes
@@ -8103,6 +8103,21 @@ class WeatherView(Gtk.Widget):
     def __init__(self, **kw):
         super().__init__(can_target=False, **kw)
         self.info, self.room, self.font, self.parts = None, (0, 0), None, None
+        self.off, self.hover = False, False  # turned off: nothing, a faint picture under the mouse (a click: back on)
+
+    def set_state(self, off=None, hover=None) -> None:
+        off, hover = self.off if off is None else off, self.hover if hover is None else hover
+        if (off, hover) != (self.off, self.hover):
+            self.off, self.hover = off, hover
+            self.queue_draw()
+
+    def hit(self):
+        """What a click turns on or off (x, y, w, h) in its coordinates: what's drawn, not all its room."""
+        w, h = self.room
+        if self.off or not self.parts:
+            return 0, 0, h, h
+        (_lay, ink), x = self.parts["b"]
+        return 0, 0, min(w, x + ink.width), h
 
     @property
     def lines(self):
@@ -8161,9 +8176,19 @@ class WeatherView(Gtk.Widget):
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
+        w, h = self.room
+        if self.off:
+            if self.hover and h >= 12:
+                lay, ink = self._layout("⛅", h * 0.8, "Noto Color Emoji")
+                snap.push_opacity(0.5)
+                snap.save()
+                snap.translate(Graphene.Point().init((h - ink.width) / 2 - ink.x, (h - ink.height) / 2 - ink.y))
+                snap.append_layout(lay, _rgba(255, 255, 255, 1))
+                snap.restore()
+                snap.pop()
+            return
         if not self.parts:
             return
-        w, h = self.room
         P, sky = self.parts, self.info["sky"]
         icon = P["icon"]
         shadow = Gsk.Shadow()
@@ -8235,6 +8260,23 @@ class MoonView(Gtk.Widget):
     def __init__(self, **kw):
         super().__init__(can_target=False, **kw)
         self.room, self.now, self.next, self.when = (0, 0), None, None, 0.0
+        self.off, self.hover = False, False  # turned off: nothing, a faint moon under the mouse (a click: back on)
+        self._left = None  # where the drawing starts (the date, when it fits, goes before the moons)
+
+    def set_state(self, off=None, hover=None) -> None:
+        off, hover = self.off if off is None else off, self.hover if hover is None else hover
+        if (off, hover) != (self.off, self.hover):
+            self.off, self.hover = off, hover
+            self.queue_draw()
+
+    def hit(self):
+        """What a click turns on or off (x, y, w, h) in its coordinates: what's drawn, not all its room."""
+        w, h = self.room
+        x = w - self.need(h)
+        if not self.off and self._left is not None:
+            x = min(x, self._left)
+        x = max(0, x)
+        return x, 0, w - x, h
 
     def set_moon(self, now: dict, nxt: dict, when: float) -> None:
         self.now, self.next, self.when = now, nxt, when
@@ -8259,6 +8301,14 @@ class MoonView(Gtk.Widget):
             return
         rad = h * 0.42
         x = w - self.need(h)  # right-aligned, beside the button
+        if self.off:
+            if self.hover:
+                snap.push_opacity(0.5)
+                cr = snap.append_cairo(Graphene.Rect().init(0, 0, w, h))
+                cr.translate(x + rad + h * 0.04, h / 2)
+                draw_moon(cr, rad, self.now)
+                snap.pop()
+            return
         date = time.strftime("%-d. %-m.", time.localtime(self.when))
         lay = self.create_pango_layout(date)
         desc = Pango.FontDescription.from_string("Oswald Bold")
@@ -8268,6 +8318,7 @@ class MoonView(Gtk.Widget):
         show_date = x - ink.width - h * 0.15 >= 0
         if show_date:
             x -= ink.width + h * 0.15
+        self._left = x
         cr = snap.append_cairo(Graphene.Rect().init(0, 0, w, h))
         cr.translate(x + rad + h * 0.04, h / 2)
         draw_moon(cr, rad, self.now)
@@ -9533,17 +9584,18 @@ class Window(Adw.ApplicationWindow):
         start_full.connect("notify::active", lambda r, _: self.app.set_look(start_full=r.get_active()))
         group.add(start_full)
         self.weather_row = Adw.SwitchRow(title="Počasí vedle loga", subtitle_lines=0,
-                                         subtitle="Teplota, nejnižší a nejvyšší za den, vlhkost, obloha a fáze "
-                                                  "Měsíce (Open-Meteo)")
+                                         subtitle="Teplota, nejnižší a nejvyšší za den, vlhkost a obloha (Open-Meteo). "
+                                                  "Vypne i zapne se také klepnutím přímo na něj")
         self.weather_row.set_active(self.app.settings.get("weather", True))
         self.weather_row.connect("notify::active", lambda r, _: self.app.set_weather(on=r.get_active()))
         group.add(self.weather_row)
         group.add(self._weather_place_row())
-        moon_row = Adw.SwitchRow(title="Měsíc vlevo od tlačítka ⓘ", subtitle_lines=0,
-                                 subtitle="Jak je teď vidět z vybraného místa, šipka a jeho příští fáze s datem")
-        moon_row.set_active(self.app.settings.get("moon", True))
-        moon_row.connect("notify::active", lambda r, _: self.app.set_weather(moon=r.get_active()))
-        group.add(moon_row)
+        self.moon_row = Adw.SwitchRow(title="Měsíc vlevo od tlačítka ⓘ", subtitle_lines=0,
+                                      subtitle="Jak je teď vidět z vybraného místa, šipka a jeho příští fáze s datem. "
+                                               "Vypne i zapne se také klepnutím přímo na něj")
+        self.moon_row.set_active(self.app.settings.get("moon", True))
+        self.moon_row.connect("notify::active", lambda r, _: self.app.set_weather(moon=r.get_active()))
+        group.add(self.moon_row)
         auto_up = Adw.SwitchRow(title="Automatické aktualizace",
                                 subtitle="Každých 5 minut zkontroluje novou verzi, nainstaluje ji a spustí se znovu",
                                 subtitle_lines=0)
@@ -10191,7 +10243,9 @@ class Window(Adw.ApplicationWindow):
         cover, W = self.cover_rect(), self.get_width()
         ok_l, lb = self.logo.compute_bounds(self)
         drop = self.weather_drop
-        if not (ok_l and view.lines and self.app.settings.get("weather", True)):
+        off = not self.app.settings.get("weather", True)
+        view.set_state(off=off)
+        if not (ok_l and (off or view.lines)):
             view.set_visible(False)
             drop.set_visible(False)
             return
@@ -10213,7 +10267,7 @@ class Window(Adw.ApplicationWindow):
         view.set_margin_top(int(y0))
         view.set_room(int(w), int(h))
         view.set_visible(True)
-        r = view.drop_rect()
+        r = None if off else view.drop_rect()
         if r:
             drop.set_margin_start(int(x0 + r[0]))
             drop.set_margin_top(int(y0 + r[1]))
@@ -10230,7 +10284,8 @@ class Window(Adw.ApplicationWindow):
         tiles = [t for t in self.head_glass if t.get_mapped()]
         boxes = [b for ok, b in (t.compute_bounds(self) for t in tiles) if ok]
         ok_l, lb = self.logo.compute_bounds(self)
-        if not (boxes and ok_l and view.now and self.app.settings.get("moon", True)):
+        view.set_state(off=not self.app.settings.get("moon", True))
+        if not (boxes and ok_l and view.now):
             view.set_visible(False)
             return
         btn = min(boxes, key=lambda b: b.get_x())
@@ -10331,6 +10386,16 @@ class Window(Adw.ApplicationWindow):
         outside.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         outside.connect("pressed", self._puddle_outside)
         self.add_controller(outside)
+        # a click on the weather or the moon turns it off, on its empty place back on (like their switches)
+        sky_click = Gtk.GestureClick(button=1)
+        sky_click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        sky_click.connect("pressed", self._sky_click)
+        self.add_controller(sky_click)
+        sky_move = Gtk.EventControllerMotion()
+        sky_move.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        sky_move.connect("motion", lambda _c, x, y: self._sky_hover(x, y))
+        sky_move.connect("leave", lambda _c: self._sky_hover(-1, -1))
+        self.add_controller(sky_move)
         self.puddle_mode = 0
         self.puddle_items: list = []  # the curiosities shown this session
         self._puddle_touched = 0.0
@@ -10447,6 +10512,35 @@ class Window(Adw.ApplicationWindow):
         for water in self.waters:
             if water.open:
                 water.place()
+
+    def _sky_at(self, x: float, y: float):
+        """The weather or the moon under this point of the window, or None (a panel open: never, it may lie over them)."""
+        if any(w.open for w in self.waters):
+            return None
+        for view in (self.weather_view, self.moon_view):
+            if view.get_visible():
+                ok, b = view.compute_bounds(self)
+                if ok:
+                    hx, hy, hw, hh = view.hit()
+                    if 0 <= x - b.get_x() - hx < hw and 0 <= y - b.get_y() - hy < hh:
+                        return view
+        return None
+
+    def _sky_click(self, gesture, _n, x, y) -> None:
+        view = self._sky_at(x, y)
+        if view is None:
+            return
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)  # not a drag or double click of the window as well
+        row = self.weather_row if view is self.weather_view else self.moon_row
+        row.set_active(not row.get_active())  # the switch says so too, and does it
+
+    def _sky_hover(self, x: float, y: float) -> None:
+        at = self._sky_at(x, y)
+        self.weather_view.set_state(hover=at is self.weather_view)
+        self.moon_view.set_state(hover=at is self.moon_view)
+        if (at is not None) != getattr(self, "_sky_pointing", False):
+            self._sky_pointing = at is not None
+            self.set_cursor_from_name("pointer" if at is not None else None)
 
     def _puddle_outside(self, _gesture, _n, x, y) -> None:
         w = self.pick(x, y, Gtk.PickFlags.DEFAULT)
@@ -11411,15 +11505,12 @@ class App(Adw.Application):
         """The weather fetched anew (in a thread), then shown beside the logo; the moon (now, and its next phase)
         worked out for the same place."""
         spot = weather_spot(self.settings.get("weather_place", "oprechtice"))
-        if self.win:
-            if self.settings.get("moon", True):
-                when, nxt = moon_next(spot[2], spot[3])
-                self.win.show_moon(moon_sky(spot[2], spot[3]), nxt, when)
-            else:
-                self.win.show_moon(None, None, 0)
+        if self.win:  # (off too: its faint picture under the mouse, and on again at once)
+            when, nxt = moon_next(spot[2], spot[3])
+            self.win.show_moon(moon_sky(spot[2], spot[3]), nxt, when)
         if not self.settings.get("weather", True):
             if self.win:
-                self.win.show_weather(None)
+                self.win._place_weather()  # the last one kept: back at once when turned on, then fetched anew
             return
         if getattr(self, "_weather_busy", False):
             return
