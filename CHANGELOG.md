@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.28 — Společné vylepšování obrázků
+
+- **0.28.0** (2026-11-04) Obrázek na obrazovce má vždy přednost (přeruší malé a staré obrázky, ty pak běží znovu); staré obaly z historie se vylepšují na pozadí, jen když je GPU volná, procesor v klidu a počítač není na baterii; počítače se přes sdílenou databázi domluví, kdo který obrázek dělá, a hotový si předají hned
+
 ## 0.27 — Obrázky všech dnů
 
 - **0.27.7** (2026-11-04) Prevence zamrznutí: na integrovaných GPU běží AI zvětšování vždy po nejmenších dlaždicích a po selhání se už nikdy nevrací k větším (dlouhé úlohy GPU vypršely a jeden takový výpadek skončil resetem celé GPU)

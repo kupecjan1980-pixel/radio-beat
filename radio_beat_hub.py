@@ -32,6 +32,8 @@ PAGE = 2000  # rows per answer
 SAME = 1800  # s: the same song this close in time is the same play (as the app's History.SAME)
 COVER_HOSTS = re.compile(r"^https://([a-z0-9-]+\.)*(dzcdn\.net|mzstatic\.com|ytimg\.com|deezer\.com|"
                          r"apple\.com|googleusercontent\.com|radiobeat\.cz)/", re.I)
+CLAIM_TTL = 240  # s: a picture being made is that computer's this long (it may have gone: then anyone's again)
+CLAIMS_MAX = 5000
 RATE = (3000, 600)  # requests per address in this many seconds at most (a first upload sends ~1000 pictures)
 
 
@@ -41,6 +43,8 @@ class Hub:
         os.makedirs(self.dir, exist_ok=True)
         self.max_bytes = max_bytes
         self.lock = threading.Lock()
+        self.claims: dict[str, tuple[str, float]] = {}  # picture being made -> (who, until); in memory, short-lived
+        self.claims_lock = threading.Lock()
         self.db = sqlite3.connect(os.path.join(data, "hub.db"), check_same_thread=False)
         self.db.executescript("""
             PRAGMA journal_mode = WAL;
@@ -63,6 +67,23 @@ class Hub:
                                    (since, PAGE * 5)).fetchall()
         return {"id": "hub", "files": [n for _, n in rows], "next": rows[-1][0] if rows else since,
                 "more": len(rows) == PAGE * 5}
+
+    def claim(self, name: str, by: str) -> dict:
+        """A computer about to make a picture asks first, so no two make the same one. state: "have" (it's here:
+        fetch it), "busy" (another is making it; left: for how many seconds at most), "yours" (go ahead)."""
+        if os.path.exists(os.path.join(self.dir, name)):
+            return {"state": "have"}
+        now = time.monotonic()
+        with self.claims_lock:
+            who, until = self.claims.get(name, ("", 0.0))
+            if until > now and who != by:
+                return {"state": "busy", "left": round(until - now)}
+            if len(self.claims) >= CLAIMS_MAX:
+                self.claims = {k: v for k, v in self.claims.items() if v[1] > now}
+                if len(self.claims) >= CLAIMS_MAX:  # (flooded: nobody is told to wait)
+                    return {"state": "yours"}
+            self.claims[name] = (by, now + CLAIM_TTL)
+        return {"state": "yours"}
 
     def put_file(self, name: str, data: bytes) -> int:
         """HTTP status: 201 kept, 409 there already / not wanted, 400 not a whole picture, 507 full."""
@@ -272,6 +293,15 @@ def serve(hub: Hub, port: int) -> None:
                 got = hub.put_plays(rows) if p.endswith("plays") else hub.put_songinfo(rows)
                 return self._json({"new": got})
             name = p.rsplit("/", 1)[-1]
+            if p.startswith("/radio-beat/v1/claim/") and NAME.match(name):
+                body = self._body(512)
+                if body is None:
+                    return
+                try:
+                    by = str(json.loads(body).get("by", ""))[:80]
+                except (ValueError, AttributeError):
+                    return self._send(400, b"")
+                return self._json(hub.claim(name, by))
             if not (p.startswith("/radio-beat/v1/file/") and NAME.match(name)):
                 return self._send(400, b"")
             body = self._body(FILE_MAX)

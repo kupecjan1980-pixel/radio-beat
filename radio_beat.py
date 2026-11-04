@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.27.7"
+APP_VERSION = "0.28.0"
 
 import collections
 import ctypes
@@ -1348,6 +1348,12 @@ class History:
         with self.lock:
             return self.db.execute("SELECT COUNT(*) FROM plays").fetchone()[0]
 
+    def covers(self) -> list[str]:
+        """Every song's cover link once, the ones played last first."""
+        with self.lock:
+            return [r[0] for r in self.db.execute("SELECT cover FROM plays WHERE cover IS NOT NULL AND cover != '' "
+                                                  "GROUP BY cover ORDER BY max(at) DESC").fetchall()]
+
     def export(self, since: float, n: int = 2000) -> list[list]:
         """Plays after `since`, oldest first: [at, artist, title, album, show, host, cover] (for the other
         computers)."""
@@ -2498,6 +2504,9 @@ class Enhancer:
         self.light_done: set[str] = set()  # small pictures shown quick, waiting for the full enhancing
         self.cache_used = self.cache_allowed = -1  # bytes (counted at start, then kept up to date)
         self.on_gone = None  # called with each picture the cache lets go (CacheShare: not fetched back)
+        self.claim = None  # (name) -> (state, seconds left): may this computer make it? (CacheShare, the hub)
+        self.made = None  # (name): a picture was just made here: handed over at once (CacheShare)
+        self.bg_taken = False  # the background job's picture is being made by another computer
         self.fetch = None  # asks the other computers for a picture before making it (CacheShare): who gave it
         self.verify = None  # (name, source bytes, path) -> a picture from the internet hub looks like the original
         self.watches: list[GpuWatch] = []  # the GPU watched during the job's steps
@@ -2718,7 +2727,7 @@ class Enhancer:
 
     def _picture(self, text: str) -> None:
         kind = self.running[0] if self.running else "cover"
-        if self.on_picture:
+        if self.on_picture and kind != "bg":  # (an old cover isn't what's on the screen)
             GLib.idle_add(lambda: (self.on_picture(text, kind), False)[1])
 
     # --- files ---------------------------------------------------------------------------
@@ -2973,9 +2982,17 @@ class Enhancer:
             return
         self.jobs[kind] = (key, data, src_size, size, done, screen)
         r = self.running
-        if r and r[0] == kind and r[1] != key and self.proc:
-            self.proc.kill()
+        if r and self.proc and ((r[0] == kind and r[1] != key) or (self._low(r[0]) and not self._low(kind))):
+            self.proc.kill()  # replaced, or a picture on the screen wants the GPU: the small or old one waits
         self.wake.set()
+
+    @staticmethod
+    def _low(kind: str) -> bool:
+        """Not what's on the main screen: a panel's small picture, an old cover in the background."""
+        return kind == "bg" or kind.startswith("pic:")
+
+    def _must_yield(self, kind: str) -> bool:
+        return self._low(kind) and any(not self._low(k) for k in list(self.jobs))
 
     def drop(self, kind: str) -> None:
         self.jobs.pop(kind, None)
@@ -3000,7 +3017,10 @@ class Enhancer:
                     if kind is None:
                         break
                 else:
-                    kind = next((k for k in ("logo", "cover", "show") if k in self.jobs), next(iter(self.jobs)))
+                    kind = next((k for k in ("cover", "track", "logo", "show") if k in self.jobs),
+                                next((k for k in list(self.jobs) if k != "bg"), "bg"))
+                    if kind not in self.jobs:
+                        break
                 job = self.jobs[kind]
                 self.running = (kind, job[0])
                 try:
@@ -3008,11 +3028,12 @@ class Enhancer:
                 except Exception as e:  # never take the app down over a picture
                     print(f"enhancer: {e}", file=sys.stderr)
                 self.running = None
-                if self.jobs.get(kind) is job:
+                # (made to wait for the picture on the screen: it stays queued, and starts again after it)
+                if self.jobs.get(kind) is job and not self._must_yield(kind):
                     del self.jobs[kind]
 
     def _current(self, kind: str, job: tuple) -> bool:
-        return self.jobs.get(kind) is job
+        return self.jobs.get(kind) is job and not self._must_yield(kind)
 
     def _enhance(self, kind: str, job: tuple) -> None:
         key, data, (w0, h0), size, done, screen = job
@@ -3055,6 +3076,10 @@ class Enhancer:
         fetched = None
         if not self.light and self.fetch and not os.path.exists(cached):
             fetched = self.fetch(os.path.basename(cached))  # another computer may have made it already
+        if not self.light and self.claim and not os.path.exists(cached):
+            fetched = self._claim(kind, job, os.path.basename(cached), cached) or fetched
+            if kind == "bg" and self.bg_taken:
+                return
         if os.path.exists(cached) and self.verify and not self.verify(os.path.basename(cached), data, cached):
             pass  # from the internet hub and not like the original: deleted, made here
         if os.path.exists(cached):
@@ -3093,6 +3118,107 @@ class Enhancer:
                 watch.run = False
             self.watches.clear()
             shutil.rmtree(work, ignore_errors=True)
+
+    CLAIM_WAIT = 45  # s: the picture on the screen waits this long at most for another computer making it
+
+    def _claim(self, kind: str, job: tuple, name: str, cached: str) -> str | None:
+        """Asks the hub whether another computer is making this picture (all of them play the same stream, so
+        usually one is): then no work here. The picture on the screen waits for it a while, then is made here
+        after all; a background one is left for later. Returns who it was fetched from. No answer from the hub:
+        made here, as without one."""
+        self.bg_taken = False
+        state, left = self.claim(name)
+        if state == "have":
+            return self.fetch(name)
+        if state != "busy":
+            return None
+        if kind == "bg":
+            self.bg_taken = True
+            return None
+        until = time.monotonic() + min(left or self.CLAIM_WAIT, self.CLAIM_WAIT)
+        self._picture(f"{self._what(kind)}: vylepšuje ho jiný počítač, čeká se na něj…")
+        while time.monotonic() < until and self._current(kind, job):
+            time.sleep(3)
+            who = self.fetch(name)
+            if who or os.path.exists(cached):
+                return who
+        return None
+
+    @staticmethod
+    def _what(kind: str) -> str:
+        return {"cover": "Obal", "track": "Obal", "logo": "Logo"}.get(kind, "Obrázek pořadu")
+
+    # --- old pictures, when nothing else wants the GPU ------------------------------------------------------------
+    BG_GPU_BUSY = 30  # % at most (this app's own glass and motifs: about 8 % on a Vega iGPU)
+
+    def _gpu_load(self) -> float | None:
+        """How busy the GPU is now, in %: amdgpu's sensor, Intel's idle time, nvidia-smi; None: no way to tell."""
+        files = sorted(glob.glob("/sys/class/drm/card*/device/gpu_busy_percent"))
+        if files:
+            seen = []
+            for _ in range(10):
+                try:
+                    with open(files[0]) as f:
+                        seen.append(int(f.read()))
+                except (OSError, ValueError):
+                    pass
+                time.sleep(0.3)
+            return sum(seen) / len(seen) if seen else None
+        idle = (sorted(glob.glob("/sys/class/drm/card*/device/tile0/gt0/gtidle/idle_residency_ms"))
+                or sorted(glob.glob("/sys/class/drm/card*/gt/gt0/rc6_residency_ms")))
+        if idle:
+            try:
+                with open(idle[0]) as f:
+                    a, t = int(f.read()), time.monotonic()
+                time.sleep(3)
+                with open(idle[0]) as f:
+                    b, t2 = int(f.read()), time.monotonic()
+                return max(0.0, 100 - (b - a) / (10 * (t2 - t)))
+            except (OSError, ValueError):
+                return None
+        if shutil.which("nvidia-smi"):
+            try:
+                out = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                                     capture_output=True, text=True, timeout=5).stdout
+                return float(out.split()[0])
+            except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+                return None
+        return None
+
+    @staticmethod
+    def on_battery() -> bool:
+        """A battery here and no charger in (a handheld, a laptop)."""
+        kinds = {}
+        for d in glob.glob("/sys/class/power_supply/*"):
+            try:
+                with open(os.path.join(d, "type")) as f:
+                    kind = f.read().strip()
+                if kind == "Battery":
+                    kinds["battery"] = True
+                elif kind in ("Mains", "USB", "USB_C", "USB_PD"):
+                    with open(os.path.join(d, "online")) as f:
+                        kinds["power"] = kinds.get("power") or f.read().strip() == "1"
+            except OSError:
+                pass
+        return bool(kinds.get("battery")) and not kinds.get("power")
+
+    def bg_why_not(self) -> str | None:
+        """Why an old picture can't be made now (shown in the notes), None: it can."""
+        if self.ai is not True or self.soft:
+            return "bez AI na GPU se nedělají"
+        if self.jobs or self.running or self.quiet or self.held:
+            return "teď se vylepšuje to, co je vidět"
+        if self.cache_allowed >= 0 and self.cache_used > self.cache_allowed * 0.9:
+            return "mezipaměť je skoro plná"
+        if self.on_battery():
+            return "běží se na baterii"
+        cores = os.cpu_count() or 4
+        if os.getloadavg()[0] > cores * 0.5:
+            return "procesor má práci"
+        load = self._gpu_load()
+        if load is None:  # no sensor: not without knowing the GPU's free, unless the whole computer's quiet
+            return None if os.getloadavg()[0] < cores * 0.15 else "procesor má práci"
+        return f"GPU má práci ({load:.0f} %)" if load > self.BG_GPU_BUSY else None
 
     def _bigger(self, src, src_size, size, work, steps, show, live, emit, cached) -> None:
         """1. a quick AI pass, shown; 2. the full AI pass, shown; 3. sharpened,
@@ -3248,6 +3374,8 @@ class Enhancer:
             self.cache_used += len(pic)
             with open(cached[:-4] + ".txt", "w") as f:
                 f.write(", ".join(steps))
+            if self.made:
+                self.made(os.path.basename(cached))
 
     def _final(self, base, steps, show, live, emit, cached, work) -> None:
         """Denoised (GPU when ffmpeg can, else CPU), then sharpened: shown and cached."""
@@ -3287,6 +3415,8 @@ class Enhancer:
         self.cache_used += len(pic)
         with open(cached[:-4] + ".txt", "w") as f:
             f.write(", ".join(steps))
+        if self.made:
+            self.made(os.path.basename(cached))
         self._trim()
 
     # --- tools --------------------------------------------------------------------------
@@ -3509,6 +3639,9 @@ class CacheShare:
             self.gone = set()
         enhancer.on_gone = self._let_go
         enhancer.fetch = self.fetch
+        enhancer.claim = self.claim
+        enhancer.made = self.publish
+        self.published: set[str] = set()  # handed to the hub as soon as they were made (its round needn't)
         enhancer.verify = self.verify
         self.hub_url = ""  # (App sets it from the settings)
         self.hub_text = ""
@@ -3897,7 +4030,57 @@ class CacheShare:
                 pass
             self.got += 1
             return who.rsplit("-", 1)[0]
+        # the shared database, straight away (its round comes every SHARE_EVERY s)
+        try:
+            base = self._hub_base()
+            if base and self._store(name, self._hub(base, f"/radio-beat/v1/file/{name}", timeout=30)):
+                self.unverified.add(name)  # (anyone can send it pictures: checked against the original before use)
+                self._save_unverified()
+                try:
+                    self._store(name[:-4] + ".txt", self._hub(base, f"/radio-beat/v1/file/{name[:-4]}.txt", timeout=10))
+                except OSError:
+                    pass
+                self.got += 1
+                return "sdílené databáze"
+        except OSError:  # not there yet (404), or out of reach
+            pass
         return None
+
+    def claim(self, name: str) -> tuple[str | None, float]:
+        """May this computer make the picture? ("yours" / "busy" / "have", seconds left when busy); None: the hub
+        doesn't answer (or is older and doesn't know this): made here, as ever."""
+        if not self.on:
+            return None, 0
+        try:
+            base = self._hub_base()
+            if not base:
+                return None, 0
+            reply = json.loads(self._hub(base, f"/radio-beat/v1/claim/{name}", json.dumps({"by": self.id}).encode(),
+                                         timeout=3))
+            return reply.get("state"), float(reply.get("left") or 0)
+        except (OSError, ValueError, AttributeError):
+            return None, 0
+
+    def publish(self, name: str) -> None:
+        """A picture just made here goes to the hub at once: a computer waiting for it gets it in seconds."""
+        if self.on:
+            threading.Thread(target=self._publish, args=(name,), daemon=True).start()
+
+    def _publish(self, name: str) -> None:
+        try:
+            base = self._hub_base()
+            if not base:
+                return
+            for n in (name, name[:-4] + ".txt"):
+                with open(os.path.join(UPSCALED_DIR, n), "rb") as f:
+                    try:
+                        self._hub(base, f"/radio-beat/v1/file/{n}", f.read(), timeout=120)
+                    except urllib.error.HTTPError as e:
+                        if e.code != 409:  # (409: it's there already)
+                            raise
+                self.published.add(n)
+        except OSError:  # out of reach: its next round takes it
+            pass
 
     @staticmethod
     def _upstream() -> list[str]:
@@ -4035,7 +4218,7 @@ class CacheShare:
                 return os.path.getmtime(os.path.join(UPSCALED_DIR, n))
             except OSError:
                 return 0.0
-        todo = sorted(((mtime(n), n) for n in self._names() if n not in self.unverified),
+        todo = sorted(((mtime(n), n) for n in self._names() if n not in self.unverified and n not in self.published),
                       key=lambda x: (x[0], x[1].endswith(".txt")))
         for t, name in todo:
             if not self.on or t <= m["files_out"]:
@@ -11411,6 +11594,7 @@ class App(Adw.Application):
     def do_startup(self):
         Adw.Application.do_startup(self)
         threading.Thread(target=self._gpu_watch, daemon=True).start()
+        threading.Thread(target=self._background, daemon=True).start()
         # text as big as on this desktop everywhere (KDE says 1.0, Omarchy 1.64): the 'i' panel and the menus
         # look the same on the DeskMini's full HD as on a 4K screen at 2x
         Gtk.Settings.get_default().set_property("gtk-xft-dpi", int(96 * 1024 * self.TEXT_SCALE))
@@ -12301,6 +12485,8 @@ class App(Adw.Application):
     def notes_text(self) -> str:
         """The gear menu's notes: the picture steps, and what the song recognition did last."""
         text = self.enhancer.notes()
+        if self.bg_text:
+            text += f"\n• Staré obaly na pozadí, když je GPU volná: {self.bg_text}"
         text += f"\n• Paměť celé aplikace: {app_memory()}"
         if self.win:
             GLib.idle_add(lambda: (self.win.refresh_effects(), False)[1])  # the animations' result is on its switch
@@ -12651,7 +12837,7 @@ class App(Adw.Application):
             self.win.enhance_note.set_text(self.notes_text())
 
     def _picture_changed(self, text: str, kind: str = "cover") -> None:
-        if kind in ("show", "icon") or kind.startswith("pic:") or (kind == "logo" and self.orig_tex.get("cover")):
+        if kind in ("show", "icon", "bg") or kind.startswith("pic:") or (kind == "logo" and self.orig_tex.get("cover")):
             return  # the cover is what's shown
         if re.search(r"výsledek|z mezipaměti|staženo z|ukázáno, jak|jak přijde", text):  # done
             self.picture_text, self.picture_doing = text, ""
@@ -12784,6 +12970,109 @@ class App(Adw.Application):
 
         target = (round(w * f), round(h * f)) if upscale else (w, h)
         self.enhancer.request(kind, src[0], src[1], (w, h), target, done, screen=size)
+
+    # --- old covers, enhanced ahead of time --------------------------------------------------------------------
+    # The songs played before, not yet enhanced by any computer: one at a time while the GPU has nothing better to
+    # do, so that they're ready (and with the other computers) when they're played again. Ever less to do as the
+    # database fills up. All of them ask the hub first, so no two make the same one.
+    BG_FILE = os.path.join(DATA_DIR, "background-done.json")
+    BG_PAUSE = 60  # s between looks while it can't (the GPU is busy, say)
+    bg_text = ""
+
+    def _on_main(self, fn):
+        """fn's result, run on the main thread (GTK from a background thread isn't safe)."""
+        box, ready = [], threading.Event()
+        GLib.idle_add(lambda: (box.append(fn()), ready.set(), False)[2])
+        ready.wait(30)
+        return box[0] if box else None
+
+    def _background(self) -> None:
+        try:
+            with open(self.BG_FILE) as f:
+                done = set(json.load(f))
+        except (OSError, ValueError):
+            done = set()
+        skip: dict[str, float] = {}  # for now: failed to download, or another computer is making it
+        time.sleep(self.BG_PAUSE * 2)  # (the start's own work first)
+        while not getattr(self, "quitting", False):
+            wait = self.BG_PAUSE
+            try:
+                wait = self._background_step(done, skip)
+            except Exception as e:  # never take the app down over an old picture
+                print(f"Rádio Beat: vylepšování na pozadí: {e}", file=sys.stderr)
+            time.sleep(wait)
+
+    def _background_step(self, done: set, skip: dict) -> float:
+        enh = self.enhancer
+        if not self.settings.get("enhance", True):
+            self.bg_text = ""
+            return self.BG_PAUSE
+        now = time.monotonic()
+        all_covers = self.db.covers()
+        todo = [c for c in all_covers if c not in done]
+        if not todo:
+            self.bg_text = f"hotovo, všech {len(all_covers)} obalů z historie"
+            return 600
+        left = len(todo)
+        todo = [c for c in todo if skip.get(c, 0) < now]
+        if not todo:
+            self.bg_text = f"zbývá {left} obalů, zatím je dělají jiné počítače nebo nejdou stáhnout"
+            return self.BG_PAUSE
+        why = enh.bg_why_not()
+        if why:
+            self.bg_text = f"zbývá {left} obalů, čeká se ({why})"
+            return self.BG_PAUSE
+        self.bg_text = f"zbývá {left} obalů, právě se dělá další"
+        # without a hub, two computers: each from its own end of the history
+        peers = list(self.share.peers.values()) if self.share.on else []
+        url = todo[-1] if peers and self.share.id > min(peers) else todo[0]
+        data = square_cover(fetch(url))
+        if not data:
+            skip[url] = now + 3600
+            return 5
+        job = self._on_main(lambda: self._background_job(url, data))
+        if job is None:  # already here, or nothing to do for it
+            self._bg_done(done, url)
+            return 2
+        cached = job
+        while "bg" in enh.jobs:  # (made to wait while a cover on the screen goes first)
+            time.sleep(1)
+        if os.path.exists(cached):
+            self._bg_done(done, url)
+        elif enh.bg_taken:
+            skip[url] = time.monotonic() + 600
+        else:
+            skip[url] = time.monotonic() + 3600  # (killed by quitting, or failed: later)
+        return 5
+
+    def _bg_done(self, done: set, url: str) -> None:
+        done.add(url)
+        try:
+            with open(self.BG_FILE + ".part", "w") as f:
+                json.dump(sorted(done), f)
+            os.replace(self.BG_FILE + ".part", self.BG_FILE)
+        except OSError:
+            pass
+
+    def _background_job(self, url: str, data: bytes) -> str | None:
+        """Main thread. Asks for the cover exactly as it'd be asked for on the screen (the same file); the path it
+        will be in, None when there's nothing to do."""
+        size = self.enhance_px()
+        if not size:
+            return None
+        try:
+            tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+        except GLib.Error:
+            return None
+        w, h = tex.get_width(), tex.get_height()
+        f = min(size[0] / w, size[1] / h)
+        target = (round(w * f), round(h * f)) if f >= UPSCALE_FROM else (w, h)
+        key = url + ("#square2" if "ytimg.com" in url else "")
+        cached = self.enhancer._cache_path(key, target)
+        if os.path.exists(cached):
+            return None
+        self.enhancer.request("bg", key, data, (w, h), target, lambda pic: None, screen=size)
+        return cached
 
     # --- app icon ----------------------------------------------------------------------
     # The icon (taskbar, launcher, the window's corner): the station logo on a
