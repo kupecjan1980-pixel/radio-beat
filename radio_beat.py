@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.28.0"
+APP_VERSION = "0.28.1"
 
 import collections
 import ctypes
@@ -3149,7 +3149,69 @@ class Enhancer:
         return {"cover": "Obal", "track": "Obal", "logo": "Logo"}.get(kind, "Obrázek pořadu")
 
     # --- old pictures, when nothing else wants the GPU ------------------------------------------------------------
-    BG_GPU_BUSY = 30  # % at most (this app's own glass and motifs: about 8 % on a Vega iGPU)
+    # What other programs use of the GPU, % at most (a game takes far more). This app's own glass and the desktop
+    # drawing it don't count: full screen on a Vega iGPU they read 36-98 % on the whole-GPU sensor with nothing else
+    # running, so asking that sensor, the old pictures would only ever run with the window hidden. The enhancing
+    # runs fine beside them: 135 pictures with no GPU timeout at the smallest tiles.
+    BG_OTHERS_BUSY = 15
+    BG_GPU_BUSY = 30  # % at most of the whole GPU, where a driver doesn't tell per program
+    COMPOSITORS = {"Hyprland", "kwin_wayland", "kwin_x11", "gnome-shell", "sway", "gamescope", "gamescope-wl",
+                   "Xwayland", "Xorg", "weston", "labwc", "niri", "wayfire", "cosmic-comp", "mutter"}
+    DRM_NS = re.compile(r"drm-engine-(?:gfx|compute|render|rcs|ccs):\s*(\d+) ns")  # amdgpu, i915
+    DRM_CYCLES = re.compile(r"drm-(total-)?cycles-(?:rcs|ccs):\s*(\d+)")  # xe: used / all of them
+
+    @classmethod
+    def _drm_clients(cls) -> dict:
+        """What each program on the GPU has used so far: client id -> (pid, ns, cycles, total cycles)."""
+        found = {}
+        for fd in glob.glob("/proc/[0-9]*/fd/*"):  # (only this user's are readable: root's stay out of it)
+            try:
+                if not os.readlink(fd).startswith("/dev/dri/"):
+                    continue
+                pid = fd.split("/")[2]
+                with open(f"/proc/{pid}/fdinfo/{fd.rsplit('/', 1)[1]}") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            client = re.search(r"drm-client-id:\s*(\d+)", text)
+            if not client:
+                continue
+            ns = sum(int(x) for x in cls.DRM_NS.findall(text))
+            cycles = total = 0
+            for is_total, n in cls.DRM_CYCLES.findall(text):
+                if is_total:
+                    total += int(n)
+                else:
+                    cycles += int(n)
+            found[client[1]] = (int(pid), ns, cycles, total)
+        return found
+
+    @classmethod
+    def _gpu_others(cls, me: int | None = None, seconds: float = 3.0) -> float | None:
+        """% of the GPU used by programs other than this app and the desktop; None: the driver doesn't say."""
+        me = os.getpid() if me is None else me
+        a = cls._drm_clients()
+        if not any(c[0] == me for c in a.values()):  # this app draws on it: not listed, so no counting here
+            return None
+        t = time.monotonic()
+        time.sleep(seconds)
+        b = cls._drm_clients()
+        took = time.monotonic() - t
+        used = 0.0
+        for client, (pid, ns, cycles, total) in b.items():
+            if pid == me or client not in a:
+                continue
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    if f.read().strip() in cls.COMPOSITORS:
+                        continue
+            except OSError:
+                continue
+            _, ns0, cycles0, total0 = a[client]
+            used += (ns - ns0) / (took * 1e7)
+            if total > total0:
+                used += 100 * (cycles - cycles0) / (total - total0)
+        return used
 
     def _gpu_load(self) -> float | None:
         """How busy the GPU is now, in %: amdgpu's sensor, Intel's idle time, nvidia-smi; None: no way to tell."""
@@ -3215,6 +3277,9 @@ class Enhancer:
         cores = os.cpu_count() or 4
         if os.getloadavg()[0] > cores * 0.5:
             return "procesor má práci"
+        others = self._gpu_others()
+        if others is not None:
+            return f"jiné programy používají GPU ({others:.0f} %)" if others > self.BG_OTHERS_BUSY else None
         load = self._gpu_load()
         if load is None:  # no sensor: not without knowing the GPU's free, unless the whole computer's quiet
             return None if os.getloadavg()[0] < cores * 0.15 else "procesor má práci"
