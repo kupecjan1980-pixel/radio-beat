@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.27.3"
+APP_VERSION = "0.27.4"
 
 import collections
 import ctypes
@@ -4186,6 +4186,9 @@ scale.vol-slider slider { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px
     background: none; box-shadow: none; border: none; }
 .puddle .boxed-list separator, popover.glass-menu .boxed-list separator { background: none; min-height: 0; }
 .puddle switch:not(:checked), popover.glass-menu switch:not(:checked) { background: none; }
+.puddle row.expander, .puddle row.expander list, .puddle row.expander list > row {
+    background: none; box-shadow: none; border: none; }  /* an unfolding row: the glass alone too */
+.puddle row.expander image.expander-row-arrow { color: white; opacity: 1; -gtk-icon-shadow: 0 0 3px black; }
 .puddle button.puddle-tab { padding: 4px 14px; min-height: 0; border-radius: 999px; color: white;
                             background: none; box-shadow: none; font-weight: 700; }  /* the glass is the tab */
 .puddle button.puddle-tab:hover { background: rgba(255,255,255,0.10); }
@@ -9535,14 +9538,7 @@ class Window(Adw.ApplicationWindow):
         self.weather_row.set_active(self.app.settings.get("weather", True))
         self.weather_row.connect("notify::active", lambda r, _: self.app.set_weather(on=r.get_active()))
         group.add(self.weather_row)
-        self.weather_place_row = Adw.ComboRow(title="Místo pro počasí", use_subtitle=True,
-                                              model=Gtk.StringList.new([p[1] for p in WEATHER_PLACES]))
-        keys = [p[0] for p in WEATHER_PLACES]
-        now = self.app.settings.get("weather_place", "oprechtice")
-        self.weather_place_row.set_selected(keys.index(now) if now in keys else 0)
-        self.weather_place_row.connect("notify::selected",
-                                       lambda r, _: self.app.set_weather(place=keys[r.get_selected()]))
-        group.add(self.weather_place_row)
+        group.add(self._weather_place_row())
         moon_row = Adw.SwitchRow(title="Měsíc vlevo od tlačítka ⓘ", subtitle_lines=0,
                                  subtitle="Jak je teď vidět z vybraného místa, šipka a jeho příští fáze s datem")
         moon_row.set_active(self.app.settings.get("moon", True))
@@ -9583,6 +9579,28 @@ class Window(Adw.ApplicationWindow):
         btn.add_css_class("gear-button")
         btn.connect("clicked", lambda *_: self.toggle_water(self.gear_water))
         return btn
+
+    def _weather_place_row(self) -> Gtk.Widget:
+        """The place for the weather: its name under the title, and the list unfolding right there, in the panel's
+        own glass (a drop-down would be a grey popup of its own, on the other side, with the names cut short)."""
+        now = weather_spot(self.app.settings.get("weather_place", "oprechtice"))
+        row = Adw.ExpanderRow(title="Místo pro počasí", subtitle=now[1], subtitle_lines=0)
+        marks = {}
+
+        def pick(key, name):
+            for k, mark in marks.items():
+                mark.set_opacity(1 if k == key else 0)
+            row.set_subtitle(name)
+            row.set_expanded(False)
+            self.app.set_weather(place=key)
+
+        for key, name, *_ in WEATHER_PLACES:
+            item = Adw.ActionRow(title=name, title_lines=0, activatable=True)
+            marks[key] = Gtk.Image(icon_name="object-select-symbolic", opacity=1 if key == now[0] else 0)
+            item.add_prefix(marks[key])  # beside the name, not across the panel
+            item.connect("activated", lambda _r, k=key, n=name: pick(k, n))
+            row.add_row(item)
+        return row
 
     def _quality_pill(self, scrim) -> Gtk.Widget:
         """Quality at the bottom right: a pill of glass like the 'i' panel's tabs. Its list opens upwards, glass
