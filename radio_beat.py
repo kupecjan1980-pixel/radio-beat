@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.27.5"
+APP_VERSION = "0.27.6"
 
 import collections
 import ctypes
@@ -4188,6 +4188,13 @@ scale.vol-slider slider { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px
 .puddle switch:not(:checked), popover.glass-menu switch:not(:checked) { background: none; }
 .puddle row.expander, .puddle row.expander list, .puddle row.expander list > row {
     background: none; box-shadow: none; border: none; }  /* an unfolding row: the glass alone too */
+/* the red pill of the played times (.on-air): the place under the mouse, the update button */
+.puddle row.expander list.nested > row:hover { background: #E3051A; border-radius: 999px; }
+.puddle button.red-pill, .puddle button.red-pill.suggested-action {
+    background: #E3051A; color: white; border-radius: 999px; padding: 1px 10px; min-height: 0; font-weight: 800;
+    box-shadow: none; border: none; }
+.puddle button.red-pill:hover { background: #F21C30; }
+.puddle button.red-pill:disabled { background: rgba(227,5,26,0.5); color: white; }
 .puddle row.expander image.expander-row-arrow { color: white; opacity: 1; -gtk-icon-shadow: 0 0 3px black; }
 .puddle button.puddle-tab { padding: 4px 14px; min-height: 0; border-radius: 999px; color: white;
                             background: none; box-shadow: none; font-weight: 700; }  /* the glass is the tab */
@@ -9136,7 +9143,7 @@ BEAT_CSS = """
 .song, .show-title { font-family: "Anton"; font-weight: 400; letter-spacing: 0.02em; }
 .artist { font-family: "Oswald"; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
 .album, .facts, .status, .show-sub, .show-next { font-family: "Oswald"; font-weight: 400; letter-spacing: 0.02em; }
-.on-air, .day-head { font-family: "Oswald"; font-weight: 700; letter-spacing: 0.08em; }
+.on-air, button.red-pill, .day-head { font-family: "Oswald"; font-weight: 700; letter-spacing: 0.08em; }
 .gear-menu label { font-family: "Oswald"; font-weight: 400; letter-spacing: 0.03em; }
 .gear-menu row .title { font-weight: 600; }
 """
@@ -9604,6 +9611,7 @@ class Window(Adw.ApplicationWindow):
         group.add(auto_up)
         self.update_row = Adw.ActionRow(title="Aktualizace")
         self.update_btn = Gtk.Button(label="Zkontrolovat", valign=Gtk.Align.CENTER)
+        self.update_btn.add_css_class("red-pill")
         self.update_btn.connect("clicked", lambda *_: self.app.update_clicked())
         self.update_row.add_suffix(self.update_btn)
         group.add(self.update_row)
