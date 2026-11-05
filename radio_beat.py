@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.28.2"
+APP_VERSION = "0.28.3"
 
 import collections
 import ctypes
@@ -657,6 +657,18 @@ def _mb(path: str):
     return None
 
 
+def honest_date(d: str) -> str:
+    """A release date as far as it's really known. 1 January is what the services put when they know only the year
+    (U2's The Joshua Tree "1. ledna 1987", out on 9 March), and 1 January 1970 is Deezer's "not known" (the Unix
+    epoch: Bad Company "1970", out in 1974): the year alone, or nothing."""
+    if not d or d.startswith("1970-01-01") or d.startswith("0000"):
+        return ""
+    return d[:4] if d[4:10] == "-01-01" else d
+
+
+BAD_DATE = re.compile(r"vydáno 1\. ledna ")  # such a placeholder already written into the track info
+
+
 def _date(d: str) -> str:
     parts = d.split("-")
     try:
@@ -754,6 +766,25 @@ def _join_places(places: list) -> str:
     return ", ".join([", ".join(a[:len(a) - n]) + " a " + ", ".join(b[:len(b) - n])] + shared)
 
 
+def same_title(s: str) -> str:
+    """A song's name for comparing: without a leading "The", "Mister" as "Mr" (the radio's "Mob Rules" is
+    MusicBrainz's "The Mob Rules", its "No More Mister Nice Guy" is "No More Mr. Nice Guy")."""
+    s = re.sub(r"^the ", "", norm(s))
+    return re.sub(r"\bmister\b", "mr", s)
+
+
+def title_spellings(song: str) -> list[str]:
+    """The ways the song may be written in MusicBrainz, for its search."""
+    out = [song]
+    for a, b in ((r"\bMister\b", "Mr."), (r"\bMr\.?(?=\s)", "Mister")):
+        alt = re.sub(a, b, song, flags=re.I)
+        if alt != song:
+            out.append(alt)
+    if not re.match(r"the\s", song, re.I):
+        out.append("The " + song)
+    return out
+
+
 def song_facts(artist: str, song: str) -> str:
     """'First released 8 November 1971 · Recorded at Olympic Studios, London', what MusicBrainz knows (may be
     ''), remembered per song."""
@@ -767,14 +798,16 @@ def song_facts(artist: str, song: str) -> str:
         return cache[key]
     song = re.sub(r"\s*[(\[].*?[)\]]", "", song).strip() or song  # "Stairway to Heaven (Remaster)": the song
     a, t = norm(first_artist(artist)), norm(song)
-    base = f'recording:"{song}" AND artist:"{first_artist(artist)}" AND status:official'
+    names = " OR ".join('"' + x.replace('"', "") + '"' for x in title_spellings(song))
+    base = f'recording:({names}) AND artist:"{first_artist(artist)}" AND status:official'
+    t = same_title(song)
 
     def search(extra: str = ""):
         found = _mb(f"/recording?query={urllib.parse.quote(base + extra)}&fmt=json&limit=100")
         if found is None:
             return None
         return [r for r in found.get("recordings", [])
-                if norm(r.get("title", "")) == t
+                if same_title(r.get("title", "")) == t
                 and any(a in norm(c.get("name", "")) or norm(c.get("name", "")) in a
                         for c in r.get("artist-credit", []) if isinstance(c, dict))]
 
@@ -794,11 +827,28 @@ def song_facts(artist: str, song: str) -> str:
     # The earliest date with something behind it: a lone recording on a single release dated before all the
     # rest is a slip in the data (Paint It Black "1964"), not the first release.
     support: dict = {}
-    for r in recs:
+    # a live recording is never the first release when the studio one is known (Alice Cooper "2025", from a
+    # concert of 2022)
+    studio = [r for r in recs if not re.search(r"\blive\b|\bdemo\b", r.get("disambiguation", ""), re.I)]
+    for r in studio if any(r.get("first-release-date") for r in studio) else recs:
         if r.get("first-release-date"):
             support[r["first-release-date"]] = support.get(r["first-release-date"], 0) + len(r.get("releases", []))
     dates = sorted(support)
-    first = next((d for d in dates if support[d] >= 2), dates[0] if dates else "")
+    raw = next((d for d in dates if support[d] >= 2), dates[0] if dates else "")
+    first = honest_date(raw)
+    if first and support.get(raw, 0) <= 3:
+        # Thinly backed, and the others (Wikidata, iTunes, Deezer) say later: a slip too (Bad Company's Can't Get
+        # Enough "1970" on 2 releases, 15 June 1974 on 99): MusicBrainz's best-backed date of their year
+        other = earliest_release(artist, song)
+        if other and other[:4] > first[:4]:  # (only when MusicBrainz itself backs that year well: iTunes and
+            same_year = [d for d in dates if d[:4] == other[:4] and honest_date(d)  # Deezer may know only a
+                         and support[d] >= max(10, 5 * support[raw])]  # remaster: Alice Cooper "2025")
+            if same_year:
+                first = honest_date(max(same_year, key=lambda d: (support[d], len(d))))
+    if first and len(first) < 10:  # only the year or month: MusicBrainz's own well-backed day in it, if it has one
+        days = [d for d in dates if d.startswith(first) and len(honest_date(d)) == 10 and support[d] >= 2]
+        if days:  # (The Doors' Light My Fire: "1967" on 5 releases, 4 January 1967 on 160)
+            first = max(days, key=lambda d: support[d])
     if first and len(first) < 10:  # only the year or month: the day from Wikidata, iTunes or Deezer (that year)
         other = earliest_release(artist, song)
         if other[:4] == first[:4] and len(other) > len(first) and other.startswith(first):
@@ -1214,6 +1264,19 @@ class History:
                                 "WHERE cover IS NOT NULL OR facts IS NOT NULL GROUP BY lower(artist), lower(title)",
                                 (time.time(),))
                 self.db.execute("PRAGMA user_version = 7")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 8:  # once: placeholder dates looked up again
+                redo = [(rowid,) for rowid, facts in self.db.execute(  # ("1. ledna": the year only, or not known)
+                    "SELECT rowid, facts FROM plays WHERE facts IS NOT NULL") if BAD_DATE.search(facts)]
+                self.db.executemany("UPDATE plays SET facts = NULL WHERE rowid = ?", redo)
+                try:  # and out of the lookups' own memory, or they'd come straight back
+                    with open(FACTS_CACHE) as f:
+                        cache = json.load(f)
+                    with open(FACTS_CACHE + ".part", "w") as f:
+                        json.dump({k: v for k, v in cache.items() if not BAD_DATE.search(v or "")}, f)
+                    os.replace(FACTS_CACHE + ".part", FACTS_CACHE)
+                except (OSError, ValueError, AttributeError):
+                    pass
+                self.db.execute("PRAGMA user_version = 8")
 
     def play(self, artist: str, title: str, show: str | None, host: str | None) -> None:
         import sqlite3
@@ -1336,6 +1399,8 @@ class History:
                     if album:
                         self.db.execute(f"UPDATE plays SET album = ? WHERE {song} AND album IS NULL",
                                         (album, artist, title))
+                    if facts and BAD_DATE.search(facts):
+                        facts = None  # (looked up here instead)
                     if facts is not None:
                         self.db.execute(f"UPDATE plays SET facts = ? WHERE {song} AND (facts IS NULL OR "
                                         "(facts = '' AND ? != ''))", (facts, artist, title, facts))
@@ -1535,7 +1600,8 @@ def earliest_release(artist: str, song: str) -> str:
             dates.append((_json(f"https://api.deezer.com/album/{aid}").get("release_date") or "")[:10])
     except (OSError, ValueError, KeyError):
         pass
-    dates = [d for d in dates if re.match(r"(19|20)\d\d-\d\d-\d\d$", d)] + ([known] if known else [])
+    dates = [honest_date(d) for d in dates + ([known] if known else [])]
+    dates = [d for d in dates if re.match(r"(19|20)\d\d(-\d\d-\d\d)?$", d)]
     if not dates:
         _EARLIEST[(a, t)] = ""
         return ""
@@ -1573,10 +1639,10 @@ def track_facts(artist: str, song: str, info: dict | None) -> str:
 def album_released(info: dict) -> str:
     """The album's release date (YYYY-MM-DD) from the lookup: iTunes has it, Deezer's album page does."""
     if info.get("released"):
-        return info["released"]
+        return honest_date(info["released"][:10])
     if info.get("deezer_album"):
         try:
-            return (_json(f"https://api.deezer.com/album/{info['deezer_album']}").get("release_date") or "")[:10]
+            return honest_date((_json(f"https://api.deezer.com/album/{info['deezer_album']}").get("release_date") or "")[:10])
         except (OSError, ValueError):
             pass
     return ""
