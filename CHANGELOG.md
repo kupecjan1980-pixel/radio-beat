@@ -4,6 +4,7 @@
 
 ## 0.28 — Společné vylepšování obrázků
 
+- **0.28.2** (2026-11-05) Oprava vzorů, které si AI vymyslí (čáry a mřížky místo jemné textury): nabídka v nastavení Vypnuto / Slabá / Střední / Silná, výchozí Silná; přepočítá se jen sama oprava, bez AI, a platí i pro už hotové obrázky
 - **0.28.1** (2026-11-04) Staré obaly se vylepšují i při otevřeném okně: počítá se jen GPU, kterou používají jiné programy (vlastní sklo a plocha ne), jinak by se při celé obrazovce nedostaly na řadu
 - **0.28.0** (2026-11-04) Obrázek na obrazovce má vždy přednost (přeruší malé a staré obrázky, ty pak běží znovu); staré obaly z historie se vylepšují na pozadí, jen když je GPU volná, procesor v klidu a počítač není na baterii; počítače se přes sdílenou databázi domluví, kdo který obrázek dělá, a hotový si předají hned
 

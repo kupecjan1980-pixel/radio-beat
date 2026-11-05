@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.28.1"
+APP_VERSION = "0.28.2"
 
 import collections
 import ctypes
@@ -2964,11 +2964,16 @@ class Enhancer:
         hit = self._cache_path(key, size, ai=True)
         if kind != "icon" and os.path.exists(hit) and self._jpeg_ok(hit) and self._not_black(hit) \
                 and (not self.verify or self.verify(os.path.basename(hit), data, hit)):
+            known = self.fix_known(hit) if kind in ("cover", "track") and size != src_size else None
+            if known is False:  # not looked at for invented patterns yet: a second or two, not on the main thread
+                self.jobs[kind] = (key, data, src_size, size, done, screen)
+                self.wake.set()
+                return
             self._used(hit)
             with open(hit, "rb") as f:
                 pic = f.read()
             self.sizes[kind] = [len(data), None, len(pic), None, None]  # (no time: from the cache)
-            done(pic)
+            done(known or pic)
             try:
                 with open(hit[:-4] + ".txt") as f:
                     steps = f.read().strip()
@@ -3066,6 +3071,8 @@ class Enhancer:
                     got[4] = time.monotonic() - got[3]
             elif got[1] is None:
                 got[1] = len(pic)
+            if final and not same:  # (no AI on a picture big enough: nothing invented)
+                pic = self._fixed(kind, data, pic, cached)
             if kind != "icon" or final:
                 GLib.idle_add(lambda: (done(pic), False)[1])
         cached = self._cache_path(key, size)
@@ -3118,6 +3125,138 @@ class Enhancer:
                 watch.run = False
             self.watches.clear()
             shutil.rmtree(work, ignore_errors=True)
+
+    # --- patterns the AI invented ---------------------------------------------------------------------------------
+    # On a fine print texture or halftone the AI draws hard lines and blocks that aren't there (Satriani's Flying
+    # in a Blue Dream, The La's). Found by asking, at the original's size: where is a pattern much stronger than in
+    # the original? Real detail is as strong there already (a paisley border, a mic stand), and only big areas count
+    # (a face isn't one). There the picture goes back to the original, soft. A step on the AI's finished picture
+    # (a second or two of CPU): the AI pictures themselves stay as they are, shared, so a change of level needs no AI.
+    # level -> (stronger than the original by this much: starts, full; how far a found area grows, at 300 px)
+    FIX_LEVELS = {"off": None, "weak": (2.2, 3.4, 5), "medium": (1.5, 2.3, 7), "strong": (1.25, 1.8, 14)}
+    FIX_EMPTY = 0.002  # of the picture at most: nothing found, the picture as it is
+    FIX_KEEP = 300 << 20  # bytes of fixed pictures kept (few: most covers have nothing to fix)
+    fix_level = "strong"
+
+    def _fix_path(self, cached: str) -> str:
+        return os.path.join(UPSCALED_DIR, "fixed", f"{os.path.basename(cached)[:-4]}-{self.fix_level}.jpg")
+
+    @staticmethod
+    def _round_steps(name: str, n: int) -> list[str]:
+        """All 8 neighbours, then only the 4 nearest, in turn: round shapes, not squares that could show."""
+        return [name if i % 2 else f"{name}=coordinates=90" for i in range(n)]
+
+    def _fix_mask(self, original: str, picture: str, out: str, level: tuple) -> float | None:
+        """Where the invented patterns are: 300x300 grey bytes into `out`, how much of the picture that is (0-1);
+        None when it couldn't be worked out."""
+        from gi.repository import GdkPixbuf
+        _, w, h = GdkPixbuf.Pixbuf.get_file_info(original)
+        w2 = min(w, 1200)
+        h2 = max(1, round(h * w2 / w))
+        lo, hi, grow = level
+
+        def strength(i, name):  # how strong the patterns of 1.5-12 px are, round each place
+            return (f"[{i}]scale={w2}:{h2}:flags=lanczos,format=gray16le,split[{name}1][{name}2];"
+                    f"[{name}1]gblur=sigma=0.8[{name}3];[{name}2]gblur=sigma=3.5[{name}4];"
+                    f"[{name}3][{name}4]blend=all_mode=difference,gblur=sigma=9,scale=300:300:flags=area,"
+                    f"format=gray16le[{name}]")
+        ratio = f"clip((A/(4*B+262.1)-{lo / 4})/{(hi - lo) / 4},0,1)*65535"
+        graph = (f"{strength(0, 'a')};{strength(1, 'o')};[a][o]blend=all_expr='{ratio}',format=gray16le,format=gray,"
+                 + ",".join(self._round_steps("erosion", 9) + self._round_steps("dilation", 9 + grow))
+                 + ",gblur=sigma=5[m]")
+        cmd = ["nice", "-n", "19", self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-filter_threads", "2",
+               "-filter_complex_threads", "2", "-i", picture, "-i", original, "-filter_complex", graph, "-map", "[m]",
+               "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", out]
+        proc = self.proc = self._spawn(cmd)
+        proc.communicate()
+        self._reap(proc)
+        if proc.returncode or not os.path.exists(out) or os.path.getsize(out) != 90000:
+            return None
+        with open(out, "rb") as f:
+            return sum(f.read()) / (255 * 90000)
+
+    def _fix_merge(self, original: str, picture: str, mask: str, size: tuple[int, int], out: str) -> bool:
+        w, h = size
+        graph = (f"[1]scale={w}:{h}:flags=lanczos,format=gbrp[l];[2]scale={w}:{h}:flags=bicubic,format=gbrp[m];"
+                 "[0]format=gbrp[a];[a][l][m]maskedmerge[f]")
+        cmd = ["nice", "-n", "19", self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-filter_threads", "2",
+               "-filter_complex_threads", "2", "-i", picture, "-i", original, "-f", "rawvideo", "-pix_fmt", "gray",
+               "-video_size", "300x300", "-i", mask, "-filter_complex", graph, "-map", "[f]", "-frames:v", "1",
+               "-q:v", "2", out]
+        proc = self.proc = self._spawn(cmd)
+        proc.communicate()
+        self._reap(proc)
+        return proc.returncode == 0 and os.path.exists(out)
+
+    def _fixed(self, kind: str, data: bytes, pic: bytes, cached: str | None) -> bytes:
+        """The finished picture of a cover without the patterns the AI invented, at the chosen level; as it is when
+        there's nothing to fix or anything fails. Remembered (an empty file: nothing to fix)."""
+        level = self.FIX_LEVELS.get(self.fix_level)
+        if not (level and cached and self.ffmpeg and kind in ("cover", "track")):
+            return pic
+        path = self._fix_path(cached)
+        try:
+            if os.path.getsize(path) == 0:
+                return pic
+            with open(path, "rb") as f:
+                return f.read()
+        except OSError:
+            pass
+        work = tempfile.mkdtemp(prefix="radio-beat-fix-")
+        try:
+            from gi.repository import GdkPixbuf
+            original, picture, mask = (os.path.join(work, n) for n in ("o.img", "a.jpg", "m.raw"))
+            for name, content in ((original, data), (picture, pic)):
+                with open(name, "wb") as f:
+                    f.write(content)
+            found = self._fix_mask(original, picture, mask, level)
+            if found is None:
+                return pic
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if found < self.FIX_EMPTY:
+                open(path, "wb").close()
+                return pic
+            _, w, h = GdkPixbuf.Pixbuf.get_file_info(picture)
+            out = os.path.join(work, "f.jpg")
+            if not self._fix_merge(original, picture, mask, (w, h), out):
+                return pic
+            with open(out, "rb") as f:
+                fixed = f.read()
+            with open(path + ".part", "wb") as f:
+                f.write(fixed)
+            os.replace(path + ".part", path)
+            self._fix_trim(os.path.dirname(path))
+            return fixed
+        except (OSError, GLib.Error, ValueError) as e:
+            print(f"enhancer: invented patterns: {e}", file=sys.stderr)
+            return pic
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _fix_trim(self, folder: str) -> None:
+        try:
+            files = sorted((os.path.join(folder, f) for f in os.listdir(folder)), key=os.path.getmtime, reverse=True)
+            used = 0
+            for f in files:
+                used += os.path.getsize(f)
+                if used > self.FIX_KEEP:
+                    os.remove(f)
+        except OSError:
+            pass
+
+    def fix_known(self, cached: str) -> bytes | None | bool:
+        """Main thread, a cached cover about to be shown: the fixed picture's bytes, None: nothing to fix, False:
+        not worked out yet (the worker does it)."""
+        if not self.FIX_LEVELS.get(self.fix_level):
+            return None
+        path = self._fix_path(cached)
+        try:
+            if os.path.getsize(path) == 0:
+                return None
+            with open(path, "rb") as f:
+                return f.read()
+        except OSError:
+            return False if self.ffmpeg else None
 
     CLAIM_WAIT = 45  # s: the picture on the screen waits this long at most for another computer making it
 
@@ -9788,6 +9927,7 @@ class Window(Adw.ApplicationWindow):
         self.enhance_row.set_active(self.app.settings.get("enhance", True))
         self.enhance_row.connect("notify::active", lambda r, _: self.app.set_enhance(r.get_active()))
         group.add(self.enhance_row)
+        group.add(self._fix_row())
         self.share_row = Adw.SwitchRow(title="Sdílet obrázky v této síti", subtitle_lines=0,
                                        subtitle=GLib.markup_escape_text(self.app.share_status()))
         self.share_row.set_active(self.app.settings.get("share", True))
@@ -9889,27 +10029,37 @@ class Window(Adw.ApplicationWindow):
         btn.connect("clicked", lambda *_: self.toggle_water(self.gear_water))
         return btn
 
-    def _weather_place_row(self) -> Gtk.Widget:
-        """The place for the weather: its name under the title, and the list unfolding right there, in the panel's
-        own glass (a drop-down would be a grey popup of its own, on the other side, with the names cut short)."""
-        now = weather_spot(self.app.settings.get("weather_place", "oprechtice"))
-        row = Adw.ExpanderRow(title="Místo pro počasí", subtitle=now[1], subtitle_lines=0)
+    def _choice_row(self, title: str, choices: list[tuple[str, str]], now: str, pick) -> Gtk.Widget:
+        """A choice whose list unfolds right under the chosen one, in the panel's own glass (a drop-down would be a
+        grey popup of its own, on the other side, with the names cut short). choices: (key, name)."""
+        names = dict(choices)
+        row = Adw.ExpanderRow(title=title, subtitle=names.get(now, choices[0][1]), subtitle_lines=0)
         marks = {}
 
-        def pick(key, name):
+        def chosen(key):
             for k, mark in marks.items():
                 mark.set_opacity(1 if k == key else 0)
-            row.set_subtitle(name)
+            row.set_subtitle(names[key])
             row.set_expanded(False)
-            self.app.set_weather(place=key)
+            pick(key)
 
-        for key, name, *_ in WEATHER_PLACES:
+        for key, name in choices:
             item = Adw.ActionRow(title=name, title_lines=0, activatable=True)
-            marks[key] = Gtk.Image(icon_name="object-select-symbolic", opacity=1 if key == now[0] else 0)
+            marks[key] = Gtk.Image(icon_name="object-select-symbolic", opacity=1 if key == now else 0)
             item.add_prefix(marks[key])  # beside the name, not across the panel
-            item.connect("activated", lambda _r, k=key, n=name: pick(k, n))
+            item.connect("activated", lambda _r, k=key: chosen(k))
             row.add_row(item)
         return row
+
+    def _weather_place_row(self) -> Gtk.Widget:
+        now = weather_spot(self.app.settings.get("weather_place", "oprechtice"))[0]
+        return self._choice_row("Místo pro počasí", [(p[0], p[1]) for p in WEATHER_PLACES], now,
+                                lambda key: self.app.set_weather(place=key))
+
+    def _fix_row(self) -> Gtk.Widget:
+        return self._choice_row("Oprava vzorů, které si AI vymyslí",
+                                [("off", "Vypnuto"), ("weak", "Slabá"), ("medium", "Střední"), ("strong", "Silná")],
+                                self.app.settings.get("ai_fix", "strong"), self.app.set_ai_fix)
 
     def _quality_pill(self, scrim) -> Gtk.Widget:
         """Quality at the bottom right: a pill of glass like the 'i' panel's tabs. Its list opens upwards, glass
@@ -11578,6 +11728,7 @@ class App(Adw.Application):
         self.logo_tex = None
         self.refined = None  # (before, after) of the last enhancing step: redrawn in, not morphed
         self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
+        self.enhancer.fix_level = self.settings.get("ai_fix", "strong")
         self.share = CacheShare(self.enhancer, self._share_changed, self.db)
         self.share.hub_url = self.settings.get("hub_url", "")
         self.db.on_play = lambda: GLib.idle_add(lambda: (self.win and self.win.played_new(), False)[1])
@@ -12988,6 +13139,15 @@ class App(Adw.Application):
         g = mon.get_geometry()
         sc = mon.get_scale() if hasattr(mon, "get_scale") else mon.get_scale_factor()
         return round(g.width * sc), round(g.height * sc)
+
+    def set_ai_fix(self, level: str) -> None:
+        """How strongly invented patterns are taken out: the picture on the screen changes at once, no AI needed."""
+        self.settings["ai_fix"] = level
+        save_settings(self.settings)
+        self.enhancer.fix_level = level
+        self._enhance("cover")
+        if self.track_view:
+            self._enhance("track")
 
     def _enhance(self, kind: str) -> None:
         """Ask for an enhanced picture: upscaled if full screen would stretch it,
