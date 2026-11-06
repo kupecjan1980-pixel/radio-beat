@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.28.3"
+APP_VERSION = "0.28.4"
 
 import collections
 import ctypes
@@ -799,7 +799,9 @@ def song_facts(artist: str, song: str) -> str:
     song = re.sub(r"\s*[(\[].*?[)\]]", "", song).strip() or song  # "Stairway to Heaven (Remaster)": the song
     a, t = norm(first_artist(artist)), norm(song)
     names = " OR ".join('"' + x.replace('"', "") + '"' for x in title_spellings(song))
-    base = f'recording:({names}) AND artist:"{first_artist(artist)}" AND status:official'
+    # (concert recordings left out of the search itself: only 100 come back, and live ones may crowd the original
+    # out: Smoke on the Water's 1972 studio recording missing behind Made in Japan and the rest)
+    base = f'recording:({names}) AND artist:"{first_artist(artist)}" AND status:official AND NOT comment:live'
     t = same_title(song)
 
     def search(extra: str = ""):
@@ -855,10 +857,15 @@ def song_facts(artist: str, song: str) -> str:
             first = other
     # (where the first release came out misleads: the Beatles' "in Canada", Škwor's "worldwide"; where it
     # was recorded is what counts, below)
-    # Where: the oldest plain recordings first (not a demo or a live one).
+    # Where: the original recording first: not a live one or a demo, from the first release's year, on the most
+    # releases. (Any note at all used to put it last: Aqualung's "original stereo mix" on 123 releases lost to an
+    # unnoted concert recording, "recorded in Eventim Apollo, Hammersmith".)
     places = []
-    for r in sorted(recs, key=lambda r: (bool(r.get("disambiguation")), -len(r.get("releases", [])),
-                                         r.get("first-release-date") or "9999"))[:6]:
+    live = lambda r: bool(re.search(r"\blive\b|\bdemo\b|\brehearsal\b", r.get("disambiguation", ""), re.I))
+    # only recordings of the first release's year: a later one is rarely the studio's (Fleetwood Mac's Dreams
+    # took the Forum from a concert recording with no note); none with a place: the album's own place, below
+    originals = [r for r in recs if not live(r) and (r.get("first-release-date") or "")[:4] == first[:4]]
+    for r in sorted(originals, key=lambda r: (-len(r.get("releases", [])), r.get("first-release-date") or "9999"))[:6]:
         got = _mb(f"/recording/{r['id']}?inc=place-rels+area-rels&fmt=json")
         places = _places((got or {}).get("relations"))
         if places:
@@ -1264,6 +1271,21 @@ class History:
                                 "WHERE cover IS NOT NULL OR facts IS NOT NULL GROUP BY lower(artist), lower(title)",
                                 (time.time(),))
                 self.db.execute("PRAGMA user_version = 7")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 9:  # once: a concert hall as the studio,
+                venue = re.compile(r"Nahráno v [^·]*(Apollo|Odeon|Arena|Stadium|Budokan|Square Garden|Albert Hall|"
+                                   r"Theat(re|er)|Festival|Palladium|Forum|Hammersmith)", re.I)  # looked up again
+                redo = [(rowid,) for rowid, facts in self.db.execute(
+                    "SELECT rowid, facts FROM plays WHERE facts IS NOT NULL") if venue.search(facts)]
+                self.db.executemany("UPDATE plays SET facts = NULL WHERE rowid = ?", redo)
+                try:
+                    with open(FACTS_CACHE) as f:
+                        cache = json.load(f)
+                    with open(FACTS_CACHE + ".part", "w") as f:
+                        json.dump({k: v for k, v in cache.items() if not venue.search(v or "")}, f)
+                    os.replace(FACTS_CACHE + ".part", FACTS_CACHE)
+                except (OSError, ValueError, AttributeError):
+                    pass
+                self.db.execute("PRAGMA user_version = 9")
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 8:  # once: placeholder dates looked up again
                 redo = [(rowid,) for rowid, facts in self.db.execute(  # ("1. ledna": the year only, or not known)
                     "SELECT rowid, facts FROM plays WHERE facts IS NOT NULL") if BAD_DATE.search(facts)]

@@ -4,6 +4,7 @@
 
 ## 0.28 — Společné vylepšování obrázků
 
+- **0.28.4** (2026-11-06) Kde bylo nahráno: místo z původní studiové nahrávky, ne z koncertní (Aqualung „Eventim Apollo“ → Basing Street Studios, Dreams „Kia Forum“ → Criteria Studios); koncertní nahrávky se do hledání vůbec nepletou; 42 skladeb s koncertní halou místo studia se dohledá znovu
 - **0.28.3** (2026-11-05) Data vydání: „1. ledna“ byla jen náhražka služeb za neznámý den (U2 The Joshua Tree vyšlo 9. března 1987) a „1970“ Deezerovo „nevím“: teď rok sám, nebo přesné datum odjinud; 159 takových přehrání se dohledá znovu. MusicBrainz najde i „Mr.“ místo „Mister“ a název s „The“, živé nahrávky se nepočítají za první vydání
 - **0.28.2** (2026-11-05) Oprava vzorů, které si AI vymyslí (čáry a mřížky místo jemné textury): nabídka v nastavení Vypnuto / Slabá / Střední / Silná, výchozí Silná; přepočítá se jen sama oprava, bez AI, a platí i pro už hotové obrázky
 - **0.28.1** (2026-11-04) Staré obaly se vylepšují i při otevřeném okně: počítá se jen GPU, kterou používají jiné programy (vlastní sklo a plocha ne), jinak by se při celé obrazovce nedostaly na řadu
