@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.28.4"
+APP_VERSION = "0.28.5"
 
 import collections
 import ctypes
@@ -2837,8 +2837,7 @@ class Enhancer:
         a reset during Real-ESRGAN: the same."""
         if os.path.exists(self.hang_file):
             return self.TILES[-1]
-        integrated = self.gpu and not self.soft and not DISCRETE_GPU.search(self.gpu)
-        return self.TILES[-1] if integrated else self.TILES[0]
+        return self.TILES[-1] if self.integrated() else self.TILES[0]
 
     def gpu_lost(self) -> None:
         """The GPU was reset (device lost): if Real-ESRGAN was working, it caused it, so small tiles for good."""
@@ -3029,8 +3028,15 @@ class Enhancer:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
+    def integrated(self) -> bool:
+        """The AI's GPU shares the computer's memory and draws the desktop (an APU's, a laptop's or handheld's)."""
+        return bool(self.gpu) and not self.soft and not DISCRETE_GPU.search(self.gpu)
+
     def _test_vk_denoise(self) -> None:
-        if not self.ffmpeg or not self.ai or self.soft:
+        # Not on an integrated GPU: the denoise is one long GPU job per strip, and beside the window's glass it can
+        # outlast the kernel's timeout (Vega 7730U: 22:20 on 5 Nov 2026, the GPU recovered); each timeout risks a
+        # full GPU reset. On the CPU it's a few seconds more of background work.
+        if not self.ffmpeg or not self.ai or self.soft or self.integrated():
             self.vk_denoise = False
             return
         work = tempfile.mkdtemp(prefix="radio-beat-esr-")
