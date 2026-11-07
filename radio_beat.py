@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.8"
+APP_VERSION = "0.31.9"
 
 import collections
 import ctypes
@@ -10210,28 +10210,115 @@ class SquarePic(Gtk.Widget):
     def get_paintable(self):
         return self.tex
 
-    nobody = False  # no photo at all: a drawn silhouette (head and shoulders) instead
+    nobody = False  # no photo at all: a drawn badge instead (their initials, a symbol of what they do)
+    initials = ""
+    job = ""  # "film", "mic", "music", "sport", "pen", "politics", "art", "science", "crown", "" (none)
+    hue = 0.0
+
+    JOBS = (("film", r"herec|herečk|actor|actress|režisér|director|filmov|film"),
+            ("mic", r"moderát|hlasatel|presenter|host|novinář|journalist|reportér|televizní"),
+            ("music", r"zpěv|hudeb|singer|musician|skladatel|composer|kytarist|bubeník|rapper|dirigent"),
+            ("sport", r"fotbal|hokej|tenist|sportov|atlet|rychlobrusl|volejbal|basketbal|cyklist|plav|lyž|"
+                      r"brank|footballer|player|athlete|sprinter|skater|olymp|závodn|boxer|golf"),
+            ("pen", r"spisovat|básník|básnířk|writer|poet|author|autor|dramatik|překladatel"),
+            ("politics", r"politi|poslan|senátor|ministr|politician|prezident|diplomat|starost"),
+            ("art", r"malíř|painter|sochař|sculptor|výtvarn|architekt|fotograf|designer"),
+            ("science", r"vědec|vědkyně|fyzik|chemik|biolog|matematik|lékař|scientist|sociolog|filozof|"
+                        r"historik|profesor|ekonom|inženýr|teolog|kněz|theolog|priest|kazatel"),
+            ("crown", r"král|kníže|císař|princ|svat|papež|king|queen|emperor|saint|pope|biskup|hrabě"))
+
+    def set_person(self, name: str, desc: str) -> None:
+        import zlib
+        words = [w for w in re.split(r"[\s-]+", name) if w[:1].isalpha() and w[0].isupper()
+                 and not re.fullmatch(r"[IVXLC]+\.?", w)]  # (not a pope's or king's number: Benedikt XVI.)
+        self.initials = "".join(w[0] for w in (words[:1] + words[-1:] if len(words) > 1 else words))[:2].upper()
+        d = desc.lower()
+        found = [(m.start(), j) for j, rx in self.JOBS if (m := re.search(rx, d))]
+        self.job = min(found)[1] if found else ""  # (what's named first: "atlet a novinář" is an athlete)
+        self.hue = (zlib.crc32(name.encode()) % 360) / 360.0
+        self.nobody = True
+        self.queue_draw()
+
+    def _badge(self, snap) -> None:
+        """The drawn badge: a glass disc in the person's own colour, their initials, what they do in its corner."""
+        import colorsys
+        px = self.px
+        top = [int(c * 255) for c in colorsys.hls_to_rgb(self.hue, 0.58, 0.55)]
+        bottom = [int(c * 255) for c in colorsys.hls_to_rgb(self.hue, 0.34, 0.6)]
+        rr = Gsk.RoundedRect()
+        rr.init_from_rect(Graphene.Rect().init(0, 0, px, px), self.radius)
+        snap.push_rounded_clip(rr)
+        snap.append_linear_gradient(Graphene.Rect().init(0, 0, px, px), Graphene.Point().init(0, 0),
+                                    Graphene.Point().init(0, px), [_stop(0.0, *top, 1.0), _stop(1.0, *bottom, 1.0)])
+        snap.append_radial_gradient(Graphene.Rect().init(0, 0, px, px), Graphene.Point().init(px * 0.3, px * 0.2),
+                                    px * 0.6, px * 0.4, 0, 1, [_stop(0.0, 255, 255, 255, 0.28), _stop(1.0, 255, 255, 255, 0.0)])
+        lay = self.create_pango_layout(self.initials or "?")
+        desc = Pango.FontDescription.from_string("Oswald Bold")
+        desc.set_absolute_size(px * 0.42 * Pango.SCALE)
+        lay.set_font_description(desc)
+        ink = lay.get_pixel_extents()[1]
+        shadow = Gsk.Shadow()
+        shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.55), -1, 2, 3
+        snap.push_shadow([shadow])
+        snap.save()
+        dx = px * (0.42 if self.job else 0.5)
+        snap.translate(Graphene.Point().init(dx - ink.width / 2 - ink.x, px * 0.46 - ink.height / 2 - ink.y))
+        snap.append_layout(lay, _rgba(255, 255, 255, 0.97))
+        snap.restore()
+        snap.pop()
+        if self.job:  # what they do, small, at the bottom right
+            snap.save()
+            snap.translate(Graphene.Point().init(px * 0.76, px * 0.76))
+            r = px * 0.17
+            snap.append_color(_rgba(0, 0, 0, 0), Graphene.Rect().init(0, 0, 1, 1))
+            disc = Gsk.PathBuilder.new()
+            disc.add_circle(Graphene.Point().init(0, 0), r)
+            snap.append_fill(disc.to_path(), Gsk.FillRule.WINDING, _rgba(255, 255, 255, 0.92))
+            self._job_icon(snap, r * 1.3)
+            snap.restore()
+        snap.pop()
+
+    def _job_icon(self, s, size: float) -> None:
+        """A small symbol of what they do, centred, dark on the white disc."""
+        import random
+        rng = random.Random(1)
+        ink = _rgba(*[int(c * 255) for c in __import__("colorsys").hls_to_rgb(self.hue, 0.3, 0.6)], 1.0)
+        R = size / 2
+        if self.job == "film":  # a clapperboard
+            SeasonDecor._round_rect(s, -R * 0.75, -R * 0.2, R * 1.5, R * 0.95, R * 0.1, ink)
+            SeasonDecor._poly(s, [(-R * 0.75, -R * 0.3), (R * 0.75, -R * 0.62), (R * 0.75, -R * 0.38),
+                                  (-R * 0.75, -R * 0.06)], ink)
+        elif self.job == "mic":  # a microphone
+            SeasonDecor._round_rect(s, -R * 0.28, -R * 0.85, R * 0.56, R * 0.95, R * 0.28, ink)
+            SeasonDecor._line(s, [(-R * 0.48, -R * 0.1), (-R * 0.4, R * 0.3), (R * 0.4, R * 0.3), (R * 0.48, -R * 0.1)],
+                              max(1.0, size * 0.08), ink)
+            SeasonDecor._line(s, [(0, R * 0.32), (0, R * 0.75)], max(1.0, size * 0.08), ink)
+            SeasonDecor._line(s, [(-R * 0.35, R * 0.78), (R * 0.35, R * 0.78)], max(1.0, size * 0.08), ink)
+        elif self.job == "sport":  # a ball
+            ring = Gsk.PathBuilder.new()
+            ring.add_circle(Graphene.Point().init(0, 0), R * 0.8)
+            s.append_stroke(ring.to_path(), Gsk.Stroke.new(max(1.0, size * 0.08)), ink)
+            SeasonDecor._poly(s, [(R * 0.3 * math.cos(a), R * 0.3 * math.sin(a))
+                                  for a in (math.radians(-90 + 72 * k) for k in range(5))], ink)
+        elif self.job == "music":
+            SeasonDecor._note(s, rng, size * 1.1, ink, "autumn")
+        elif self.job == "pen":
+            SeasonDecor._book(s, rng, size * 1.15, ink, "autumn")
+        elif self.job == "politics":
+            SeasonDecor._temple(s, rng, size * 1.1, ink, "autumn")
+        elif self.job == "art":
+            SeasonDecor._palette(s, rng, size * 1.15, ink, "autumn")
+        elif self.job == "science":
+            SeasonDecor._book(s, rng, size * 1.15, ink, "autumn")
+        elif self.job == "crown":
+            SeasonDecor._crown(s, rng, size * 1.15, _rgba(230, 170, 30, 1.0), "autumn")
 
     def do_measure(self, orientation, for_size):
         return self.px, self.px, -1, -1
 
     def do_snapshot(self, snap) -> None:
         if self.tex is None and self.nobody:
-            px = self.px
-            rr = Gsk.RoundedRect()
-            rr.init_from_rect(Graphene.Rect().init(0, 0, px, px), self.radius)
-            snap.push_rounded_clip(rr)
-            snap.append_linear_gradient(Graphene.Rect().init(0, 0, px, px), Graphene.Point().init(0, 0),
-                                        Graphene.Point().init(0, px), [_stop(0.0, 96, 110, 130, 0.9),
-                                                                       _stop(1.0, 52, 60, 74, 0.9)])
-            head, body = Gsk.PathBuilder.new(), Gsk.PathBuilder.new()
-            head.add_circle(Graphene.Point().init(px / 2, px * 0.38), px * 0.18)
-            body.move_to(px * 0.14, px * 1.02)
-            body.cubic_to(px * 0.16, px * 0.66, px * 0.84, px * 0.66, px * 0.86, px * 1.02)
-            body.close()
-            for pb in (head, body):
-                snap.append_fill(pb.to_path(), Gsk.FillRule.WINDING, _rgba(205, 214, 226, 0.95))
-            snap.pop()
+            self._badge(snap)
             return
         if self.tex is None:
             return
@@ -11773,8 +11860,8 @@ class Window(Adw.ApplicationWindow):
                 a.want_name_pic(p["img"])
                 pic.set_paintable(a.show_pics.get(p["img"]) or a.logo_tex)
                 self._names_pics.append((pic, p["img"]))
-            else:  # no photo anywhere: a drawn silhouette, not the station's logo
-                pic.nobody = True
+            else:  # no photo anywhere: a drawn badge (initials, what they do), never a made-up face
+                pic.set_person(p["name"], p["desc"])
             row.append(frame)
             lines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
             name = Gtk.Label(label=f"<b>{GLib.markup_escape_text(p['name'])}</b>", use_markup=True, xalign=0,
