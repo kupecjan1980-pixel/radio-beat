@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.10"
+APP_VERSION = "0.31.11"
 
 import collections
 import ctypes
@@ -7327,6 +7327,28 @@ def name_forms(name: str) -> list[str]:
     return out
 
 
+def _let(n: int) -> str:
+    return f"{n} rok" if n == 1 else f"{n} roky" if 2 <= n <= 4 else f"{n} let"
+
+
+def namesake_years(p: dict) -> str:
+    """Their years and age: "* 1946 (80 let)" living, "1612–1642 († 30 let)" dead (the age at death); by the
+    full dates when known, else by the years."""
+    born, died = p.get("born") or "", p.get("died") or ""
+    if not born:
+        return p.get("years", "")
+
+    def age(a, b):
+        ya, yb = int(a[:4]), int(b[:4])
+        n = yb - ya
+        if len(a) >= 10 and len(b) >= 10 and b[5:10] < a[5:10]:  # (before the birthday that year)
+            n -= 1
+        return n
+    if died:
+        return f"{born[:4]}–{died[:4]} († {_let(age(born, died))})"
+    return f"* {born[:4]} ({_let(age(born, time.strftime('%Y-%m-%d')))})"
+
+
 def namesake_ok(person: dict, forms) -> bool:
     """Is the name (in any of its forms: Evžen is Eugen, Bohdan Bogdan) in the name they're known by? Wikidata
     lists every given name, middle ones too: Daryll Neita came up under Saskie for one nobody calls her by."""
@@ -7442,6 +7464,7 @@ def namesakes(names: list[str]) -> list[dict]:
             seen.add(pid)
             n += 1
             year = lambda k: (re.match(r"[+-]?(\d{3,4})", r.get(k, {}).get("value", "")) or [None, None])[1]
+            day = lambda k: (re.match(r"[+-]?(\d{4}-\d\d-\d\d)", r.get(k, {}).get("value", "")) or [None, ""])[1]
             born, died = year("birth"), year("death")
             img = r.get("img", {}).get("value", "")
             if img:
@@ -7455,7 +7478,7 @@ def namesakes(names: list[str]) -> list[dict]:
                 for alt in name_forms(cal)[1:]:
                     label = re.sub(rf"\b{re.escape(alt)}\b", cal, label)
             out.append({"name": label, "desc": r.get("pDescription", {}).get("value", ""),
-                        "img": img, "czech": czech,
+                        "img": img, "czech": czech, "born": day("birth") or born or "", "died": day("death") or died or "",
                         "years": f"{born}–{died}" if born and died else f"* {born}" if born else ""})
     return out
 
@@ -11877,7 +11900,7 @@ class Window(Adw.ApplicationWindow):
             name = Gtk.Label(label=f"<b>{GLib.markup_escape_text(p['name'])}</b>", use_markup=True, xalign=0,
                              wrap=True, attributes=attrs)
             lines.append(name)
-            about = " · ".join(t for t in (a.cz(p["desc"]) if p["desc"] else "", p["years"]) if t)
+            about = " · ".join(t for t in (a.cz(p["desc"]) if p["desc"] else "", namesake_years(p)) if t)
             if about:  # what they were and their years, on one line (wrapped when long)
                 lab = Gtk.Label(label=f"<span alpha='80%'>{GLib.markup_escape_text(about)}</span>", use_markup=True,
                                 xalign=0, wrap=True, attributes=attrs)
@@ -14593,7 +14616,8 @@ class App(Adw.Application):
                 self._namesakes_file = {k: v for k, v in keep.items() if time.time() - v.get("at", 0) < NAMESAKES_KEEP}
             except (OSError, ValueError, AttributeError):
                 self._namesakes_file = {}
-        if self._namesakes_file.get(key, {}).get("v") == 3:  # (kept before forms and article pictures: anew)
+        kept = self._namesakes_file.get(key, {})
+        if kept.get("v") == 4 and (kept.get("tmdb") or not TMDB_KEY):  # (older, or before a TMDB key: anew)
             self._namesakes[key] = self._namesakes_file[key]["people"]
             return
         if getattr(self, "_namesakes_busy", None) == key:
@@ -14614,7 +14638,7 @@ class App(Adw.Application):
         if people is None:  # not reached: asked again when the box opens next
             return False
         self._namesakes[key] = people
-        self._namesakes_file[key] = {"at": time.time(), "people": people, "v": 3, "tmdb": bool(TMDB_KEY)}
+        self._namesakes_file[key] = {"at": time.time(), "people": people, "v": 4, "tmdb": bool(TMDB_KEY)}
         try:
             os.makedirs(os.path.dirname(NAMESAKES_FILE), exist_ok=True)
             with open(NAMESAKES_FILE + ".part", "w") as f:
