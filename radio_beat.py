@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.29.7"
+APP_VERSION = "0.29.8"
 
 import collections
 import ctypes
@@ -1012,6 +1012,12 @@ DIALECT_LEADS = {"std": "Víte, že… ", "ostrava": "Viš co? ", "brno": "Čuj,
 DIALECT_BADGES = {"NOW PLAYING": {"std": "PRÁVĚ HRAJE", "ostrava": "PRAVĚ HRAJE", "brno": "TEĎKA FRČÍ",
                                   "hana": "PRÁVĚ HRAJE", "morava": "TEĎKA HRAJE", "praha": "TEĎ HRAJE"},
                   "DID YOU KNOW": {k: v.strip().upper() for k, v in DIALECT_LEADS.items()}}
+
+
+# The choice in the settings: "auto" mixes them as above (the default), or one of them for every text.
+DIALECT_CHOICES = [("auto", "Míchat (50 % spisovně, po 10 % ostatní)"), ("std", "Spisovně"),
+                   ("ostrava", "Ostravsky"), ("brno", "Brněnsky"), ("hana", "Hanácky"),
+                   ("morava", "Jihomoravsky"), ("praha", "Pražsky")]
 
 
 def dialect_of(text: str, day: str = None) -> str:
@@ -10915,14 +10921,7 @@ class Window(Adw.ApplicationWindow):
         self.npu_row.set_active(self.app.settings.get("npu", False))
         self.npu_row.connect("notify::active", lambda r, _: self.app.set_npu(r.get_active()))
         group.add(self.npu_row)
-        dialect = Adw.SwitchRow(title="Nářečí",
-                                subtitle="Texty o skladbě, interpretovi a pořadu: 50 % spisovně, po 10 % ostravsky, "
-                                         "brněnsky, hanácky, jihomoravsky a pražsky (každý den jinak); "
-                                         "vypnuto: "
-                                         "jen spisovně", subtitle_lines=0)
-        dialect.set_active(self.app.settings.get("ostrava", True))
-        dialect.connect("notify::active", lambda r, _: (self.app.set_look(ostrava=r.get_active()), self.app.update()))
-        group.add(dialect)
+        group.add(self._choice_row("Nářečí", DIALECT_CHOICES, self.app.dialect(), self.app.set_dialect))
         style = Adw.SwitchRow(title="Písmo jako Beat Radio",
                               subtitle="Písma jako v logu stanice (Anton, Oswald); vypnuto: běžná"
                               if self.app.fonts_ok else "Vypnuto: chybí jeho písma (složka fonts/)",
@@ -13797,9 +13796,9 @@ class App(Adw.Application):
         pražština (dialect_of: by the text and the day); only standard when dialects are switched off. 'Víte,
         že…' in the dialect's own way ('Viš co?', 'Čuj, víš co?')."""
         text = years_ago(text)
-        if not self.settings.get("ostrava", True):
-            return text
-        key = dialect_of(text)
+        key = self.dialect()
+        if key == "auto":
+            key = dialect_of(text)
         lead = ""
         if text.startswith("Víte, že… "):
             text, lead = text[len("Víte, že… "):], DIALECT_LEADS[key]
@@ -13810,7 +13809,20 @@ class App(Adw.Application):
         names = DIALECT_BADGES.get(name)
         if names is None:
             return name
-        return names[dialect_of(years_ago(text) or name) if self.settings.get("ostrava", True) else "std"]
+        key = self.dialect()
+        return names[dialect_of(years_ago(text) or name) if key == "auto" else key]
+
+    def dialect(self) -> str:
+        """The dialect chosen in the settings ("auto": mixed); the old Ostrava switch off meant standard Czech."""
+        key = self.settings.get("dialect")
+        if key not in dict(DIALECT_CHOICES):
+            key = "auto" if self.settings.get("ostrava", True) else "std"
+        return key
+
+    def set_dialect(self, key: str) -> None:
+        self.settings["dialect"] = key
+        save_settings(self.settings)
+        self.update()
 
     # The show card's text turns (about 3 a minute, 180 an hour): the song playing once, then a mix made ahead
     # in the background from whole Wikipedia articles: 10 % the station, 90 % the artists and songs played

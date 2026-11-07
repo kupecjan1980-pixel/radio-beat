@@ -4,6 +4,7 @@
 
 ## 0.29 — Vlastní kreslené obrázky místo emoji
 
+- **0.29.8** (2026-11-07) Nářečí jako nabídka v nastavení místo přepínače Ostravština: Míchat (výchozí, 50 % spisovně a po 10 % ostatní), Spisovně, Ostravsky, Brněnsky, Hanácky, Jihomoravsky, Pražsky
 - **0.29.7** (2026-11-07) Nářečí: 50 % spisovně, po 10 % ostravsky, brněnsky, hanácky, jihomoravsky a pražsky
 - **0.29.6** (2026-11-07) Nářečí: texty 60 % spisovně a po 10 % ostravsky, brněnsky (šalina, hokna, čuj), moravsky (hanácky bét, s kytaró / jihomoravsky šak, s kytarú) a pražsky (dobrej, vokno); každý text má svoje nářečí celý den, zítra jiné; jména se nemění
 - **0.29.5** (2026-11-07) Hrad nakreslený jako středověký z oblých kamenů s věžemi, cimbuřím, střechami, praporem a branou; japonský hrad se zahnutými střechami; dům, kostel s věží, továrna s komínem; kopretina bílá se žlutým středem, růže, tulipán, kytice a květy ve svých barvách
