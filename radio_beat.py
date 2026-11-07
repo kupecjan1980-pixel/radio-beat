@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.29.5"
+APP_VERSION = "0.29.6"
 
 import collections
 import ctypes
@@ -935,7 +935,8 @@ def to_czech(text: str) -> str:
 # Ostravština (default; a switch for standard Czech): the long vowels short, a few of its words.
 OSTRAVA_WORDS = {"velmi": "fest", "hodně": "fest", "moc": "fest", "dobrý": "fajny", "dobrá": "fajna",
                  "dobré": "fajne", "dobře": "fajně", "pěkný": "fajny", "pěkná": "fajna", "pěkné": "fajne",
-                 "teď": "ted", "kamarád": "kamoš", "kamarádi": "kamoši", "taky": "tež", "také": "tež"}
+                 "teď": "ted", "kamarád": "kamoš", "kamarádi": "kamoši", "taky": "tež", "také": "tež",
+                 "potom": "potym"}
 _SHORT = str.maketrans("áéíýúůÁÉÍÝÚŮ", "aeiyuuAEIYUU")
 
 
@@ -945,6 +946,83 @@ def ostrava(text: str) -> str:
         o = OSTRAVA_WORDS.get(w.lower())
         return w if o is None else (o.capitalize() if w[0].isupper() else o)
     return re.sub(r"\w+", word, text).translate(_SHORT)
+
+
+# The other dialects (beside standard Czech and ostravština): each changes only ordinary lowercase words, never
+# a name (Dvořák, Plíhal stay as they are): a few of its words, and its sounds.
+BRNO_WORDS = {"tramvaj": "šalina", "tramvají": "šalinou", "práce": "hokna", "práci": "hokně", "pivo": "škopek",
+              "město": "štatl", "městě": "štatlu", "slunce": "zoncna", "legrace": "čurina", "zábava": "čurina",
+              "velmi": "hustě", "hodně": "hustě", "moc": "hustě", "kamarád": "kámoš", "kamarádi": "kámoši",
+              "teď": "teďka", "jít": "valit", "jde": "valí", "oblečení": "hadry", "chtít": "bažit",
+              "chce": "baží", "telefonovat": "kéblovat", "peníze": "love", "holka": "kočena", "kluk": "kluk"}
+HANA_WORDS = {"teď": "teďka", "velmi": "moc", "hodně": "moc", "chlapec": "pacholek", "kluk": "pacholek",
+              "děvče": "děvčica", "holka": "děvčica", "brambory": "kobzole", "jenom": "enem", "jen": "enem"}
+MORAVA_WORDS = {"teď": "teďka", "vždyť": "šak", "kluk": "ogar", "chlapec": "synek", "brambory": "zemáky",
+                "velmi": "velice", "hodně": "moc", "kamarád": "kamarád", "holka": "cérka", "děvče": "cérka",
+                "jenom": "enom", "jen": "enom", "jahody": "jahody"}
+PRAHA_WORDS = {"velmi": "hrozně", "hodně": "hrozně", "kamarád": "kámoš", "kamarádi": "kámoši", "teď": "teď",
+               "jsem": "sem", "jsi": "seš", "jsme": "sme", "jste": "ste", "vůbec": "vůbec"}
+
+
+def _dialect_words(text: str, words: dict, sound=None) -> str:
+    def word(m):
+        w = m.group(0)
+        if w[0].isupper():  # a name, or a sentence's first word: its sounds left as they are, a word swapped
+            o = words.get(w.lower())
+            return o.capitalize() if o else w
+        o = words.get(w)
+        return o if o is not None else (sound(w) if sound else w)
+    return re.sub(r"\w+", word, text)
+
+
+def brno(text: str) -> str:
+    return _dialect_words(text, BRNO_WORDS)
+
+
+def hana(text: str) -> str:
+    """Hanáčtina: long ý and ej as é (být - bét), ou as ó (s kytarou - s kytaró)."""
+    return _dialect_words(text, HANA_WORDS, lambda w: w.replace("ou", "ó").replace("ý", "é").replace("ej", "é"))
+
+
+def morava(text: str) -> str:
+    """South Moravian (Slovácko): ou as ú (mouka - múka, s kytarou - s kytarú)."""
+    return _dialect_words(text, MORAVA_WORDS, lambda w: w.replace("ou", "ú"))
+
+
+def praha(text: str) -> str:
+    """Pražština (obecná čeština): ý as ej (dobrý - dobrej, být - bejt), é at a word's end as ý (nové - nový),
+    a word starting with o gets its v (okno - vokno, od - vod)."""
+    def sound(w):
+        w = w.replace("ý", "ej")
+        if w.endswith("é") and len(w) > 2:
+            w = w[:-1] + "ý"
+        if w.startswith("o") and len(w) > 1:
+            w = "v" + w
+        return w
+    return _dialect_words(text, PRAHA_WORDS, sound)
+
+
+# Which dialect a text is in: 60 % standard Czech, 10 % each of the four others (the user's count: ostravština,
+# brněnština, moravština as hanáčtina or the south Moravian half and half, pražština); chosen by the text and the
+# day, so a text keeps its dialect all day (not a new one at each redraw) and gets another tomorrow.
+DIALECTS = (("std", 60), ("ostrava", 10), ("brno", 10), ("hana", 5), ("morava", 5), ("praha", 10))
+DIALECT_FN = {"std": lambda t: t, "ostrava": ostrava, "brno": brno, "hana": hana, "morava": morava, "praha": praha}
+DIALECT_LEADS = {"std": "Víte, že… ", "ostrava": "Viš co? ", "brno": "Čuj, víš co? ", "hana": "Véte, že… ",
+                 "morava": "Šak víte… ", "praha": "Hele, víš, že… "}
+DIALECT_BADGES = {"NOW PLAYING": {"std": "PRÁVĚ HRAJE", "ostrava": "PRAVĚ HRAJE", "brno": "TEĎKA FRČÍ",
+                                  "hana": "PRÁVĚ HRAJE", "morava": "TEĎKA HRAJE", "praha": "TEĎ HRAJE"},
+                  "DID YOU KNOW": {k: v.strip().upper() for k, v in DIALECT_LEADS.items()}}
+
+
+def dialect_of(text: str, day: str = None) -> str:
+    import zlib
+    day = day or time.strftime("%Y-%m-%d")
+    n = zlib.crc32(f"{day}|{text}".encode()) % 100
+    for key, share in DIALECTS:
+        if n < share:
+            return key
+        n -= share
+    return "std"
 ABOUT_LEN = 700  # characters at most, cut at a sentence's end (more than fits: it scrolls while typed)
 
 
@@ -10837,9 +10915,11 @@ class Window(Adw.ApplicationWindow):
         self.npu_row.set_active(self.app.settings.get("npu", False))
         self.npu_row.connect("notify::active", lambda r, _: self.app.set_npu(r.get_active()))
         group.add(self.npu_row)
-        dialect = Adw.SwitchRow(title="Ostravština",
-                                subtitle="Texty o skladbě, interpretovi a pořadu po ostravsku "
-                                         "(krátké samohlásky, fest, fajne); vypnuto: spisovně", subtitle_lines=0)
+        dialect = Adw.SwitchRow(title="Nářečí",
+                                subtitle="Texty o skladbě, interpretovi a pořadu: 60 % spisovně, po 10 % ostravsky, "
+                                         "brněnsky, moravsky (hanácky nebo jihomoravsky) a pražsky (každý den "
+                                         "jinak); vypnuto: "
+                                         "jen spisovně", subtitle_lines=0)
         dialect.set_active(self.app.settings.get("ostrava", True))
         dialect.connect("notify::active", lambda r, _: (self.app.set_look(ostrava=r.get_active()), self.app.update()))
         group.add(dialect)
@@ -11988,7 +12068,7 @@ class Window(Adw.ApplicationWindow):
         if mode == "ZAJÍMAVOSTI":
             if a.about:
                 info = a.info or {}
-                self._puddle_block(a.badge("NOW PLAYING"), plain_title(info.get("title") or a.song or ""),
+                self._puddle_block(a.badge("NOW PLAYING", a.about), plain_title(info.get("title") or a.song or ""),
                                    a.cz(a.about) + (f"\n{a.cz(a.facts)}" if a.facts else ""))
             while len(self.puddle_items) < 4 and (item := a.next_curiosity()):
                 self.puddle_items.append(item)
@@ -12486,7 +12566,7 @@ class Window(Adw.ApplicationWindow):
         cur, nxt = on_air(a.schedule, time.localtime())
         turn = self._turn_content if self.card_turn == "song" else None
         self.show_card.set_visible(False)  # its info lives in the 'i' button's puddle now
-        self.badge.set_text(a.badge(turn[0]) if turn else "ON AIR")
+        self.badge.set_text(a.badge(turn[0], turn[1]) if turn else "ON AIR")
         if turn:
             self.show_title.set_text(turn[1])
             facts = a.cz(a.facts) if turn[0] == "NOW PLAYING" else ""
@@ -12501,10 +12581,7 @@ class Window(Adw.ApplicationWindow):
             self.show_sub.set_visible(bool(host or cur["desc"]))
             if nxt:
                 when = f'{nxt["start"] // 60}:{nxt["start"] % 60:02d}'
-                then = "Potym" if a.settings.get("ostrava", True) else "Potom"
-                self.show_next.set_text(a.cz(f'{then} {nxt["day"] + " " if nxt["day"] else ""}{when} · {nxt["title"]}')
-                                        if a.settings.get("ostrava", True) else
-                                        f'{then} {nxt["day"] + " " if nxt["day"] else ""}{when} · {nxt["title"]}')
+                self.show_next.set_text(a.cz(f'Potom {nxt["day"] + " " if nxt["day"] else ""}{when} · {nxt["title"]}'))
             self.show_next.set_visible(nxt is not None)
             tex = a.show_pics.get(cur["img"]) if cur["img"] else None
             self.show_pic.set_from_paintable(tex or a.logo_tex)
@@ -13716,19 +13793,24 @@ class App(Adw.Application):
         return False
 
     def cz(self, text: str) -> str:
-        """Czech as shown: in ostravština unless that's switched off ('Víte, že…' becomes 'Viš co?')."""
+        """Czech as shown: 60 % standard, 10 % each of ostravština, brněnština, hanáčtina, south Moravian and
+        pražština (dialect_of: by the text and the day); only standard when dialects are switched off. 'Víte,
+        že…' in the dialect's own way ('Viš co?', 'Čuj, víš co?')."""
         text = years_ago(text)
         if not self.settings.get("ostrava", True):
             return text
+        key = dialect_of(text)
+        lead = ""
         if text.startswith("Víte, že… "):
-            return "Viš co? " + ostrava(text[len("Víte, že… "):])
-        return ostrava(text)
+            text, lead = text[len("Víte, že… "):], DIALECT_LEADS[key]
+        return lead + DIALECT_FN[key](text)
 
-    BADGES = {"NOW PLAYING": ("PRÁVĚ HRAJE", "PRAVĚ HRAJE"), "DID YOU KNOW": ("VÍTE, ŽE…", "VIŠ CO?")}
-
-    def badge(self, name: str) -> str:
-        cs = self.BADGES.get(name)
-        return name if cs is None else cs[1 if self.settings.get("ostrava", True) else 0]
+    def badge(self, name: str, text: str = "") -> str:
+        """A label in the dialect of the text it stands over (standard when dialects are off)."""
+        names = DIALECT_BADGES.get(name)
+        if names is None:
+            return name
+        return names[dialect_of(years_ago(text) or name) if self.settings.get("ostrava", True) else "std"]
 
     # The show card's text turns (about 3 a minute, 180 an hour): the song playing once, then a mix made ahead
     # in the background from whole Wikipedia articles: 10 % the station, 90 % the artists and songs played
