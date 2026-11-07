@@ -4,6 +4,7 @@
 
 ## 0.29 — Vlastní kreslené obrázky místo emoji
 
+- **0.29.2** (2026-11-07) Pořadí zvláštních dnů: česká tradice první (svatý Martin, Dušičky, Mikuláš i před Chanukou), pak významné dny ze zákona, dny OSN a spol., ostatní a nakonec reklamní a recesní (Den skořice); ty méně důležité se posunou na volný den; dny s vlastním svátkem (Diwali, Chanuka) se za volné nepočítají
 - **0.29.1** (2026-11-07) Den bez zvláštního dne si vezme ten navíc až z týdne zpátky (nebo ze 3 dnů dopředu), nejbližší, s poznámkou odkud: dnes „Den skořice (z 1. 11.)“
 - **0.29.0** (2026-11-07) Žádné emoji: počasí nakreslené (slunce, mraky, déšť, sníh, bouřka, kroupy; mlha jako v liště Omarchy – mrak nad pruhy mlhy); obrázky zvláštních dnů kreslené: nově holubice, kniha, kapka, podání rukou, jablko, šálek, sklenka, bonbon, sýr, ryba, tlapka, zdravotnický kříž, váhy, mír, stužka, paleta, budova se sloupy, zákaz (72 % obrázků dnů má vlastní kresbu, zbytek zatím zlatá hvězda, další dávky přijdou); zvláštní den navíc se ukáže den předtím nebo potom, když ten nemá žádný; „1. května 1973“ tam, kde je známý jen měsíc, je teď „květen 1973“
 

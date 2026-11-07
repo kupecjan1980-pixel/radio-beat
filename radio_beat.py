@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.29.1"
+APP_VERSION = "0.29.2"
 
 import collections
 import ctypes
@@ -6870,21 +6870,68 @@ except (OSError, ValueError):
     DAYS_CZ = {}
 
 
-_MOVED: dict | None = None
+# How much a special day matters here, for which one the date shows (it shows one) and which give way to a
+# nearby day: Czech tradition first (the user: svatý Martin, Dušičky "have the most priority"), then the days the
+# Czech law names, the UN family's, anyone else's, and last the marketing and joke days (Den skořice by a spice
+# company, "Mezinárodní den prasklých těsnění" by nobody).
+CZ_TRADITION = re.compile(r"^(svat[ýá]|sv\. )|Dušičky|Den všech svatých|Mikuláš|Štědr|Silvestr|Velikono|Velký pátek|"
+                          r"Masopust|Popeleční|Hromnice|Tři králové|Den matek|Den otců|Den učitelů|Valentýn|"
+                          r"čarodějnic|Filipojakub|Boží hod|Advent|Vánoc|Svatodušní|Nanebe|Den dětí|Den Země|"
+                          r"Jana Husa|Cyril|Metod|Václav|Den vzniku|státnosti|Den boje za svobodu|Den osvobození|"
+                          r"Den vítězství|Svátek práce|Den obnovy")
+UN_FAMILY = re.compile(r"OSN|UNESCO|WHO|FAO|UNICEF|Valné shromáždění|United Nations|Evropsk|EU\b|Rada Evropy|"
+                       r"Červen[ýé]ho kříž|Mezinárodní rada|ILO|IMO|WMO|ITU|UNEP|UNHCR")
+FUN_MAKER = re.compile(r"Inc\.|Co\.|Ltd|Board|s\.r\.o|Planet|Corporation|Company|Brands|Foods", re.I)
 
 
-def moved_days() -> dict:
+def day_weight(day) -> int:
+    name, by = day[0], day[1] or ""
+    if CZ_TRADITION.search(name):
+        return 5
+    if "V ČR" in by or "zákon" in by:
+        return 4
+    if UN_FAMILY.search(by):
+        return 3
+    if FUN_MAKER.search(by):
+        return 1
+    if by:
+        return 2
+    return 2 if re.match(r"(Mezinárodní|Světový|Evropský) den", name) and "prasklých" not in name else 1
+
+
+def ranked(days) -> list:
+    """The day's special days, the one that matters most first (as listed among equals)."""
+    return sorted(days or [], key=lambda d: -day_weight(d))
+
+
+_MOVED: dict = {}  # year -> its moved days (the feasts that move, Easter, Diwali, Hanukkah, take dates of their own)
+
+
+def holiday_dates(year: int) -> set:
+    """(month, day) of every date a HOLIDAYS feast dresses that year: the date's name is taken there."""
+    out = set()
+    for h in HOLIDAYS.values():
+        try:
+            out |= set(h[2](year))
+        except (KeyError, ValueError, IndexError):
+            pass
+    return out
+
+
+def moved_days(year: int = None) -> dict:
     """Days with more special days than the date shows (it shows one name) lend one to a nearby day that has none:
     from up to a week before (the user: a missed one from 2-3 days ago is better than none) or 3 days after, the
     nearest first, the earlier on a tie. "MM-DD" -> (day, its own "MM-DD", how it's said: "včera", "z 1. 11."…)."""
-    global _MOVED
-    if _MOVED is not None:
-        return _MOVED
     import datetime
+    year = year or time.localtime().tm_year
+    if year in _MOVED:
+        return _MOVED[year]
     keys = [(datetime.date(2024, 1, 1) + datetime.timedelta(days=i)).strftime("%m-%d") for i in range(366)]
-    spare = {k: list((DAYS_CZ.get(k, {}).get("days") or [])[1:]) for k in keys}
-    empty = [k for k in keys if not DAYS_CZ.get(k, {}).get("days") and not DAYS_CZ.get(k, {}).get("state")]
-    _MOVED = {}
+    spare = {k: ranked(DAYS_CZ.get(k, {}).get("days"))[1:] for k in keys}  # (the most that matter move first)
+    feasts = holiday_dates(year)
+    empty = [k for k in keys if not DAYS_CZ.get(k, {}).get("days") and not DAYS_CZ.get(k, {}).get("state")
+             and (int(k[:2]), int(k[3:])) not in feasts]
+    moved = _MOVED[year] = {}
     near = sorted([-d for d in range(1, 8)] + list(range(1, 4)), key=lambda d: (abs(d), d > 0))
     words = {-1: "včera", -2: "předevčírem", 1: "zítra", 2: "pozítří"}
     for k in empty:
@@ -6893,9 +6940,9 @@ def moved_days() -> dict:
             src = keys[(i + d) % len(keys)]
             if spare[src]:
                 when = words.get(d) or (f"z {int(src[3:])}. {int(src[:2])}." if d < 0 else f"{int(src[3:])}. {int(src[:2])}.")
-                _MOVED[k] = (spare[src].pop(0), src, when)
+                moved[k] = (spare[src].pop(0), src, when)
                 break
-    return _MOVED
+    return moved
 
 
 def day_cz(t=None) -> dict:
@@ -6904,12 +6951,13 @@ def day_cz(t=None) -> dict:
     t = t or time.localtime()
     key = f"{t.tm_mon:02d}-{t.tm_mday:02d}"
     d = dict(DAYS_CZ.get(key, {}))
+    d["days"] = ranked(d.get("days"))
     e = _easter(t.tm_year)
     for shift, name in ((-2, "Velký pátek"), (1, "Velikonoční pondělí")):
         if _shift(t.tm_year, e, shift) == (t.tm_mon, t.tm_mday):
             d["state"] = name
-    if not d.get("days") and not d.get("state") and key in moved_days():
-        day, src, when = moved_days()[key]
+    if not d.get("days") and not d.get("state") and key in moved_days(t.tm_year):
+        day, src, when = moved_days(t.tm_year)[key]
         d["days"] = [list(day)]
         d["moved"] = (src, when)
     return d
@@ -6929,6 +6977,9 @@ def special_day_name() -> str:
         return d["state"]
     days = holidays_today()
     themed = [HOLIDAYS[h][0] for h in days if h not in HOLIDAY_PERIODS] or [HOLIDAYS[h][0] for h in days]
+    first = d["days"][0] if d.get("days") and not d.get("moved") else None
+    if first and day_weight(first) == 5 and first[0].lower() not in " · ".join(themed).lower():
+        themed = [first[0]] + themed  # (Czech tradition first: Mikuláš before Hanukkah)
     if themed:
         return " · ".join(themed)
     if d.get("moved"):  # a neighbour's: said so
