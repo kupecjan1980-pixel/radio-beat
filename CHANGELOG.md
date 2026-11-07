@@ -4,6 +4,7 @@
 
 ## 0.30 — Jmeniny se slavnými nositeli, NPU
 
+- **0.30.7** (2026-11-07) GPU sklo se po chybě při kreslení samo zkusí znovu za 30 s (nejvýš 10× za hodinu); dřív zůstalo do restartu staré skládání z prstenců, které na kulatých tlačítkách dělalo kroužky
 - **0.30.6** (2026-11-07) Okno jmenin jen s lidmi, kterým se tím jménem opravdu říká (Daryll Neita měla Saskii jen jako prostřední jméno); jméno se pozná i v jiné podobě (Evžen = Eugen, Bohdan = Bogdan); uložené dny se dohledají znovu
 - **0.30.5** (2026-11-07) Během instalace aktualizace je tlačítko modrá pilulka „Aktualizuji“, kterou zleva doprava zaplňuje tmavší modrá (ukazuje, že běží)
 - **0.30.4** (2026-11-07) Okno jmenin má písmo přesně jako okno zvláštního dne (stejná velikost, ne větší styly panelu ⓘ)

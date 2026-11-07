@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.30.6"
+APP_VERSION = "0.30.7"
 
 import collections
 import ctypes
@@ -5346,8 +5346,19 @@ void main() {
     color = texture(src, (c + (p - c) / s - box.xy) / box.zw);
 }"""
 
+    RETRY_AFTER = 30  # s after a failure while drawing: the shader tried again (a driver hiccup needn't mean the
+    RETRIES = 10  # old ring layers for the rest of the run: on an iGPU they show as circles on the round buttons)
+    failed_at = 0.0
+    failures: list = []  # when it failed (the last hour's count the retries)
+
     @classmethod
     def start(cls) -> bool:
+        if cls.ok is False and cls.ctx is not None and cls.failed_at:
+            now = time.monotonic()
+            cls.failures = [t for t in cls.failures if now - t < 3600]
+            if now - cls.failed_at > cls.RETRY_AFTER and len(cls.failures) < cls.RETRIES:
+                cls.ok, cls.why, cls.failed_at = True, getattr(cls, "name", cls.why), 0.0
+                print(f"Rádio Beat: GPU sklo: zkouší se znovu ({len(cls.failures)}. nezdar za hodinu)", file=sys.stderr)
         if cls.ok is not None:
             return cls.ok
         cls.ok = False
@@ -6264,9 +6275,11 @@ class GlassCard(Gtk.Box):
                 g["out"] = GPU.lens(g["src"], max(1, round(w * k)), max(1, round(h * k)), u)
                 g["key"] = key
             return g["out"]
-        except Exception as e:  # the layers from now on
+        except Exception as e:  # the layers meanwhile; the shader tried again before long (GPU.start)
             GPU.ok, GPU.why = False, f"selhalo ({e})"
-            print("Rádio Beat: GPU sklo vypnuto:", e, file=sys.stderr)
+            GPU.failed_at = time.monotonic()
+            GPU.failures.append(GPU.failed_at)
+            print(f"Rádio Beat: GPU sklo vypnuto na {GPU.RETRY_AFTER} s:", e, file=sys.stderr)
             return None
 
     LIVE_FPS = 15  # the window seen through it, moving (the falling motifs): pictured anew this often at most
