@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.30.8"
+APP_VERSION = "0.31.0"
 
 import collections
 import ctypes
@@ -1184,6 +1184,82 @@ def czech_sentence(text: str) -> str:
     except OSError:
         pass
     return cs
+
+
+def _about_cache_get(key: str):
+    try:
+        with open(ABOUT_CACHE) as f:
+            return json.load(f).get(key)
+    except (OSError, ValueError):
+        return None
+
+
+def _about_cache_put(key: str, text: str) -> None:
+    try:
+        with open(ABOUT_CACHE) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+    cache[key] = text
+    try:
+        os.makedirs(os.path.dirname(ABOUT_CACHE), exist_ok=True)
+        with open(ABOUT_CACHE + ".tmp", "w") as f:
+            json.dump(cache, f)
+        os.replace(ABOUT_CACHE + ".tmp", ABOUT_CACHE)
+    except OSError:
+        pass
+
+
+def _wiki_about(query: str, title_ok, text_ok, langs=("cs", "en")) -> str | None:
+    """The first Wikipedia summary (Czech; English translated) whose title and text pass; None: not reached."""
+    reached = False
+    for lang in langs:
+        try:
+            hits = _wiki(f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search"
+                         f"&srsearch={urllib.parse.quote(query)}&format=json&srlimit=8")["query"]["search"]
+            reached = True
+            for hit in hits:
+                if not title_ok(hit["title"]):
+                    continue
+                summary = _wiki(f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/"
+                                f"{urllib.parse.quote(hit['title'].replace(' ', '_'))}")
+                extract = summary.get("extract", "")
+                if summary.get("type") != "disambiguation" and text_ok(extract):
+                    return _trim_text(extract) if lang == "cs" else _trim_text(to_czech(extract) or "")
+        except (OSError, ValueError, KeyError):
+            continue
+    return "" if reached else None
+
+
+def given_name_about(name: str) -> str:
+    """Where a first name comes from and what it means (Czech Wikipedia's article on the name); remembered."""
+    key = f"given|{norm(name)}"
+    got = _about_cache_get(key)
+    if got is not None:
+        return got
+    n = norm(name)
+    text = _wiki_about(f"{name} jméno", lambda t: norm(re.sub(r"\(.*?\)", "", t)) == n,
+                       lambda x: any(w in x.lower() for w in ("jméno", "name", "původ", "origin")))
+    if text is None:
+        return ""
+    _about_cache_put(key, text)
+    return text
+
+
+def album_about(artist: str, album: str) -> str:
+    """A few sentences about the album (Wikipedia), only when it names the artist; remembered."""
+    album = plain_title(album)
+    key = f"album|{norm(first_artist(artist))}|{norm(album)}"
+    got = _about_cache_get(key)
+    if got is not None:
+        return got
+    a, t = norm(first_artist(artist)), norm(album)
+    text = _wiki_about(f"{album} {first_artist(artist)} album", lambda x: t and t in norm(x),
+                       lambda x: bool(a) and a in norm(x) and any(w in x.lower() for w in ("album", "deska")))
+    if text is None:
+        return ""
+    _about_cache_put(key, text)
+    return text
 
 
 def song_about(artist: str, song: str) -> str:
@@ -5437,6 +5513,14 @@ void main() {
             cls.why = f"nedostupné ({e})"
             cls.ok = False
         print("Rádio Beat: GPU sklo:", "zapnuto," if cls.ok else "", cls.why, file=sys.stderr)
+        try:  # the screens (size, scale): the glass's look depends on them (rings on the DeskMini's buttons)
+            for m in Gdk.Display.get_default().get_monitors():
+                g = m.get_geometry()
+                print(f"Rádio Beat: obrazovka {m.get_connector()}: {g.width}x{g.height} logicky, "
+                      f"měřítko {m.get_scale():.2f} (celé {m.get_scale_factor()}), {m.get_refresh_rate() / 1000:.0f} Hz",
+                      file=sys.stderr)
+        except Exception:
+            pass
         return cls.ok
 
     @classmethod
@@ -11099,6 +11183,26 @@ class Window(Adw.ApplicationWindow):
         wheel.connect("scroll", self._names_wheel)
         nglass.add_controller(wheel)
         self._names_pics: list = []  # (picture widget, its photo's address)
+        # the song's box: about the song, the band and the album, over the cover like the others (the mouse on the
+        # song's lines, and by itself every 2 minutes for 20 s)
+        self.song_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=6, margin_bottom=6)
+        sglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
+        sglass.radius = 16.0
+        sglass.curve, sglass.wall, sglass.reach, sglass.shine = 3.0, 2.8, 0.9, True
+        sglass.edge_mirror = True
+        self.song_scroll = Gtk.ScrolledWindow(child=self.song_list, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                              vscrollbar_policy=Gtk.PolicyType.EXTERNAL, hexpand=True, vexpand=True)
+        sglass.append(self.song_scroll)
+        self.song_pop = Gtk.Popover(child=sglass, has_arrow=False, position=Gtk.PositionType.BOTTOM, autohide=False,
+                                    can_focus=False)
+        self.song_pop.add_css_class("glass-menu")
+        self.song_pop.set_parent(self.clock)
+        self.song_pop.set_can_target(False)
+        over = Gtk.EventControllerMotion()
+        over.connect("enter", lambda *_: self.song_pop.get_visible() or self.song_show())
+        over.connect("leave", lambda *_: self.song_pop.popdown())
+        self.info.add_controller(over)
+        GLib.timeout_add_seconds(self.SONG_AUTO[0], self._song_auto)
         self._names_glide = None
         self._names_hold = 0.0
         hover = Gtk.EventControllerMotion()  # the mouse on the names: their box, like the day's on the date
@@ -11514,6 +11618,10 @@ class Window(Adw.ApplicationWindow):
                          use_markup=True, halign=Gtk.Align.START, attributes=big)
         head.add_css_class("day-head")
         box.append(head)
+        meaning = a.name_meaning_today()
+        if meaning:  # where the name comes from, what it means
+            box.append(Gtk.Label(label=GLib.markup_escape_text(a.cz(meaning)), use_markup=True, xalign=0, wrap=True,
+                                 attributes=attrs))
         people = a.namesakes_today()
         if people is None:
             box.append(Gtk.Label(label=a.cz("Hledají se slavní nositelé jména…"), xalign=0, attributes=attrs))
@@ -11600,6 +11708,115 @@ class Window(Adw.ApplicationWindow):
             GLib.idle_add(self._day_true, area, self.names_pop)
         if self._names_glide is None:
             self._names_glide = GLib.timeout_add(40, self._names_glide_step, [time.monotonic(), 1])
+
+    SONG_AUTO = (120, 20)  # the song's box by itself every 2 minutes, for 20 s
+
+    def _song_auto(self) -> bool:
+        if (hasattr(self, "_tour") and self.get_visible() and self._tour is None and not any(w.open for w in self.waters)
+                and not self._day_on and not self.quality_pop.get_visible() and not self.names_pop.get_visible()
+                and not self.song_pop.get_visible() and self._song_parts()):
+            self.song_show()
+            shown = self._song_shown = object()
+            GLib.timeout_add_seconds(self.SONG_AUTO[1], lambda: (self._song_shown is shown and self.song_pop.popdown(),
+                                                                False)[1])
+        return GLib.SOURCE_CONTINUE
+
+    def _song_parts(self) -> list:
+        """(headline, text) for the song's box: the song, the band, the album (what's known of them)."""
+        a = self.app
+        info = a.info or {}
+        out = []
+        if a.about:
+            out.append(("Skladba", a.about))
+        if a.facts:
+            out.append(("Vydání a nahrávání", years_ago(a.facts).replace(" · ", "\n")))
+        if a.band_about:
+            out.append((first_artist(info.get("artist") or a.artist_raw or "Interpret"), a.band_about))
+        if getattr(a, "album_about", "") and info.get("album"):
+            out.append((f"Album {tidy_case(plain_title(info['album']))}", a.album_about))
+        return out
+
+    def song_refresh(self) -> None:
+        if self.song_pop.get_visible():
+            self._song_fill()
+
+    def _song_fill(self) -> None:
+        a = self.app
+        box = self.song_list
+        while (c := box.get_first_child()) is not None:
+            box.remove(c)
+        f = getattr(self, "_day_text_f", None) or 0.7
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_scale_new(f))
+        info = a.info or {}
+        title = plain_title(info.get("title") or a.song or "")
+        head = Gtk.Label(label=GLib.markup_escape_text(title or "Právě hraje"), use_markup=True,
+                         halign=Gtk.Align.START, attributes=attrs)
+        head.add_css_class("day-head")
+        box.append(head)
+        parts = self._song_parts()
+        if not parts:
+            box.append(Gtk.Label(label=a.cz("Zatím se o skladbě nic nenašlo."), xalign=0, attributes=attrs))
+        for i, (name, text) in enumerate(parts):
+            if i:  # (the song's own headline is the pill above)
+                h = Gtk.Label(label=GLib.markup_escape_text(name), use_markup=True, halign=Gtk.Align.START,
+                              attributes=attrs, margin_top=6)
+                h.add_css_class("day-head")
+                box.append(h)
+            box.append(Gtk.Label(label=GLib.markup_escape_text(a.cz(text)), use_markup=True, xalign=0, wrap=True,
+                                 attributes=attrs))
+
+    def song_show(self) -> None:
+        """Over the cover like the day's box."""
+        area = self._day_area()
+        if not area:
+            return
+        self.day_pop.popdown()
+        self.names_pop.popdown()
+        if getattr(self, "_day_text_f", None) is None:
+            self._day_fill()
+            self._day_fit(round(area[2]), round(area[3]))
+        self._song_fill()
+        glass = self.song_pop.get_child()
+        x, y, w, h = (round(v) for v in area)
+        glass.set_size_request(w, h)
+        glass.radius = 28 * max(1.0, self._scale)
+        r = int(glass.radius)
+        for setm in (self.song_scroll.set_margin_top, self.song_scroll.set_margin_bottom,
+                     self.song_scroll.set_margin_start, self.song_scroll.set_margin_end):
+            setm(r)
+        self.song_scroll.set_size_request(w - 2 * r, h - 2 * r)
+        ok, at = self.compute_point(self.clock, Graphene.Point().init(x, y))
+        if ok:
+            rect = Gdk.Rectangle()
+            rect.x, rect.y, rect.width, rect.height = round(at.x), round(at.y) - 1, w, 1
+            self.song_pop.set_pointing_to(rect)
+        self.song_scroll.get_vadjustment().set_value(0)
+        glass.fresh()
+        self.song_pop.popup()
+        GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
+        GLib.idle_add(self._day_true, area, self.song_pop)
+        if getattr(self, "_song_glide", None) is None:
+            self._song_glide = GLib.timeout_add(40, self._glide_step, [time.monotonic(), 1, self.song_pop,
+                                                                       self.song_scroll, "_song_glide"])
+
+    def _glide_step(self, st) -> bool:
+        """A box's text gliding down slowly to its end, a pause, back up (the song's box)."""
+        pop, scroll, attr = st[2], st[3], st[4]
+        if not pop.get_visible():
+            setattr(self, attr, None)
+            return GLib.SOURCE_REMOVE
+        adj = scroll.get_vadjustment()
+        room = adj.get_upper() - adj.get_page_size()
+        now = time.monotonic()
+        if room <= 1 or now - st[0] < self.NAMES_PAUSE:
+            return GLib.SOURCE_CONTINUE
+        v = adj.get_value() + st[1] * self.NAMES_SPEED * max(1.0, self._scale) * 0.04
+        if v >= room or v <= 0:
+            v = min(max(v, 0), room)
+            st[0], st[1] = now, -st[1]
+        adj.set_value(v)
+        return GLib.SOURCE_CONTINUE
 
     NAMES_SPEED = 28  # px a second (at scale 1) while it glides through the people who don't fit
     NAMES_PAUSE = 4.0  # s at the top and at the bottom
@@ -13986,6 +14203,30 @@ class App(Adw.Application):
             got = self._namesakes.get(key)
         return got
 
+    def name_meaning_today(self) -> str:
+        """Where today's name(s) come from (kept; looked up in the background when not yet)."""
+        names = names_on(time.localtime())
+        mem = self.__dict__.setdefault("_meanings", {})
+        out = []
+        for n in names:
+            if n in mem:
+                out.append(mem[n])
+            elif _about_cache_get(f"given|{norm(n)}") is not None:
+                mem[n] = _about_cache_get(f"given|{norm(n)}")
+                out.append(mem[n])
+            elif not self.__dict__.setdefault("_meaning_busy", set()) & {n}:
+                self._meaning_busy.add(n)
+                threading.Thread(target=lambda n=n: GLib.idle_add(self._meaning_got, n, given_name_about(n)),
+                                 daemon=True).start()
+        return "\n".join(t for t in out if t)
+
+    def _meaning_got(self, name: str, text: str) -> bool:
+        self._meanings[name] = text
+        self._meaning_busy.discard(name)
+        if self.win:
+            self.win.names_refresh()
+        return False
+
     def want_name_pic(self, url: str) -> None:
         """A namesake's photo: off the disk when it was downloaded before (instant), enhanced as the panels'."""
         if url and url not in self.show_pics:
@@ -14017,6 +14258,8 @@ class App(Adw.Application):
                     time.sleep(2)
                     if self._on_main(lambda: self._namesakes.get(key)) is not None:
                         break
+            for n in names:  # where the name comes from, ready too
+                given_name_about(n)
             people = self._on_main(lambda: self._namesakes.get(key)) or []
             for p in people:
                 if getattr(self, "quitting", False):
@@ -14300,7 +14543,7 @@ class App(Adw.Application):
         # The last cover stays up until the new one is found (no logo flashing
         # in between); the logo only when there's no song or no cover.
         self.info = None
-        self.facts = self.about = self.band_about = ""
+        self.facts = self.about = self.band_about = self.album_about = ""
         self.song_shown = False
         if parts:
             self._remember_artist(parts[0])
@@ -14329,13 +14572,27 @@ class App(Adw.Application):
 
     def _facts(self, lid, artist, song):
         about = song_about(artist, song)
-        band = "" if about else name_about(first_artist(artist), MUSIC_WORDS)
+        band = name_about(first_artist(artist), MUSIC_WORDS)  # (the song box tells of the band too)
         GLib.idle_add(self._got_about, lid, about, band)
 
     def _got_about(self, lid, text, band):
         if lid == self._lookup_id:
             self.about, self.band_about = text, band
             self.update()
+            if self.win:
+                self.win.song_refresh()
+            info = self.info or {}
+            if info.get("album") and self.artist_raw:  # the album's story, for the song box
+                art, alb = self.artist_raw, info["album"]
+                threading.Thread(target=lambda: GLib.idle_add(self._got_album, lid, album_about(art, alb)),
+                                 daemon=True).start()
+        return False
+
+    def _got_album(self, lid, text):
+        if lid == self._lookup_id:
+            self.album_about = text
+            if self.win:
+                self.win.song_refresh()
         return False
 
     def cz(self, text: str) -> str:

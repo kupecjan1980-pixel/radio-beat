@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.31 — Okno o skladbě
+
+- **0.31.0** (2026-11-07) Nové skleněné okno o skladbě nad obalem (najetím myší na údaje o skladbě, nebo samo každé 2 minuty na 20 s): o skladbě, vydání a nahrávání, o kapele a o albu (Wikipedie); okno jmenin začíná původem a významem jména; log ukazuje obrazovky (rozlišení, měřítko)
+
 ## 0.30 — Jmeniny se slavnými nositeli, NPU
 
 - **0.30.8** (2026-11-07) Každý počítač posílá konec svého logu na sdílený server (jen když se změnil, nejvýš 200 kB), aby se dalo přečíst a opravit, co se děje jinde (sklo na DeskMini, NPU na handheldech); server logy ven nevydává
