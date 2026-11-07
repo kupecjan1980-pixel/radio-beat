@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.10** (2026-11-07) Klíč TMDB může být i v souboru ~/.config/radio-beat/tmdb-key
 - **0.31.9** (2026-11-07) Slavný nositel bez fotky má nakreslený odznak: iniciály v jeho barvě a v rohu značku toho, čím je (klapka, mikrofon, míč, nota, kniha, budova, paleta, koruna); žádná vymyšlená tvář
 - **0.31.8** (2026-11-07) Slavný nositel bez jakékoli fotky má nakreslenou siluetu místo loga stanice
 - **0.31.7** (2026-11-07) Fotky herců z TMDB (vlastní klíč TMDB v nastavení); obrázek okna pro sdílený server i tam, kde nejde JPEG (Bazzite: posílá se PNG)

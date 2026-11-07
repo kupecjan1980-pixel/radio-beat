@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.9"
+APP_VERSION = "0.31.10"
 
 import collections
 import ctypes
@@ -7354,6 +7354,16 @@ def article_picture(articles: list[str]) -> str:
 
 
 TMDB_KEY = ""  # the user's own TMDB API key (v3) or read access token (v4), from the settings ("tmdb_key")
+TMDB_KEY_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "radio-beat",
+                             "tmdb-key")  # (or here, a file of its own: kept apart from the settings the app rewrites)
+
+
+def tmdb_key_from_file() -> str:
+    try:
+        with open(TMDB_KEY_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
 
 
 def tmdb_picture(tmdb_id: str) -> str:
@@ -11553,7 +11563,7 @@ class Window(Adw.ApplicationWindow):
         group.add(self.weather_row)
         group.add(self._weather_place_row())
         tmdb = Adw.EntryRow(title="Klíč TMDB pro fotky herců (The Movie Database, zdarma po registraci)",
-                            text=self.app.settings.get("tmdb_key", ""), show_apply_button=True)
+                            text=self.app.settings.get("tmdb_key", "") or tmdb_key_from_file(), show_apply_button=True)
         tmdb.connect("apply", lambda r: self.app.set_tmdb_key(r.get_text().strip()))
         group.add(tmdb)
         self.moon_row = Adw.SwitchRow(title="Měsíc vlevo od tlačítka ⓘ", subtitle_lines=0,
@@ -13578,7 +13588,7 @@ class App(Adw.Application):
         self.share = CacheShare(self.enhancer, self._share_changed, self.db)
         self.share.screenshot = self.window_shot
         global TMDB_KEY
-        TMDB_KEY = self.settings.get("tmdb_key", "")
+        TMDB_KEY = self.settings.get("tmdb_key", "") or tmdb_key_from_file()
         self.share.hub_url = self.settings.get("hub_url", "")
         self.db.on_play = lambda: GLib.idle_add(lambda: (self.win and self.win.played_new(), False)[1])
         self.share.set_on(self.settings.get("share", True))
