@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.29.6"
+APP_VERSION = "0.29.7"
 
 import collections
 import ctypes
@@ -1002,10 +1002,10 @@ def praha(text: str) -> str:
     return _dialect_words(text, PRAHA_WORDS, sound)
 
 
-# Which dialect a text is in: 60 % standard Czech, 10 % each of the four others (the user's count: ostravština,
-# brněnština, moravština as hanáčtina or the south Moravian half and half, pražština); chosen by the text and the
-# day, so a text keeps its dialect all day (not a new one at each redraw) and gets another tomorrow.
-DIALECTS = (("std", 60), ("ostrava", 10), ("brno", 10), ("hana", 5), ("morava", 5), ("praha", 10))
+# Which dialect a text is in: 50 % standard Czech, 10 % each of the five others (ostravština, brněnština,
+# hanáčtina, south Moravian, pražština: the user's shares); chosen by the text and the day, so a text keeps its
+# dialect all day (not a new one at each redraw) and gets another tomorrow.
+DIALECTS = (("std", 50), ("ostrava", 10), ("brno", 10), ("hana", 10), ("morava", 10), ("praha", 10))
 DIALECT_FN = {"std": lambda t: t, "ostrava": ostrava, "brno": brno, "hana": hana, "morava": morava, "praha": praha}
 DIALECT_LEADS = {"std": "Víte, že… ", "ostrava": "Viš co? ", "brno": "Čuj, víš co? ", "hana": "Véte, že… ",
                  "morava": "Šak víte… ", "praha": "Hele, víš, že… "}
@@ -10916,9 +10916,9 @@ class Window(Adw.ApplicationWindow):
         self.npu_row.connect("notify::active", lambda r, _: self.app.set_npu(r.get_active()))
         group.add(self.npu_row)
         dialect = Adw.SwitchRow(title="Nářečí",
-                                subtitle="Texty o skladbě, interpretovi a pořadu: 60 % spisovně, po 10 % ostravsky, "
-                                         "brněnsky, moravsky (hanácky nebo jihomoravsky) a pražsky (každý den "
-                                         "jinak); vypnuto: "
+                                subtitle="Texty o skladbě, interpretovi a pořadu: 50 % spisovně, po 10 % ostravsky, "
+                                         "brněnsky, hanácky, jihomoravsky a pražsky (každý den jinak); "
+                                         "vypnuto: "
                                          "jen spisovně", subtitle_lines=0)
         dialect.set_active(self.app.settings.get("ostrava", True))
         dialect.connect("notify::active", lambda r, _: (self.app.set_look(ostrava=r.get_active()), self.app.update()))
