@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.1** (2026-11-07) S logem jde na sdílený server i obrázek okna Rádia Beat (jen jeho vlastní okno, každou půlhodinu, když je vidět), aby šly opravit potíže se vzhledem i na jiných počítačích
 - **0.31.0** (2026-11-07) Nové skleněné okno o skladbě nad obalem (najetím myší na údaje o skladbě, nebo samo každé 2 minuty na 20 s): o skladbě, vydání a nahrávání, o kapele a o albu (Wikipedie); okno jmenin začíná původem a významem jména; log ukazuje obrazovky (rozlišení, měřítko)
 
 ## 0.30 — Jmeniny se slavnými nositeli, NPU

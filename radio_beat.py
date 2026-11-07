@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.0"
+APP_VERSION = "0.31.1"
 
 import collections
 import ctypes
@@ -4181,6 +4181,7 @@ class CacheShare:
         enhancer.claim = self.claim
         enhancer.made = self.publish
         self.published: set[str] = set()  # handed to the hub as soon as they were made (its round needn't)
+        self.screenshot = None  # () -> JPEG of the app's window, or None (App: from the main thread)
         enhancer.verify = self.verify
         self.hub_url = ""  # (App sets it from the settings)
         self.hub_text = ""
@@ -4736,6 +4737,24 @@ class CacheShare:
             self._log_sent = (size, mtime)
         except (OSError, ValueError):
             pass  # (an older hub, or out of reach: next round)
+        self._send_shot(base)
+
+    SHOT_EVERY = 1800  # s between pictures of the window sent beside the log
+
+    def _send_shot(self, base: str) -> None:
+        """A picture of this Rádio Beat's own window (nothing else on the screen) beside its log, every half hour
+        while it's shown: how it looks there (the DeskMini's glass) can be seen and fixed from the hub."""
+        if not self.screenshot or time.monotonic() - getattr(self, "_shot_at", -1e9) < self.SHOT_EVERY:
+            return
+        try:
+            jpg = self.screenshot()
+            if not jpg:
+                return
+            who = re.sub(r"[^A-Za-z0-9._-]", "-", self.id)[:80] or "unknown"
+            self._hub(base, f"/radio-beat/v1/shot/{who}", jpg, timeout=120)
+            self._shot_at = time.monotonic()
+        except (OSError, ValueError):
+            pass
 
     def _hub_round(self) -> None:
         """Pictures, plays and track info both ways with the hub; each kind from where it got to last time (the
@@ -13351,6 +13370,7 @@ class App(Adw.Application):
         self.enhancer = Enhancer(on_status=self._enhance_status_changed, on_picture=self._picture_changed)
         self.enhancer.fix_level = self.settings.get("ai_fix", "strong")
         self.share = CacheShare(self.enhancer, self._share_changed, self.db)
+        self.share.screenshot = self.window_shot
         self.share.hub_url = self.settings.get("hub_url", "")
         self.db.on_play = lambda: GLib.idle_add(lambda: (self.win and self.win.played_new(), False)[1])
         self.share.set_on(self.settings.get("share", True))
@@ -14190,6 +14210,35 @@ class App(Adw.Application):
                           (self.win and self.win.song_art_got(a, t, c, al, f), False)[1])
             time.sleep(0.4)
         self._art_busy = False
+
+    def window_shot(self) -> bytes | None:
+        """A JPEG of the app's own window as it's drawn now (at the screen's own pixels), None when hidden. From any
+        thread: the drawing is done on the main one."""
+        def shoot():
+            win = self.win
+            if not win or not win.get_visible() or not win.get_mapped():
+                return None
+            try:
+                from gi.repository import GdkPixbuf
+                native = win.get_native()
+                k = native.get_surface().get_scale() if hasattr(native.get_surface(), "get_scale") else win.get_scale_factor()
+                w, h = win.get_width(), win.get_height()
+                snap = Gtk.Snapshot()
+                snap.scale(k, k)
+                Gtk.WidgetPaintable.new(win).snapshot(snap, w, h)
+                node = snap.to_node()
+                if node is None:
+                    return None
+                tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, round(w * k), round(h * k)))
+                loader = GdkPixbuf.PixbufLoader()
+                loader.write(tex.save_to_png_bytes().get_data())
+                loader.close()
+                ok, jpg = loader.get_pixbuf().save_to_bufferv("jpeg", ["quality"], ["90"])
+                return bytes(jpg) if ok else None
+            except Exception as e:
+                print(f"Rádio Beat: obrázek okna: {e}", file=sys.stderr)
+                return None
+        return self._on_main(shoot)
 
     def namesakes_today(self) -> list | None:
         """Famous people of today's name (None: still being looked up); kept ones at once."""

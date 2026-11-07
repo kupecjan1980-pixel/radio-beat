@@ -33,6 +33,7 @@ SAME = 1800  # s: the same song this close in time is the same play (as the app'
 COVER_HOSTS = re.compile(r"^https://([a-z0-9-]+\.)*(dzcdn\.net|mzstatic\.com|ytimg\.com|deezer\.com|"
                          r"apple\.com|googleusercontent\.com|radiobeat\.cz)/", re.I)
 LOG_MAX = 256 << 10  # bytes of a computer's log kept (its newest part); never served back over the internet
+SHOT_MAX = 12 << 20  # bytes of a window's picture at most
 LOGS_MAX = 40  # computers' logs at most (the oldest dropped)
 LOG_ID = re.compile(r"^(?!\.)[A-Za-z0-9._-]{1,80}$")  # (no leading dot: never .. or a hidden file)
 CLAIM_TTL = 240  # s: a picture being made is that computer's this long (it may have gone: then anyone's again)
@@ -87,6 +88,18 @@ class Hub:
         logs = sorted((os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".log")), key=os.path.getmtime)
         for old in logs[:-LOGS_MAX]:
             os.remove(old)
+        return 204
+
+    def put_shot(self, who: str, data: bytes) -> int:
+        """A picture of a computer's Rádio Beat window (its own window only), beside its log: logs/<who>.jpg."""
+        if not (data[:3] == b"\xff\xd8\xff" and data[-2:] == b"\xff\xd9"):
+            return 400
+        folder = os.path.join(os.path.dirname(self.dir), "logs")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, who + ".jpg")
+        with open(path + ".part", "wb") as f:
+            f.write(data)
+        os.replace(path + ".part", path)
         return 204
 
     def claim(self, name: str, by: str) -> dict:
@@ -314,6 +327,11 @@ def serve(hub: Hub, port: int) -> None:
                 got = hub.put_plays(rows) if p.endswith("plays") else hub.put_songinfo(rows)
                 return self._json({"new": got})
             name = p.rsplit("/", 1)[-1]
+            if p.startswith("/radio-beat/v1/shot/") and LOG_ID.match(name):
+                body = self._body(SHOT_MAX)
+                if body is None:
+                    return
+                return self._send(hub.put_shot(name, body), b"")
             if p.startswith("/radio-beat/v1/log/") and LOG_ID.match(name):
                 body = self._body(LOG_MAX)
                 if body is None:
