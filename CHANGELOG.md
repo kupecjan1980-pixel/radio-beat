@@ -4,6 +4,7 @@
 
 ## 0.30 — Jmeniny se slavnými nositeli, NPU
 
+- **0.30.1** (2026-11-07) Okno jmenin: menší písmo jmen a popisů, roky na řádku s popisem; název alba s osamělým malým slovem v anglickém názvu opravený („In Through the Out Door“), české názvy beze změny
 - **0.30.0** (2026-11-07) Skleněné okno jmenin nad obalem (klik na jméno, nebo samo každou hodinu v :45 na 2 minuty): slavní nositelé jména z Wikidat, čeští první, s AI vylepšenými fotkami, jménem v české podobě (Saskie Burešová), čím byli a roky; posouvá se, když se nevejdou. NPU se hledá při každém spuštění a používá se, jakmile je k dispozici (zapnuto), s pojistkou: když selže, trvá přes 2 minuty nebo výsledek nesedí s originálem, dělá to GPU; po třech nezdarech za sebou až do dalšího spuštění GPU
 
 ## 0.29 — Vlastní kreslené obrázky místo emoji

@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.30.0"
+APP_VERSION = "0.30.1"
 
 import collections
 import ctypes
@@ -327,6 +327,25 @@ def run_update() -> str | None:
 
 VERSION_NOTE = re.compile(r"\s*[(\[][^)\]]*\b(remaster(ed)?|mono|stereo|single|version|edit|mix|deluxe|"
                           r"expanded|anniversary|bonus)\b[^)\]]*[)\]]|\s+-\s+(\d{4}\s+)?remaster(ed)?.*$", re.I)
+
+
+SMALL_EN = {"a", "an", "the", "and", "but", "or", "nor", "for", "so", "yet", "of", "in", "on", "at", "to", "by",
+            "from", "with", "as", "vs", "via", "de", "la", "le", "von", "van", "der", "du", "y", "e"}
+
+
+def tidy_case(text: str) -> str:
+    """A lone lowercase word in an English title-cased name capitalised (Deezer's "In Through the out Door"); small
+    words stay small, and a title mostly in lowercase (Czech sentence case, "Dej mi víc své lásky", or an
+    intentionally lowercase one) is left as it is."""
+    words = re.findall(r"[A-Za-z][A-Za-z']*", text)
+    big = [w for w in words if w.lower() not in SMALL_EN]
+    if len(big) < 3 or sum(w[0].isupper() for w in big) < 0.75 * len(big) or not text.isascii():
+        return text
+
+    def fix(m):
+        w = m.group(0)
+        return w if w.lower() in SMALL_EN or not w[0].islower() or m.start() == 0 else w[0].upper() + w[1:]
+    return re.sub(r"[A-Za-z][A-Za-z']*", fix, text)
 
 
 def plain_title(text: str) -> str:
@@ -10982,7 +11001,7 @@ class Window(Adw.ApplicationWindow):
         self._day_on = None
         # the name day's box: famous people of the name, over the cover like the day's box (a click on the names,
         # and by itself once an hour); scrolls when they're more than fit
-        self.names_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=6, margin_bottom=6)
+        self.names_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=6, margin_bottom=6)
         nglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
         nglass.radius = 16.0
         nglass.curve, nglass.wall, nglass.reach, nglass.shine = 3.0, 2.8, 0.9, True
@@ -11403,11 +11422,13 @@ class Window(Adw.ApplicationWindow):
         while (c := box.get_first_child()) is not None:
             box.remove(c)
         self._names_pics = []
-        f = 1.25 * max(1.0, self._scale)
+        f = 0.95 * max(1.0, self._scale)  # (smaller than the day's headline: more people fit; photos as they were)
         attrs = Pango.AttrList()
         attrs.insert(Pango.attr_scale_new(f))
+        big = Pango.AttrList()
+        big.insert(Pango.attr_scale_new(1.25 * max(1.0, self._scale)))
         head = Gtk.Label(label=GLib.markup_escape_text(a.cz(f"Jmeniny: {name_day().title() or 'nikdo'}")),
-                         use_markup=True, halign=Gtk.Align.START, attributes=attrs)
+                         use_markup=True, halign=Gtk.Align.START, attributes=big)
         head.add_css_class("day-head")
         box.append(head)
         people = a.namesakes_today()
@@ -11434,11 +11455,11 @@ class Window(Adw.ApplicationWindow):
             name = Gtk.Label(label=p["name"], xalign=0, wrap=True, attributes=attrs)
             name.add_css_class("show-title")
             lines.append(name)
-            for text in (a.cz(p["desc"]) if p["desc"] else "", p["years"]):
-                if text:
-                    lab = Gtk.Label(label=text, xalign=0, wrap=True, attributes=attrs)
-                    lab.add_css_class("show-sub")
-                    lines.append(lab)
+            about = " · ".join(t for t in (a.cz(p["desc"]) if p["desc"] else "", p["years"]) if t)
+            if about:  # what they were and their years, on one line (wrapped when long)
+                lab = Gtk.Label(label=about, xalign=0, wrap=True, attributes=attrs)
+                lab.add_css_class("show-sub")
+                lines.append(lab)
             row.append(lines)
             box.append(row)
 
@@ -12862,7 +12883,7 @@ class Window(Adw.ApplicationWindow):
         self.song.set_text(title)
         artist = info.get("artist") or a.artist_raw or "První bigbeat u nás"
         self.artist.set_text(artist)
-        self.album.set_text(plain_title(info.get("album") or ""))
+        self.album.set_text(tidy_case(plain_title(info.get("album") or "")))
         self.album.set_visible(bool(info.get("album")))
         self.facts.set_text(a.cz(a.facts))
         self.facts.set_visible(bool(a.facts))
@@ -12941,7 +12962,7 @@ def _track_refresh(self) -> None:
         self.blink()
     self.song.set_text(title)
     self.artist.set_text(tv.get("shown_artist") or tv["artist"])
-    self.album.set_text(plain_title(tv.get("album") or ""))
+    self.album.set_text(tidy_case(plain_title(tv.get("album") or "")))
     self.album.set_visible(bool(tv.get("album")))
     self.facts.set_text(a.cz(tv.get("facts") or ""))
     self.facts.set_visible(bool(tv.get("facts")))
