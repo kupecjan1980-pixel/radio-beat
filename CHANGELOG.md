@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.14** (2026-11-07) „Den bizonů v USA“ místo „Národní den bizonů“
 - **0.31.13** (2026-11-07) Na Hyprlandu si okno po startu ověří celou obrazovku přímo u Hyprlandu (GTK si myslelo, že je, Hyprland ho nechal jako dlaždici) a přepne se
 - **0.31.12** (2026-11-07) Národní den bizonů (USA, první listopadová sobota) s nakreslenými bizony; přesunutý zvláštní den „Den skořice byl 1. 11.“ / „… bude zítra“
 - **0.31.11** (2026-11-07) Okno jmenin ukazuje věk: „* 1946 (80 let)“, u zemřelých křížek a věk při úmrtí „1612–1642 († 30 let)“; s klíčem TMDB se uložené dny dohledají znovu kvůli fotkám herců

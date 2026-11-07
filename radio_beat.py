@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.13"
+APP_VERSION = "0.31.14"
 
 import collections
 import ctypes
@@ -7124,7 +7124,7 @@ HOLIDAYS = {
               ("#ffd54f", "#ffffff", "#e3051a", "#40c4ff"), None),
     "republic": ("Den vzniku Československa", "česká vlajka", lambda y: [(10, 28)], ("star",), ("#ffffff",), "cz"),
     # Halloween runs on into Všech svatých and Dušičky (1–2 Nov), together with them and Día de los Muertos
-    "bison": ("Národní den bizonů", "bizoni a tráva prérie", lambda y: [_nth_weekday(y, 11, 5, 1)],
+    "bison": ("Den bizonů v USA", "bizoni a tráva prérie", lambda y: [_nth_weekday(y, 11, 5, 1)],
               ("bison", "bison", "sprig"), ("#5d4037", "#6d4c41", "#4e342e", "#8d6e63"), None),
     "halloween": ("Halloween", "dýně, netopýři, duchové a pavouci", lambda y: [(10, 31), (11, 1), (11, 2)],
                   ("pumpkin", "pumpkin", "bat", "bat", "ghost", "spider", "web"),
