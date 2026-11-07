@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.1"
+APP_VERSION = "0.31.2"
 
 import collections
 import ctypes
@@ -11837,7 +11837,7 @@ class Window(Adw.ApplicationWindow):
         adj.set_value(v)
         return GLib.SOURCE_CONTINUE
 
-    NAMES_SPEED = 28  # px a second (at scale 1) while it glides through the people who don't fit
+    NAMES_SPEED = 28 / 3  # px a second (at scale 1) while a box glides through what doesn't fit (3x slower: the user)
     NAMES_PAUSE = 4.0  # s at the top and at the bottom
 
     def _names_glide_step(self, st) -> bool:
