@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.30.2"
+APP_VERSION = "0.30.3"
 
 import collections
 import ctypes
@@ -11457,11 +11457,13 @@ class Window(Adw.ApplicationWindow):
         while (c := box.get_first_child()) is not None:
             box.remove(c)
         self._names_pics = []
-        f = 0.95 * max(1.0, self._scale)  # (smaller than the day's headline: more people fit; photos as they were)
+        # the day's box's text size (its labels at most DAY_TEXT_MOST): the names a little under it, the photos as
+        # they were (the app's text is already 1.64x on a big screen: GTK's dpi)
+        f = 0.75 * max(1.0, self._scale)
         attrs = Pango.AttrList()
         attrs.insert(Pango.attr_scale_new(f))
         big = Pango.AttrList()
-        big.insert(Pango.attr_scale_new(1.25 * max(1.0, self._scale)))
+        big.insert(Pango.attr_scale_new(self.DAY_TEXT_MOST * max(1.0, self._scale)))
         head = Gtk.Label(label=GLib.markup_escape_text(a.cz(f"Jmeniny: {name_day().title() or 'nikdo'}")),
                          use_markup=True, halign=Gtk.Align.START, attributes=big)
         head.add_css_class("day-head")
@@ -11596,13 +11598,16 @@ class Window(Adw.ApplicationWindow):
             return None
         return left, top, right - left, bottom - top
 
+    DAY_TEXT_MOST = 0.9  # the day's text grows at most this much to fill its box (a quiet day's three lines were
+    # blown up to 2.5x: too big); a long day's still shrinks to fit
+
     def _day_fit(self, w: int, h: int) -> None:
-        """The day's text as big as fits the box (wrapped to its width), between 0.3 and three times."""
+        """The day's text as big as fits the box (wrapped to its width), between 0.3 and DAY_TEXT_MOST times."""
         box = self.day_text
         r = self.day_fit.get_margin_start()  # (the glass's corner radius on every side)
         tw = w - box.get_margin_start() - box.get_margin_end() - 2 * r - 4
         th = h - box.get_margin_top() - box.get_margin_bottom() - 2 * r
-        lo, hi = 0.3, 3.0
+        lo, hi = 0.3, self.DAY_TEXT_MOST * max(1.0, self._scale)
         for _ in range(12):  # (a binary search over the scale)
             f = (lo + hi) / 2
             self._day_scale(f)
