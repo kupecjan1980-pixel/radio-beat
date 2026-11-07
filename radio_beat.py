@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.30.1"
+APP_VERSION = "0.30.2"
 
 import collections
 import ctypes
@@ -7120,6 +7120,37 @@ CZECH_STATES = ("Q213", "Q33946", "Q42585")  # Czech Republic, Czechoslovakia, K
 NAMESAKES_KEEP = 30 * 86400
 
 
+NAMESAKE_PHOTOS = os.path.join(os.path.dirname(NAMESAKES_FILE), "namesakes")  # their photos, as downloaded
+NAMES_AHEAD = 7  # days ahead the name days' people, photos and their enhancing are made ready
+
+
+def namesake_photo(url: str) -> bytes | None:
+    """A namesake's photo: from the disk when it was downloaded before, else downloaded and kept."""
+    import hashlib
+    path = os.path.join(NAMESAKE_PHOTOS, hashlib.sha1(url.encode()).hexdigest() + ".jpg")
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        pass
+    data = fetch(url)
+    if data:
+        try:
+            os.makedirs(NAMESAKE_PHOTOS, exist_ok=True)
+            with open(path + ".part", "wb") as f:
+                f.write(data)
+            os.replace(path + ".part", path)
+        except OSError:
+            pass
+    return data
+
+
+def names_on(t) -> list[str]:
+    """The name day's names of a day (a time.struct_time)."""
+    return [n.strip() for n in DAYS_CZ.get(f"{t.tm_mon:02d}-{t.tm_mday:02d}", {}).get("names", "").split(",")
+            if n.strip()]
+
+
 def name_forms(name: str) -> list[str]:
     """A calendar name and the forms Wikidata may know it by ("Saskie" there is "Saskia")."""
     out = [name]
@@ -11022,6 +11053,10 @@ class Window(Adw.ApplicationWindow):
         self._names_pics: list = []  # (picture widget, its photo's address)
         self._names_glide = None
         self._names_hold = 0.0
+        hover = Gtk.EventControllerMotion()  # the mouse on the names: their box, like the day's on the date
+        hover.connect("enter", lambda *_: self.names_pop.get_visible() or self.names_show())
+        hover.connect("leave", lambda *_: self.names_pop.popdown())
+        self.names.add_controller(hover)
         for view in (self.clock,):
             m = Gtk.EventControllerMotion()
             m.connect("enter", lambda *_, v=view: self._day_hover(v, True))
@@ -11445,7 +11480,7 @@ class Window(Adw.ApplicationWindow):
             pic = SquarePic(px, 10 * max(1.0, self._scale), valign=Gtk.Align.START)  # (each the same square)
             frame = pic
             if p["img"]:
-                a.want_show_pic(p["img"])
+                a.want_name_pic(p["img"])
                 pic.set_paintable(a.show_pics.get(p["img"]) or a.logo_tex)
                 self._names_pics.append((pic, p["img"]))
             else:
@@ -13123,6 +13158,7 @@ class App(Adw.Application):
         Adw.Application.do_startup(self)
         threading.Thread(target=self._gpu_watch, daemon=True).start()
         threading.Thread(target=self._background, daemon=True).start()
+        threading.Thread(target=self._names_ahead, daemon=True).start()
         # text as big as on this desktop everywhere (KDE says 1.0, Omarchy 1.64): the 'i' panel and the menus
         # look the same on the DeskMini's full HD as on a 4K screen at 2x
         Gtk.Settings.get_default().set_property("gtk-xft-dpi", int(96 * 1024 * self.TEXT_SCALE))
@@ -13881,16 +13917,74 @@ class App(Adw.Application):
         self._art_busy = False
 
     def namesakes_today(self) -> list | None:
-        """Famous people of today's name (None: still being looked up)."""
-        names = [n.strip() for n in day_cz().get("names", "").split(",") if n.strip()]
+        """Famous people of today's name (None: still being looked up); kept ones at once."""
+        names = names_on(time.localtime())
         key = "|".join(names)
         if not key:
             return []
         got = getattr(self, "_namesakes", {}).get(key)
-        if got is not None:
-            return got
-        self.want_namesakes(names, key)
-        return None
+        if got is None:
+            self.want_namesakes(names, key)  # (from the file at once when it's there)
+            got = self._namesakes.get(key)
+        return got
+
+    def want_name_pic(self, url: str) -> None:
+        """A namesake's photo: off the disk when it was downloaded before (instant), enhanced as the panels'."""
+        if url and url not in self.show_pics:
+            self.show_pics[url] = None
+            threading.Thread(target=lambda: GLib.idle_add(self._show_pic_got, url, namesake_photo(url)),
+                             daemon=True).start()
+
+    # The days ahead made ready while nothing else needs doing: their people looked up, their photos downloaded
+    # and enhanced (the enhanced ones kept in the pictures' cache), so a name day's box shows at once on the day.
+    def _names_ahead(self) -> None:
+        time.sleep(180)  # (the start's own work first)
+        while not getattr(self, "quitting", False):
+            try:
+                self._names_ahead_round()
+            except Exception as e:  # never take the app down over it
+                print(f"Rádio Beat: jmeniny dopředu: {e}", file=sys.stderr)
+            time.sleep(6 * 3600)
+
+    def _names_ahead_round(self) -> None:
+        now = time.time()
+        for d in range(NAMES_AHEAD + 1):
+            names = names_on(time.localtime(now + d * 86400))
+            key = "|".join(names)
+            if not key:
+                continue
+            if self._on_main(lambda: getattr(self, "_namesakes", {}).get(key) or
+                             (self.want_namesakes(names, key) or self._namesakes.get(key))) is None:
+                for _ in range(60):  # (its lookup runs in a thread of its own)
+                    time.sleep(2)
+                    if self._on_main(lambda: self._namesakes.get(key)) is not None:
+                        break
+            people = self._on_main(lambda: self._namesakes.get(key)) or []
+            for p in people:
+                if getattr(self, "quitting", False):
+                    return
+                if p.get("img"):
+                    data = namesake_photo(p["img"])
+                    if data:
+                        GLib.idle_add(self._enhance_ahead, p["img"], data)
+                    time.sleep(1)
+            time.sleep(5)
+
+    def _enhance_ahead(self, url: str, data: bytes) -> bool:
+        """A photo enhanced now for a later day (its result kept in the cache, given at once when it's shown)."""
+        try:
+            tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+        except GLib.Error:
+            return False
+        if self.show_pics.get(url) is None and url not in self.show_pics:
+            px = self.enhance_px()
+            if px and self.settings.get("enhance", True):
+                w, h = tex.get_width(), tex.get_height()
+                want = int(TEXT_PT["pic"] * 0.7 * 2 * max(1.0, min(px[0] / BASE_SIZE[0], px[1] / BASE_SIZE[1]) / 2))
+                f = max(1.0, want / max(1, min(w, h)))
+                size = (round(w * f), round(h * f)) if f >= UPSCALE_FROM else (w, h)
+                self.enhancer.request(f"pic:{url}", url, data, (w, h), size, lambda pic: None, screen=px)
+        return False
 
     def want_namesakes(self, names: list, key: str) -> None:
         if not hasattr(self, "_namesakes"):
