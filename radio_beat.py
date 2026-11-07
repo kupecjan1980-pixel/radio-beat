@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.2"
+APP_VERSION = "0.31.3"
 
 import collections
 import ctypes
@@ -601,6 +601,32 @@ def proper_names(artist: str, song: str, info: dict | None) -> tuple[str | None,
     sa = a if a and _key(a) == _key(first_artist(artist)) and a != artist else None
     st = t if t and _key(t) == _key(bare_song(song)) and t != song else None
     return sa, st
+
+
+def accented_title(artist: str, title: str) -> str | None:
+    """A title the services give without its marks ("Casy zly") as MusicBrainz spells it ("Časy zlý"): the same
+    letters but for the marks, by the same artist; None when there's none (or it already has marks). Remembered."""
+    bare = plain_title(title)
+    if not bare or not bare.isascii():
+        return None
+    key = f"marks|{norm(first_artist(artist))}|{norm(bare)}"
+    got = _about_cache_get(key)
+    if got is not None:
+        return got or None
+    q = f'recording:"{bare}" AND artist:"{first_artist(artist)}"'
+    found = _mb(f"/recording?query={urllib.parse.quote(q)}&fmt=json&limit=25")
+    if found is None:
+        return None  # (not reached: asked again next time)
+    a, t = _key(first_artist(artist)), _key(bare)
+    best = ""
+    for r in found.get("recordings", []):
+        name = plain_title(r.get("title", ""))
+        credit = " ".join(c.get("name", "") for c in r.get("artist-credit", []) if isinstance(c, dict))
+        if _key(name) == t and not name.isascii() and a and (a in _key(credit) or _key(credit) in a):
+            best = name
+            break
+    _about_cache_put(key, best)
+    return best or None
 
 
 def youtube_song(artist: str, song: str) -> dict | None:
@@ -14611,6 +14637,12 @@ class App(Adw.Application):
 
     def _lookup(self, lid, artist, song):
         info = lookup(artist, song)
+        if info:  # the Czech marks the services dropped ("Casy zly" -> "Časy zlý"), from MusicBrainz
+            marked = accented_title(info.get("artist") or artist, info.get("title") or song)
+            if marked:
+                note = re.search(r"\s*[(\[].*$", info.get("title") or "")  # (keeps "(Live)", once)
+                marked = re.sub(r"\s*[(\[].*$", "", marked)
+                info["title"] = marked + (note.group(0) if note else "")
         if info:  # its proper spelling, for HRÁLO
             self.db.set_names(first_artist(artist), song, *proper_names(first_artist(artist), song, info))
         data = square_cover(fetch(info["cover"])) if info and info.get("cover") else None
