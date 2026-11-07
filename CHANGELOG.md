@@ -4,6 +4,8 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.5** (2026-11-07) Okno, které má být přes celou obrazovku, si to po startu ověří a případně o to požádá znovu
+- **0.31.4** (2026-11-07) Slavní nositelé bez fotky na Wikidatech dostanou obrázek z článku na Wikipedii, je-li tam; otevřením panelu ⓘ nebo nastavení se zavře okno, které se ukázalo samo (jmeniny, skladba, den), aby panel nebyl pod ním
 - **0.31.3** (2026-11-07) Názvy skladeb bez české diakritiky („Casy zly“) se ukážou s ní podle MusicBrainz („Časy zlý“)
 - **0.31.2** (2026-11-07) Okna jmenin a o skladbě se samy posouvají třikrát pomaleji
 - **0.31.1** (2026-11-07) S logem jde na sdílený server i obrázek okna Rádia Beat (jen jeho vlastní okno, každou půlhodinu, když je vidět), aby šly opravit potíže se vzhledem i na jiných počítačích

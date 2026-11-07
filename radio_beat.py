@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.3"
+APP_VERSION = "0.31.5"
 
 import collections
 import ctypes
@@ -7334,6 +7334,25 @@ def namesake_ok(person: dict, forms) -> bool:
     return any(re.search(rf"\b{re.escape(norm(f))}\b", label) for f in forms if f)
 
 
+def article_picture(articles: list[str]) -> str:
+    """The lead picture of a person's Wikipedia article (the first of their articles that has one), 400 px wide;
+    '' when none does."""
+    for url in articles:
+        m = re.match(r"https://(\w+)\.wikipedia\.org/wiki/(.+)$", url)
+        if not m:
+            continue
+        try:
+            info = _wiki(f"https://{m.group(1)}.wikipedia.org/w/api.php?action=query&prop=pageimages&format=json"
+                         f"&piprop=thumbnail&pithumbsize=400&titles={m.group(2)}")
+            for page in info.get("query", {}).get("pages", {}).values():
+                src = page.get("thumbnail", {}).get("source", "")
+                if src:
+                    return src
+        except (OSError, ValueError, KeyError):
+            continue
+    return ""
+
+
 def _wikidata(query: str, timeout: float = 45):
     req = urllib.request.Request("https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(query),
                                  headers={"User-Agent": MB_UA, "Accept": "application/sparql-results+json"})
@@ -7357,10 +7376,13 @@ def namesakes(names: list[str]) -> list[dict]:
     out, seen = [], set()
     for czech, most in ((True, 14), (False, 10)):
         only = f"VALUES ?st {{ {cz} }} ?p wdt:P27 ?st ." if czech else ""
-        rows = _wikidata(f"""SELECT ?p ?pLabel ?pDescription ?img ?birth ?death WHERE {{
+        rows = _wikidata(f"""SELECT ?p ?pLabel ?pDescription ?img ?birth ?death ?en ?cs ?de WHERE {{
             {{ SELECT ?p ?links WHERE {{ VALUES ?g {{ {gids} }} ?p wdt:P735 ?g ; wdt:P31 wd:Q5 ;
                wikibase:sitelinks ?links . {only} }} ORDER BY DESC(?links) LIMIT {most * 3} }}
             OPTIONAL {{ ?p wdt:P18 ?img }} OPTIONAL {{ ?p wdt:P569 ?birth }} OPTIONAL {{ ?p wdt:P570 ?death }}
+            OPTIONAL {{ ?en schema:about ?p ; schema:isPartOf <https://en.wikipedia.org/> }}
+            OPTIONAL {{ ?cs schema:about ?p ; schema:isPartOf <https://cs.wikipedia.org/> }}
+            OPTIONAL {{ ?de schema:about ?p ; schema:isPartOf <https://de.wikipedia.org/> }}
             SERVICE wikibase:label {{ bd:serviceParam wikibase:language "cs,en". }} }} ORDER BY DESC(?links)""")
         n = 0
         for r in rows:
@@ -7374,6 +7396,8 @@ def namesakes(names: list[str]) -> list[dict]:
             img = r.get("img", {}).get("value", "")
             if img:
                 img = img.replace("http://", "https://") + "?width=400"
+            else:  # no photo on Wikidata: their Wikipedia article's picture, if one has it (Saskia Reeves)
+                img = article_picture([r[k]["value"] for k in ("en", "cs", "de") if k in r])
             label = r["pLabel"]["value"]
             for cal in names:  # the name as the Czech calendar has it ("Saskia Burešová" shown "Saskie Burešová")
                 for alt in name_forms(cal)[1:]:
@@ -12491,6 +12515,10 @@ class Window(Adw.ApplicationWindow):
         for other in self.waters:
             if other is not water:
                 other.hide()
+        # a box shown by itself (the day's, the name day's, the song's) is a popup above the window: what's opened
+        # now must be seen, so it goes
+        for pop in (self.day_pop, self.names_pop, self.song_pop):
+            pop.popdown()
         if water is self.info_water:
             self.puddle_mode = 0
             self._puddle_touched = time.monotonic()
@@ -13549,9 +13577,21 @@ class App(Adw.Application):
             self.win = Window(self)
             if self.settings.get("start_full", True):
                 self.win.fullscreen()  # opens in full screen; a double click makes it a window (in the corner)
+                GLib.timeout_add_seconds(4, self._still_full)
         self.win.minimised = False
         self.win.set_visible(True)
         self.win.present()
+
+    def _still_full(self) -> bool:
+        """Once mapped: still in full screen as asked? (After an update's restart on Hyprland it came back as a
+        plain window once.) Asked again if not, and logged either way."""
+        w = self.win
+        if w and w.get_visible() and not w.is_fullscreen():
+            print("Rádio Beat: okno po startu není přes celou obrazovku, znovu se žádá", file=sys.stderr)
+            w.fullscreen()
+        elif w:
+            print("Rádio Beat: okno po startu přes celou obrazovku", file=sys.stderr)
+        return False
 
     def toggle_window(self):
         """The tray icon: brings the window up, or minimises it when it's up (like its taskbar button).
@@ -14371,7 +14411,7 @@ class App(Adw.Application):
                 self._namesakes_file = {k: v for k, v in keep.items() if time.time() - v.get("at", 0) < NAMESAKES_KEEP}
             except (OSError, ValueError, AttributeError):
                 self._namesakes_file = {}
-        if self._namesakes_file.get(key, {}).get("v") == 2:  # (kept before the forms were checked: looked up anew)
+        if self._namesakes_file.get(key, {}).get("v") == 3:  # (kept before forms and article pictures: anew)
             self._namesakes[key] = self._namesakes_file[key]["people"]
             return
         if getattr(self, "_namesakes_busy", None) == key:
@@ -14392,7 +14432,7 @@ class App(Adw.Application):
         if people is None:  # not reached: asked again when the box opens next
             return False
         self._namesakes[key] = people
-        self._namesakes_file[key] = {"at": time.time(), "people": people, "v": 2}
+        self._namesakes_file[key] = {"at": time.time(), "people": people, "v": 3}
         try:
             os.makedirs(os.path.dirname(NAMESAKES_FILE), exist_ok=True)
             with open(NAMESAKES_FILE + ".part", "w") as f:
