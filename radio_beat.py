@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.29.3"
+APP_VERSION = "0.29.4"
 
 import collections
 import ctypes
@@ -6843,7 +6843,7 @@ HOLIDAYS = {
                  ("candle", "candle", "david"), ("#1e88e5", "#ffffff", "#90caf9", "#ffd54f"), None),
 }
 HOLIDAY_PERIODS = {"advent"}  # whole stretches: mixed with the season, not instead of it
-UPRIGHT = {"book", "drop", "dove", "hands", "apple", "cup", "glass", "cheese", "cross", "scales", "peace",
+UPRIGHT = {"rainbow", "nut", "book", "drop", "dove", "hands", "apple", "cup", "glass", "cheese", "cross", "scales", "peace",
            "ribbon", "temple", "ban", "palette", "menpo", "jpflag", "palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
            "skull", "gift", "crown", "broom", "guitar", "mimosa", "gravelight", "calavera", "papel", "mum"}
 
@@ -7242,7 +7242,7 @@ Den sbírání kamenů|🪨 💎 🪨
 Den scenáristů|🎬 ✍️ 📜
 Den sci-fi|🚀 👽 🤖 🌌
 Den sedmikrásek|🌼 🌼 🌱
-Den skořice|🌰 🥐 ☕
+Den skořice|@cinnamon @cinnamon @cinnamon ☕ 🥐
 Den sladkostí|🍬 🍭 🍫 🍩
 Den snění|💭 🌙 ⭐ ☁️
 Den sourozenců|👫 👬 💗
@@ -7621,6 +7621,12 @@ tzv. Mezinárodní den proti McDonald’s|🥗 🍔 🚫
 # by the emoji's Unicode name, first match wins; (name pattern, motif, colour or None for the motif's own).
 # Batch 1 (0.29.0): dove, book and drop drawn new; the rest the closest existing motif, a gold star when none.
 EMOJI_MOTIFS = [
+    # first: names that also hold a shorter word of another rule (CROISSANT holds ANT, RAINBOW holds RAIN, BRAIN
+    # holds RAIN, STEAMING BOWL holds OWL, EUROPEAN CASTLE holds EURO, CHESS PAWN holds PAW)
+    (r"RAINBOW", "rainbow", None), (r"CROISSANT|BREAD|BAGUETTE|PRETZEL|BAGEL|PANCAKE|WAFFLE|FLATBREAD", "croissant", None),
+    (r"CHESTNUT|PEANUT|\bNUT\b|ACORN|HAZELNUT|COCONUT", "nut", None), (r"\bBRAIN\b", "cross", "#e53935"),
+    (r"\bBOWL\b", "cup", "#ffb74d"), (r"CASTLE", "temple", "#cfd8dc"), (r"UNICORN|CHESS", "star", "#ffd54f"),
+    (r"HONEYBEE", "paw", "#ffca28"),
     (r"BLUE HEART", "heart", "#1e88e5"), (r"PURPLE HEART", "heart", "#8e24aa"), (r"WHITE HEART", "heart", "#f5f5f5"),
     (r"GREEN HEART", "heart", "#43a047"), (r"YELLOW HEART", "heart", "#fdd835"), (r"ORANGE HEART", "heart", "#fb8c00"),
     (r"BLACK HEART", "heart", "#424242"), (r"BROWN HEART", "heart", "#8d6e63"),
@@ -8167,6 +8173,83 @@ class SeasonDecor:
         pb.add_circle(Graphene.Point().init(0, 0), R * 0.78)
         s.append_stroke(pb.to_path(), Gsk.Stroke.new(max(1.0, size * 0.13)), red)
         SeasonDecor._line(s, [(-R * 0.55, -R * 0.55), (R * 0.55, R * 0.55)], max(1.0, size * 0.13), red)
+
+    @staticmethod
+    def _rainbow(s, rng, size, color, _sea):
+        R = size / 2
+        for i, c in enumerate(("#e53935", "#fb8c00", "#fdd835", "#43a047", "#1e88e5", "#8e24aa")):
+            pb = Gsk.PathBuilder.new()
+            r = R * (0.95 - i * 0.11)
+            pb.add_circle(Graphene.Point().init(0, R * 0.35), r)
+            s.push_clip(Graphene.Rect().init(-R, -R, 2 * R, R * 1.35))  # the upper half
+            s.append_stroke(pb.to_path(), Gsk.Stroke.new(R * 0.11), _hex(c, color.alpha))
+            s.pop()
+
+    @staticmethod
+    def _cinnamon(s, rng, size, color, _sea):
+        """Cinnamon: sticks of rolled tree bark, rusty brown, the curl of the roll showing at their cut ends; a
+        bundle of two or three, lying a little apart."""
+        R = size / 2
+        n = rng.choice((2, 3, 3))
+        for i in range(n):
+            y = (i - (n - 1) / 2) * R * 0.42
+            x0, x1 = -R * 0.9 + rng.uniform(-0.08, 0.08) * R, R * 0.8 + rng.uniform(-0.08, 0.08) * R
+            th = R * 0.34
+            bark = _hex(rng.choice(("#a0522d", "#9c4a1f", "#b5652e")), color.alpha)
+            # the stick: a long rounded bar, darker below (round), a light streak along the top
+            SeasonDecor._round_rect(s, x0, y - th / 2, x1 - x0, th, th * 0.45, bark)
+            SeasonDecor._round_rect(s, x0, y + th * 0.1, x1 - x0, th * 0.4, th * 0.2, SeasonDecor._darker(bark, 0.72))
+            SeasonDecor._line(s, [(x0 + th * 0.4, y - th * 0.22), (x1 - th * 0.6, y - th * 0.22)], max(1.0, th * 0.1),
+                              _hex("#e3a874", 0.55))
+            for k in range(3):  # the bark's rough ridges
+                xr = x0 + (x1 - x0) * (0.25 + 0.25 * k)
+                SeasonDecor._line(s, [(xr, y - th * 0.4), (xr + th * 0.15, y + th * 0.4)], max(1.0, th * 0.06),
+                                  SeasonDecor._darker(bark, 0.6))
+            # the cut end: the rolled bark seen end on, a spiral
+            SeasonDecor._dot(s, x1, y, th * 0.5, _hex("#c97b47", color.alpha))
+            pb = Gsk.PathBuilder.new()
+            turns = 2.2
+            for j in range(40):
+                a = j / 39 * turns * 2 * math.pi
+                r = th * 0.45 * (1 - j / 46)
+                px, py = x1 + r * math.cos(a), y + r * math.sin(a)
+                (pb.move_to if j == 0 else pb.line_to)(px, py)
+            st = Gsk.Stroke.new(max(1.0, th * 0.09))
+            st.set_line_cap(Gsk.LineCap.ROUND)
+            s.append_stroke(pb.to_path(), st, SeasonDecor._darker(bark, 0.55))
+
+    @staticmethod
+    def _croissant(s, rng, size, color, _sea):
+        """A croissant (bread, pastry): a golden crescent, its rolled layers marked across it, darker baked ends."""
+        R = size / 2
+        gold, dark = _hex("#e3a24f", color.alpha), _hex("#a8641f", color.alpha)
+        pb = Gsk.PathBuilder.new()  # the crescent: an outer arc over, an inner one back
+        pb.move_to(-R * 0.98, R * 0.3)
+        pb.cubic_to(-R * 0.75, -R * 0.75, R * 0.75, -R * 0.75, R * 0.98, R * 0.3)
+        pb.cubic_to(R * 0.7, R * 0.42, R * 0.55, R * 0.05, 0, R * 0.05)
+        pb.cubic_to(-R * 0.55, R * 0.05, -R * 0.7, R * 0.42, -R * 0.98, R * 0.3)
+        pb.close()
+        SeasonDecor._fill(s, pb, gold)
+        for x in (-R * 0.55, -R * 0.2, R * 0.2, R * 0.55):  # the layers' seams, curving with the roll
+            SeasonDecor._line(s, [(x * 0.9, R * 0.12 - abs(x) * 0.25), (x * 1.1, -R * 0.42 + abs(x) * 0.45)],
+                              max(1.0, size * 0.035), dark)
+        for x in (-R * 0.9, R * 0.9):  # the baked tips
+            SeasonDecor._dot(s, x, R * 0.28, R * 0.1, dark)
+        SeasonDecor._line(s, [(-R * 0.3, -R * 0.36), (R * 0.3, -R * 0.36)], max(1.0, size * 0.04), _hex("#ffe0a3", 0.6))
+
+    @staticmethod
+    def _nut(s, rng, size, color, _sea):
+        """A chestnut (nuts): glossy brown, a pale base."""
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(0, -R * 0.85)
+        pb.cubic_to(R * 0.75, -R * 0.55, R * 0.85, R * 0.3, R * 0.6, R * 0.6)
+        pb.line_to(-R * 0.6, R * 0.6)
+        pb.cubic_to(-R * 0.85, R * 0.3, -R * 0.75, -R * 0.55, 0, -R * 0.85)
+        pb.close()
+        SeasonDecor._fill(s, pb, _hex("#6d3b1f", color.alpha))
+        SeasonDecor._round_rect(s, -R * 0.62, R * 0.35, R * 1.24, R * 0.42, R * 0.18, _hex("#d7b48a", color.alpha))
+        SeasonDecor._dot(s, -R * 0.22, -R * 0.3, R * 0.12, _hex("#ffffff", 0.4))
 
     @staticmethod
     def _drop(s, rng, size, color, _sea):
