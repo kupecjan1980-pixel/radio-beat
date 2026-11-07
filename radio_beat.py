@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.30.4"
+APP_VERSION = "0.30.5"
 
 import collections
 import ctypes
@@ -4842,6 +4842,12 @@ scale.vol-slider slider { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px
     box-shadow: none; border: none; }
 .puddle button.red-pill:hover { background: #F21C30; }
 .puddle button.red-pill:disabled { background: rgba(227,5,26,0.5); color: white; }
+/* installing: a blue pill filling dark blue from the left over light blue, again and again until it restarts */
+@keyframes rb-progress { from { background-position: 100% 0; } to { background-position: 0% 0; } }
+.puddle button.red-pill.blue-pill, .puddle button.red-pill.blue-pill:disabled {
+    background-color: #90caf9; background-image: linear-gradient(to right, #1565c0 50%, #90caf9 50%);
+    background-size: 200% 100%; background-position: 100% 0; background-repeat: no-repeat;
+    animation: rb-progress 8s linear infinite; color: white; opacity: 1; filter: none; }
 .puddle row.expander image.expander-row-arrow { color: white; opacity: 1; -gtk-icon-shadow: 0 0 3px black; }
 .puddle button.puddle-tab { padding: 4px 14px; min-height: 0; border-radius: 999px; color: white;
                             background: none; box-shadow: none; font-weight: 700; }  /* the glass is the tab */
@@ -12983,9 +12989,12 @@ class Window(Adw.ApplicationWindow):
         if self.quality_tab.get_label() != tab:
             self.quality_tab.set_label(tab)
         self.update_note.set_text(a.update_text)
-        self.update_btn.set_label("Aktualizovat" if a.update_ready else "Zkontrolovat")
+        installing = getattr(a, "installing", False)
+        self.update_btn.set_label("Aktualizuji" if installing else "Aktualizovat" if a.update_ready else "Zkontrolovat")
         self.update_btn.set_sensitive(not a.update_busy)
         (self.update_btn.add_css_class if a.update_ready else self.update_btn.remove_css_class)("suggested-action")
+        # installing: a blue pill, its fill sweeping light to dark blue (how far it got isn't told: it shows it runs)
+        (self.update_btn.add_css_class if installing else self.update_btn.remove_css_class)("blue-pill")
         if abs(self.vol.get_value() - a.volume_now()) >= 1:
             self.vol.set_value(a.volume_now())
         self.card_row.set_subtitle(a.card_text())
@@ -13339,7 +13348,7 @@ class App(Adw.Application):
         if not self.update_ready:
             self.check_update()
             return
-        self.update_busy, self.update_text = True, "Aktualizuje se…"
+        self.update_busy, self.update_text, self.installing = True, "Aktualizuje se…", True
         self.update()
 
         def work():
@@ -13349,7 +13358,7 @@ class App(Adw.Application):
 
     def _updated(self, err):
         if err:
-            self.update_busy, self.update_text = False, f"Aktualizace selhala: {err}"
+            self.update_busy, self.update_text, self.installing = False, f"Aktualizace selhala: {err}", False
             self.update()
             return False
         # Start the new version once this one is gone (same app id), then quit; with the window only if it was up.

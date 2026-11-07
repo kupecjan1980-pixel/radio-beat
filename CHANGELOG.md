@@ -4,6 +4,7 @@
 
 ## 0.30 — Jmeniny se slavnými nositeli, NPU
 
+- **0.30.5** (2026-11-07) Během instalace aktualizace je tlačítko modrá pilulka „Aktualizuji“, kterou zleva doprava zaplňuje tmavší modrá (ukazuje, že běží)
 - **0.30.4** (2026-11-07) Okno jmenin má písmo přesně jako okno zvláštního dne (stejná velikost, ne větší styly panelu ⓘ)
 - **0.30.3** (2026-11-07) Menší písmo: okno zvláštního dne už krátký text nenafukuje (nejvýš 0,9 místo až trojnásobku), okno jmenin má jména a popisy ještě o kus menší
 - **0.30.2** (2026-11-07) Okno jmenin se ukáže najetím myší na jméno (jako u zvláštního dne); slavní nositelé, popisy a fotky se ukládají na disk a připravují dopředu na 7 dní (i AI vylepšení fotek), takže se okno ukáže hned; uložené se už nehledají znovu
