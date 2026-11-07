@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.29 — Vlastní kreslené obrázky místo emoji
+
+- **0.29.0** (2026-11-07) Žádné emoji: počasí nakreslené (slunce, mraky, déšť, sníh, bouřka, kroupy; mlha jako v liště Omarchy – mrak nad pruhy mlhy); obrázky zvláštních dnů kreslené: nově holubice, kniha, kapka, podání rukou, jablko, šálek, sklenka, bonbon, sýr, ryba, tlapka, zdravotnický kříž, váhy, mír, stužka, paleta, budova se sloupy, zákaz (72 % obrázků dnů má vlastní kresbu, zbytek zatím zlatá hvězda, další dávky přijdou); zvláštní den navíc se ukáže den předtím nebo potom, když ten nemá žádný; „1. května 1973“ tam, kde je známý jen měsíc, je teď „květen 1973“
+
 ## 0.28 — Společné vylepšování obrázků
 
 - **0.28.6** (2026-11-07) Mlha u počasí je nakreslená: jemné vlnité šedé pruhy, při námraze do ledově modrobílé (emoji mlhy byl jen bledý čtverec)

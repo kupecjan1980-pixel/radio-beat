@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.28.6"
+APP_VERSION = "0.29.0"
 
 import collections
 import ctypes
@@ -853,6 +853,8 @@ def song_facts(artist: str, song: str) -> str:
             first = max(days, key=lambda d: support[d])
     if first and len(first) < 10:  # only the year or month: the day from Wikidata, iTunes or Deezer (that year)
         other = earliest_release(artist, song)
+        if len(other) == 10 and other.endswith("-01"):  # the 1st, where MusicBrainz knows only the month: their
+            other = other[:7]  # placeholder for it again (Nazareth's Razamanaz "1. května 1973": May 1973)
         if other[:4] == first[:4] and len(other) > len(first) and other.startswith(first):
             first = other
     # (where the first release came out misleads: the Beatles' "in Canada", Škwor's "worldwide"; where it
@@ -1271,6 +1273,20 @@ class History:
                                 "WHERE cover IS NOT NULL OR facts IS NOT NULL GROUP BY lower(artist), lower(title)",
                                 (time.time(),))
                 self.db.execute("PRAGMA user_version = 7")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 10:  # once: "the 1st" looked up again
+                first = re.compile(r"vydáno 1\. [a-zěščřžýáíéůú]+ \d{4}")  # (May 1973 shown as "1. května")
+                redo = [(rowid,) for rowid, facts in self.db.execute(
+                    "SELECT rowid, facts FROM plays WHERE facts IS NOT NULL") if first.search(facts)]
+                self.db.executemany("UPDATE plays SET facts = NULL WHERE rowid = ?", redo)
+                try:
+                    with open(FACTS_CACHE) as f:
+                        cache = json.load(f)
+                    with open(FACTS_CACHE + ".part", "w") as f:
+                        json.dump({k: v for k, v in cache.items() if not first.search(v or "")}, f)
+                    os.replace(FACTS_CACHE + ".part", FACTS_CACHE)
+                except (OSError, ValueError, AttributeError):
+                    pass
+                self.db.execute("PRAGMA user_version = 10")
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 9:  # once: a concert hall as the studio,
                 venue = re.compile(r"Nahráno v [^·]*(Apollo|Odeon|Arena|Stadium|Budokan|Square Garden|Albert Hall|"
                                    r"Theat(re|er)|Festival|Palladium|Forum|Hammersmith)", re.I)  # looked up again
@@ -6827,7 +6843,8 @@ HOLIDAYS = {
                  ("candle", "candle", "david"), ("#1e88e5", "#ffffff", "#90caf9", "#ffd54f"), None),
 }
 HOLIDAY_PERIODS = {"advent"}  # whole stretches: mixed with the season, not instead of it
-UPRIGHT = {"menpo", "jpflag", "palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
+UPRIGHT = {"book", "drop", "dove", "hands", "apple", "cup", "glass", "cheese", "cross", "scales", "peace",
+           "ribbon", "temple", "ban", "palette", "menpo", "jpflag", "palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
            "skull", "gift", "crown", "broom", "guitar", "mimosa", "gravelight", "calavera", "papel", "mum"}
 
 
@@ -6853,14 +6870,45 @@ except (OSError, ValueError):
     DAYS_CZ = {}
 
 
+_MOVED: dict | None = None
+
+
+def moved_days() -> dict:
+    """Days with more special days than the date shows (it shows one name) lend one to a neighbour that has none:
+    the day after first (yesterday's missed one today), else the day before. "MM-DD" -> (day, its own "MM-DD",
+    "včera"/"zítra")."""
+    global _MOVED
+    if _MOVED is not None:
+        return _MOVED
+    import datetime
+    keys = [(datetime.date(2024, 1, 1) + datetime.timedelta(days=i)).strftime("%m-%d") for i in range(366)]
+    spare = {k: list((DAYS_CZ.get(k, {}).get("days") or [])[1:]) for k in keys}
+    empty = [k for k in keys if not DAYS_CZ.get(k, {}).get("days") and not DAYS_CZ.get(k, {}).get("state")]
+    _MOVED = {}
+    for k in empty:
+        i = keys.index(k)
+        for j, when in ((i - 1, "včera"), (i + 1, "zítra")):
+            src = keys[j % len(keys)]
+            if spare[src]:
+                _MOVED[k] = (spare[src].pop(0), src, when)
+                break
+    return _MOVED
+
+
 def day_cz(t=None) -> dict:
-    """Today's entry of the Czech calendar: {"names", "state", "days": [[name, declared by, since]]}."""
+    """Today's entry of the Czech calendar: {"names", "state", "days": [[name, declared by, since]]}; on a day with
+    none, a neighbour's spare one (moved_days), marked "moved": (its "MM-DD", "včera"/"zítra")."""
     t = t or time.localtime()
-    d = dict(DAYS_CZ.get(f"{t.tm_mon:02d}-{t.tm_mday:02d}", {}))
+    key = f"{t.tm_mon:02d}-{t.tm_mday:02d}"
+    d = dict(DAYS_CZ.get(key, {}))
     e = _easter(t.tm_year)
     for shift, name in ((-2, "Velký pátek"), (1, "Velikonoční pondělí")):
         if _shift(t.tm_year, e, shift) == (t.tm_mon, t.tm_mday):
             d["state"] = name
+    if not d.get("days") and not d.get("state") and key in moved_days():
+        day, src, when = moved_days()[key]
+        d["days"] = [list(day)]
+        d["moved"] = (src, when)
     return d
 
 
@@ -6880,6 +6928,8 @@ def special_day_name() -> str:
     themed = [HOLIDAYS[h][0] for h in days if h not in HOLIDAY_PERIODS] or [HOLIDAYS[h][0] for h in days]
     if themed:
         return " · ".join(themed)
+    if d.get("moved"):  # a neighbour's: said so
+        return f"{d['days'][0][0]} ({d['moved'][1]})"
     return d["days"][0][0] if d.get("days") else ""
 
 
@@ -6993,13 +7043,12 @@ def day_summary() -> list:
     if days:
         out.append(("head", "Mezinárodní a významné dny"))
         rows = []
+        moved = d.get("moved")
         for name, by, since in days:
-            more = ", ".join(p for p in (f"vyhlásil(a) {by}" if by else "", f"od {since}" if since else "") if p)
-            pics = " ".join(dict.fromkeys("✡" if e == "@goldstar" else e for e in DAY_EMOJI.get(name) or ()
-                                          if not e.startswith("@") or e == "@goldstar")) \
-                if EFFECTS.get("season") else ""
-            rows.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else "")
-                        + (f" {pics}" if pics else ""))
+            more = ", ".join(p for p in (f"vyhlásil(a) {by}" if by else "", f"od {since}" if since else "",
+                                         f"patří k {int(moved[0][3:])}. {int(moved[0][:2])}., ten den jich bylo víc"
+                                         if moved else "") if p)
+            rows.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else ""))
         out.append(("text", "\n".join(rows)))
     if EFFECTS.get("season"):  # (the season's fall every day, a special day's with them)
         season = season_today()[0]
@@ -7514,12 +7563,78 @@ Vzpomínka na genocidu ve Rwandě|🕯️ 💜 🕊️
 svatý Martin|🐎 🍷 🦢 ❄️
 tzv. Mezinárodní den proti McDonald’s|🥗 🍔 🚫
 """
+# A calendar day's emoji drawn as one of SeasonDecor's motifs (no emoji are shown: the user wants the app's own):
+# by the emoji's Unicode name, first match wins; (name pattern, motif, colour or None for the motif's own).
+# Batch 1 (0.29.0): dove, book and drop drawn new; the rest the closest existing motif, a gold star when none.
+EMOJI_MOTIFS = [
+    (r"BLUE HEART", "heart", "#1e88e5"), (r"PURPLE HEART", "heart", "#8e24aa"), (r"WHITE HEART", "heart", "#f5f5f5"),
+    (r"GREEN HEART", "heart", "#43a047"), (r"YELLOW HEART", "heart", "#fdd835"), (r"ORANGE HEART", "heart", "#fb8c00"),
+    (r"BLACK HEART", "heart", "#424242"), (r"BROWN HEART", "heart", "#8d6e63"),
+    (r"PINK HEART|GROWING HEART|SPARKLING HEART|HEART WITH|TWO HEARTS|REVOLVING|BEATING HEART|HEART DECORATION",
+     "heart", "#f06292"), (r"HEART", "heart", "#e53935"),
+    (r"DOVE", "dove", "#fafafa"), (r"EAGLE|OWL|PARROT|BIRD|SWAN|DUCK|FLAMINGO|PEACOCK|ROOSTER|CHICK|PENGUIN",
+                                     "dove", "#cfd8dc"),
+    (r"GLOBE|EARTH|WORLD MAP", "globe", None), (r"CANDLE", "candle", None), (r"DIYA", "diya", None),
+    (r"FIRE\b", "flame", None), (r"HIGH VOLTAGE|LIGHTNING", "bolt", None),
+    (r"STAR\b|SPARKLES|DIZZY|GLOWING STAR|SHOOTING", "star", "#ffd54f"),
+    (r"CHRISTMAS TREE", "tree", None), (r"PALM", "palm", None), (r"TREE", "tree", None),
+    (r"FOUR LEAF|SHAMROCK", "shamrock", None), (r"MAPLE", "maple", None), (r"FALLEN LEAF|LEAF FLUTTERING", "leaf", None),
+    (r"HERB|SEEDLING|POTTED|PLANT|LEAF|SHEAF|EAR OF", "sprig", None),
+    (r"SUNFLOWER", "marigold", None), (r"CHERRY BLOSSOM", "sakura", None),
+    (r"BLOSSOM|TULIP|ROSE|HIBISCUS|BOUQUET|FLOWER|LOTUS", "blossom", None),
+    (r"SNOWFLAKE|SNOWMAN|SNOW", "flake", None), (r"SUN\b|SUN WITH|SUNRISE", "sun", None),
+    (r"GUITAR", "guitar", None),
+    (r"MUSIC|NOTE|PIANO|VIOLIN|DRUM|TRUMPET|SAXOPHONE|MICROPHONE|HEADPHONE|BANJO|ACCORDION|LONG DRUM|MAYBE",
+     "note", None),
+    (r"CROWN", "crown", None), (r"WRAPPED|GIFT", "gift", None), (r"BALLOON", "balloon", None),
+    (r"PARTY|CONFETTI", "confetti", None), (r"FIREWORK|SPARKLER", "firework", None), (r"EGG\b", "egg", None),
+    (r"COIN|MONEY|BANKNOTE|DOLLAR|EURO|YEN|POUND", "coin", None), (r"LANTERN", "lantern", None),
+    (r"DROPLET|WATER WAVE|SWEAT|SPLASH|RAIN|POTABLE|UMBRELLA", "drop", "#4fc3f7"),
+    (r"BOOK|NOTEBOOK|PENCIL|PEN\b|FOUNTAIN|MEMO|SCROLL|WRITING|NEWSPAPER|PAGE|CRAYON|LEDGER|BOOKMARK", "book",
+     "#5c6bc0"),
+    (r"HANDSHAKE|HANDS|RAISED FIST|FOLDED HANDS|PEOPLE HOLDING|OPEN HANDS|WAVING|CLAPPING", "hands", "#ffcc80"),
+    (r"CHOCOLATE|CANDY|LOLLIPOP|CUSTARD|COOKIE|DOUGHNUT|CAKE|CUPCAKE|PIE\b|HONEY|ICE CREAM|DANGO", "candy", "#8d6e63"),
+    (r"CHEESE", "cheese", None),
+    (r"RED APPLE|APPLE|PEAR|PEACH|CHERR|STRAWBERR|GRAPE|LEMON|ORANGE|TANGERINE|BANANA|MANGO|MELON|KIWI|TOMATO|"
+     r"CARROT|POTATO|BROCCOLI|CORN|PEANUT|CHESTNUT|NUT\b|BREAD|BAGUETTE|PRETZEL|PIZZA|HAMBURGER|RICE|NOODLE|"
+     r"POULTRY|MEAT|BACON|SUSHI|DUMPLING|TACO|BURRITO|SANDWICH|AVOCADO|OLIVE|GARLIC|ONION|PEPPER|EGGPLANT|"
+     r"CUCUMBER|LEAFY|BEANS|MUSHROOM|COCONUT|BLUEBERR|PINEAPPLE", "apple", "#e53935"),
+    (r"HOT BEVERAGE|TEACUP|MATE|GLASS OF MILK|BEVERAGE BOX|CUP WITH STRAW|BUBBLE TEA", "cup", "#795548"),
+    (r"WINE|COCKTAIL|TROPICAL DRINK|CLINKING|BEER|SAKE|CHAMPAGNE|TUMBLER|BOTTLE", "glass", "#ad1457"),
+    (r"FISH|SHARK|WHALE|DOLPHIN|OCTOPUS|CRAB|LOBSTER|SHRIMP|SQUID|SEAL|CORAL", "fish", "#4fc3f7"),
+    (r"PAW|DOG|CAT\b|CAT FACE|LION|TIGER|ELEPHANT|HORSE|COW|PIG|BEAR|PANDA|MONKEY|GORILLA|RABBIT|MOUSE|FOX|WOLF|"
+     r"ZEBRA|GIRAFFE|RHINO|HIPPO|CAMEL|LEOPARD|DEER|KOALA|SLOTH|OTTER|HEDGEHOG|BADGER|SKUNK|BISON|HAMSTER|"
+     r"POODLE|TURTLE|FROG|SNAKE|LIZARD|CROCODILE|BEE\b|HONEYBEE|BUTTERFLY|ANT\b|LADY BEETLE|BUG", "paw", "#a1887f"),
+    (r"STETHOSCOPE|SYRINGE|PILL|HOSPITAL|AMBULANCE|DNA|MICROBE|ADHESIVE|DROP OF BLOOD|STAFF OF AESCULAPIUS|"
+     r"MEDICAL|TOOTH|LUNGS|ANATOMICAL|BRAIN|X-RAY|TEST TUBE|PETRI", "cross", "#e53935"),
+    (r"SCALES", "scales", "#ffd54f"), (r"PEACE SYMBOL", "peace", "#ffffff"), (r"REMINDER RIBBON", "ribbon", "#e53935"),
+    (r"ARTIST PALETTE|PAINTBRUSH|FRAMED PICTURE", "palette", None),
+    (r"CLASSICAL BUILDING|MUSEUM|BANK|COURTHOUSE|SCHOOL|HOUSE|BUILDING|CHURCH|MOSQUE|SYNAGOGUE|TEMPLE|CASTLE|"
+     r"STADIUM|HOSPITAL|POST OFFICE|FACTORY|OFFICE", "temple", "#cfd8dc"),
+    (r"NO ENTRY|PROHIBITED|NO SMOKING|NO ONE", "ban", None),
+    (r"PERFORMING ARTS|THEATRE|THEATER", "menpo", "#ffd54f"),
+    (r"SKULL", "skull", None), (r"GHOST", "ghost", None), (r"PUMPKIN|JACK-O", "pumpkin", None), (r"BAT\b", "bat", None),
+    (r"SPIDER WEB", "web", None), (r"SPIDER", "spider", None), (r"MAPLE", "maple", None),
+]
+_EMOJI_RULES = [(re.compile(p), kind, col) for p, kind, col in EMOJI_MOTIFS]
+
+
+def emoji_motif(e: str) -> str:
+    """A day's emoji -> a motif token: "kind" or "kind#rrggbb" (its colour)."""
+    import unicodedata
+    names = " ".join(unicodedata.name(c, "") for c in e if c not in "\ufe0f\u200d")
+    for rule, kind, col in _EMOJI_RULES:
+        if rule.search(names):
+            return kind + (col or "")
+    return "star#ffd54f"  # (nothing drawn like it yet: a gold star; its own drawing comes in a later batch)
+
+
 DAY_EMOJI = {}  # (a "@kind" among them: one of SeasonDecor's drawn motifs, e.g. a golden Star of David)
 for _line in DAY_EMOJI_TEXT.strip().splitlines():
     _name, _, _pics = _line.partition("|")
     DAY_EMOJI[_name] = tuple(_pics.split())
     if DAY_EMOJI[_name]:
-        SEASON_KINDS["day:" + _name] = tuple(e[1:] if e.startswith("@") else "emoji:" + e for e in DAY_EMOJI[_name])
+        SEASON_KINDS["day:" + _name] = tuple(e[1:] if e.startswith("@") else emoji_motif(e) for e in DAY_EMOJI[_name])
         SEASON_COLORS["day:" + _name] = ("#ffd54f",)
 # the calendar's days a special day (HOLIDAYS, drawn motifs) stands for already
 CALENDAR_THEMED = {"Den japonské kultury", "Halloween", "Dušičky", "Den všech svatých", "Mikuláš",
@@ -7550,9 +7665,7 @@ def season_text(clock_bytes: int = None) -> str:
     cal = calendar_days_today()
     if days or cal:  # the season's always, the day's as many again
         name += " + " + " + ".join([HOLIDAYS[d][0] for d in days] + [c[4:] for c in cal])
-        motifs += "; napůl s: " + ", ".join([HOLIDAYS[d][1] for d in days]
-                                          + [" ".join(e for e in DAY_EMOJI[c[4:]] if not e.startswith("@"))
-                                             for c in cal])
+        motifs += "; napůl s: " + ", ".join([HOLIDAYS[d][1] for d in days] + [f"obrázky dne {c[4:]}" for c in cal])
     text = (f"Padají pomalu jako sníh a pootáčejí se za datem a časem, tlačítky, kvalitou, hlasitostí a jmény "
             f"(písmena jen v barvách měsíce, čitelnější); bez animací stojí; klik na datum je vypne a zapne; "
             f"každý den trochu jinak; o svátcích a zvláštních dnech (české, americké i světové: Vánoce, Halloween, "
@@ -7769,6 +7882,251 @@ class SeasonDecor:
                 (R if i % 2 == 0 else R * 0.42) * math.sin(-math.pi / 2 + math.pi * i / points))
                for i in range(points * 2)]
         SeasonDecor._poly(s, pts, color)
+
+    @staticmethod
+    def _dove(s, rng, size, color, _sea):
+        """A dove in flight (white by default; any bird in its colour): a body, a raised wing, a tail."""
+        R = size / 2
+        body = Gsk.PathBuilder.new()
+        body.move_to(-R * 0.95, R * 0.05)  # beak tip
+        body.cubic_to(-R * 0.7, -R * 0.25, -R * 0.35, -R * 0.2, -R * 0.1, -R * 0.05)
+        body.cubic_to(R * 0.3, R * 0.1, R * 0.6, R * 0.05, R * 0.95, -R * 0.2)  # back to the tail
+        body.line_to(R * 0.85, R * 0.18)
+        body.cubic_to(R * 0.5, R * 0.42, -R * 0.2, R * 0.45, -R * 0.62, R * 0.22)
+        body.close()
+        wing = Gsk.PathBuilder.new()
+        wing.move_to(-R * 0.25, -R * 0.02)
+        wing.cubic_to(-R * 0.2, -R * 0.6, R * 0.15, -R * 0.95, R * 0.55, -R * 0.92)
+        wing.cubic_to(R * 0.35, -R * 0.6, R * 0.3, -R * 0.25, R * 0.25, R * 0.02)
+        wing.close()
+        SeasonDecor._fill(s, body, color)
+        SeasonDecor._fill(s, wing, SeasonDecor._darker(color, 0.88))
+        SeasonDecor._dot(s, -R * 0.62, -R * 0.02, R * 0.06, _hex("#263238"))
+
+    @staticmethod
+    def _book(s, rng, size, color, _sea):
+        """An open book: two pages on a coloured cover, a few lines of text."""
+        R = size / 2
+        SeasonDecor._poly(s, [(-R, -R * 0.55), (0, -R * 0.42), (R, -R * 0.55), (R, R * 0.62), (0, R * 0.75),
+                              (-R, R * 0.62)], color)  # the cover
+        page = _hex("#fafafa", color.alpha)
+        SeasonDecor._poly(s, [(-R * 0.9, -R * 0.62), (-R * 0.04, -R * 0.5), (-R * 0.04, R * 0.6), (-R * 0.9, R * 0.5)], page)
+        SeasonDecor._poly(s, [(R * 0.9, -R * 0.62), (R * 0.04, -R * 0.5), (R * 0.04, R * 0.6), (R * 0.9, R * 0.5)], page)
+        ink = _hex("#90a4ae", color.alpha)
+        for i in range(4):
+            y = -R * 0.32 + i * R * 0.22
+            SeasonDecor._line(s, [(-R * 0.75, y - R * 0.04), (-R * 0.2, y + R * 0.04)], max(1.0, size * 0.035), ink)
+            SeasonDecor._line(s, [(R * 0.2, y + R * 0.04), (R * 0.75, y - R * 0.04)], max(1.0, size * 0.035), ink)
+
+    @staticmethod
+    def _round_rect(s, x, y, w, h, r, color):
+        pb = Gsk.PathBuilder.new()
+        rr = Gsk.RoundedRect()
+        rr.init_from_rect(Graphene.Rect().init(x, y, w, h), r)
+        pb.add_rounded_rect(rr)
+        SeasonDecor._fill(s, pb, color)
+
+    @staticmethod
+    def _hands(s, rng, size, color, _sea):
+        """A handshake: two hands (sleeves of two colours) clasped in the middle."""
+        R = size / 2
+        skin = _hex(rng.choice(("#f1c27d", "#e0ac69", "#c68642", "#8d5524", "#ffdbac")), color.alpha)
+        skin2 = _hex(rng.choice(("#f1c27d", "#e0ac69", "#c68642", "#8d5524", "#ffdbac")), color.alpha)
+        SeasonDecor._round_rect(s, -R, -R * 0.12, R * 0.62, R * 0.5, R * 0.1, _hex("#1e88e5", color.alpha))  # sleeves
+        SeasonDecor._round_rect(s, R * 0.38, -R * 0.12, R * 0.62, R * 0.5, R * 0.1, _hex("#e53935", color.alpha))
+        SeasonDecor._round_rect(s, -R * 0.5, -R * 0.2, R * 0.75, R * 0.55, R * 0.25, skin)  # the two palms
+        SeasonDecor._round_rect(s, -R * 0.2, -R * 0.05, R * 0.72, R * 0.5, R * 0.24, skin2)
+        for i in range(4):  # the fingers wrapped over
+            SeasonDecor._round_rect(s, -R * 0.12 + i * R * 0.15, -R * 0.33, R * 0.13, R * 0.4, R * 0.06, skin)
+        SeasonDecor._line(s, [(-R * 0.18, R * 0.12), (R * 0.44, R * 0.12)], max(1.0, size * 0.025),
+                          SeasonDecor._darker(skin2, 0.75))
+
+    @staticmethod
+    def _apple(s, rng, size, color, _sea):
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(0, -R * 0.5)
+        pb.cubic_to(R * 0.5, -R * 0.85, R * 1.05, -R * 0.4, R * 0.8, R * 0.3)
+        pb.cubic_to(R * 0.6, R * 0.9, R * 0.25, R * 0.95, 0, R * 0.8)
+        pb.cubic_to(-R * 0.25, R * 0.95, -R * 0.6, R * 0.9, -R * 0.8, R * 0.3)
+        pb.cubic_to(-R * 1.05, -R * 0.4, -R * 0.5, -R * 0.85, 0, -R * 0.5)
+        pb.close()
+        SeasonDecor._fill(s, pb, color)
+        SeasonDecor._line(s, [(0, -R * 0.5), (R * 0.1, -R * 0.95)], max(1.0, size * 0.05), _hex("#6d4c41"))
+        SeasonDecor._poly(s, [(R * 0.1, -R * 0.75), (R * 0.55, -R * 0.95), (R * 0.3, -R * 0.62)], _hex("#43a047"))
+        SeasonDecor._dot(s, -R * 0.4, -R * 0.1, R * 0.14, _hex("#ffffff", 0.45))
+
+    @staticmethod
+    def _cup(s, rng, size, color, _sea):
+        """A cup (coffee, tea, milk) with a wisp of steam; the colour is the drink's."""
+        R = size / 2
+        white = _hex("#fafafa", color.alpha)
+        SeasonDecor._poly(s, [(-R * 0.7, -R * 0.15), (R * 0.5, -R * 0.15), (R * 0.4, R * 0.7), (-R * 0.6, R * 0.7)], white)
+        st = Gsk.Stroke.new(max(1.0, size * 0.09))
+        pb = Gsk.PathBuilder.new()
+        pb.add_circle(Graphene.Point().init(R * 0.58, R * 0.22), R * 0.22)
+        s.append_stroke(pb.to_path(), st, white)
+        SeasonDecor._poly(s, [(-R * 0.62, -R * 0.08), (R * 0.42, -R * 0.08), (R * 0.39, R * 0.08), (-R * 0.59, R * 0.08)],
+                          color)  # the drink
+        for x in (-R * 0.3, R * 0.05):
+            SeasonDecor._line(s, [(x, -R * 0.3), (x + R * 0.1, -R * 0.55), (x, -R * 0.8)], max(1.0, size * 0.04),
+                              _hex("#ffffff", 0.7))
+
+    @staticmethod
+    def _glass(s, rng, size, color, _sea):
+        """A wine glass (wine, cocktails, beer as amber): the drink's colour in the bowl."""
+        R = size / 2
+        bowl = Gsk.PathBuilder.new()
+        bowl.move_to(-R * 0.55, -R * 0.85)
+        bowl.line_to(R * 0.55, -R * 0.85)
+        bowl.cubic_to(R * 0.6, -R * 0.1, R * 0.3, R * 0.1, 0, R * 0.12)
+        bowl.cubic_to(-R * 0.3, R * 0.1, -R * 0.6, -R * 0.1, -R * 0.55, -R * 0.85)
+        bowl.close()
+        SeasonDecor._fill(s, bowl, _hex("#e3f2fd", 0.55))
+        SeasonDecor._poly(s, [(-R * 0.55, -R * 0.45), (R * 0.55, -R * 0.45), (R * 0.42, -R * 0.05), (0, R * 0.1),
+                              (-R * 0.42, -R * 0.05)], color)
+        SeasonDecor._line(s, [(0, R * 0.12), (0, R * 0.8)], max(1.0, size * 0.06), _hex("#e3f2fd", 0.8))
+        SeasonDecor._line(s, [(-R * 0.4, R * 0.85), (R * 0.4, R * 0.85)], max(1.0, size * 0.07), _hex("#e3f2fd", 0.8))
+
+    @staticmethod
+    def _candy(s, rng, size, color, _sea):
+        """A wrapped sweet (chocolate, candy, sweets)."""
+        R = size / 2
+        SeasonDecor._poly(s, [(-R * 0.45, 0), (-R, -R * 0.45), (-R, R * 0.45)], SeasonDecor._darker(color, 0.8))
+        SeasonDecor._poly(s, [(R * 0.45, 0), (R, -R * 0.45), (R, R * 0.45)], SeasonDecor._darker(color, 0.8))
+        SeasonDecor._round_rect(s, -R * 0.55, -R * 0.38, R * 1.1, R * 0.76, R * 0.38, color)
+        for x in (-R * 0.25, R * 0.05, R * 0.35):
+            SeasonDecor._line(s, [(x - R * 0.1, R * 0.3), (x + R * 0.1, -R * 0.3)], max(1.0, size * 0.04),
+                              _hex("#ffffff", 0.55))
+
+    @staticmethod
+    def _cheese(s, rng, size, color, _sea):
+        R = size / 2
+        SeasonDecor._poly(s, [(-R, R * 0.55), (R * 0.9, R * 0.55), (R * 0.9, -R * 0.1), (-R, R * 0.05)],
+                          _hex("#ffca28", color.alpha))
+        SeasonDecor._poly(s, [(-R, R * 0.05), (R * 0.9, -R * 0.1), (R * 0.2, -R * 0.65)], _hex("#ffe082", color.alpha))
+        for x, y, r in ((-R * 0.4, R * 0.3, R * 0.12), (R * 0.25, R * 0.25, R * 0.16), (R * 0.6, R * 0.05, R * 0.09)):
+            SeasonDecor._dot(s, x, y, r, _hex("#f9a825", color.alpha))
+
+    @staticmethod
+    def _fish(s, rng, size, color, _sea):
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(-R * 0.9, 0)
+        pb.cubic_to(-R * 0.4, -R * 0.65, R * 0.35, -R * 0.55, R * 0.55, 0)
+        pb.cubic_to(R * 0.35, R * 0.55, -R * 0.4, R * 0.65, -R * 0.9, 0)
+        pb.close()
+        SeasonDecor._fill(s, pb, color)
+        SeasonDecor._poly(s, [(R * 0.45, 0), (R, -R * 0.45), (R * 0.9, 0), (R, R * 0.45)], SeasonDecor._darker(color, 0.8))
+        SeasonDecor._dot(s, -R * 0.5, -R * 0.08, R * 0.08, _hex("#263238"))
+
+    @staticmethod
+    def _paw(s, rng, size, color, _sea):
+        """A paw print (dogs, cats, animals)."""
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.add_circle(Graphene.Point().init(0, R * 0.32), R * 0.42)
+        SeasonDecor._fill(s, pb, color)
+        for x, y in ((-R * 0.62, -R * 0.15), (-R * 0.25, -R * 0.58), (R * 0.25, -R * 0.58), (R * 0.62, -R * 0.15)):
+            SeasonDecor._dot(s, x, y, R * 0.2, color)
+
+    @staticmethod
+    def _cross(s, rng, size, color, _sea):
+        """A medical cross (health, doctors, nurses): red on a white disc."""
+        R = size / 2
+        SeasonDecor._dot(s, 0, 0, R * 0.95, _hex("#fafafa", color.alpha))
+        SeasonDecor._round_rect(s, -R * 0.2, -R * 0.62, R * 0.4, R * 1.24, R * 0.06, color)
+        SeasonDecor._round_rect(s, -R * 0.62, -R * 0.2, R * 1.24, R * 0.4, R * 0.06, color)
+
+    @staticmethod
+    def _scales(s, rng, size, color, _sea):
+        """Scales of justice."""
+        R = size / 2
+        w = max(1.0, size * 0.05)
+        SeasonDecor._line(s, [(0, -R * 0.8), (0, R * 0.8)], w, color)
+        SeasonDecor._line(s, [(-R * 0.4, R * 0.8), (R * 0.4, R * 0.8)], w * 1.4, color)
+        SeasonDecor._line(s, [(-R * 0.8, -R * 0.55), (R * 0.8, -R * 0.55)], w, color)
+        for x in (-R * 0.8, R * 0.8):
+            SeasonDecor._line(s, [(x, -R * 0.55), (x - R * 0.22, R * 0.05)], w * 0.6, color)
+            SeasonDecor._line(s, [(x, -R * 0.55), (x + R * 0.22, R * 0.05)], w * 0.6, color)
+            pb = Gsk.PathBuilder.new()
+            pb.move_to(x - R * 0.28, R * 0.05)
+            pb.cubic_to(x - R * 0.2, R * 0.35, x + R * 0.2, R * 0.35, x + R * 0.28, R * 0.05)
+            pb.close()
+            SeasonDecor._fill(s, pb, color)
+
+    @staticmethod
+    def _peace(s, rng, size, color, _sea):
+        R = size / 2
+        w = max(1.0, size * 0.09)
+        pb = Gsk.PathBuilder.new()
+        pb.add_circle(Graphene.Point().init(0, 0), R * 0.82)
+        s.append_stroke(pb.to_path(), Gsk.Stroke.new(w), color)
+        SeasonDecor._line(s, [(0, -R * 0.82), (0, R * 0.82)], w, color)
+        SeasonDecor._line(s, [(0, 0), (-R * 0.58, R * 0.58)], w, color)
+        SeasonDecor._line(s, [(0, 0), (R * 0.58, R * 0.58)], w, color)
+
+    @staticmethod
+    def _ribbon(s, rng, size, color, _sea):
+        """An awareness ribbon (a loop with crossed tails)."""
+        R = size / 2
+        w = max(1.5, size * 0.17)
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(-R * 0.55, R * 0.95)
+        pb.line_to(R * 0.2, -R * 0.1)
+        pb.cubic_to(R * 0.55, -R * 0.6, R * 0.25, -R * 0.95, 0, -R * 0.95)
+        pb.cubic_to(-R * 0.25, -R * 0.95, -R * 0.55, -R * 0.6, -R * 0.2, -R * 0.1)
+        pb.line_to(R * 0.55, R * 0.95)
+        st = Gsk.Stroke.new(w)
+        st.set_line_cap(Gsk.LineCap.BUTT)
+        st.set_line_join(Gsk.LineJoin.ROUND)
+        s.append_stroke(pb.to_path(), st, color)
+
+    @staticmethod
+    def _palette(s, rng, size, color, _sea):
+        """A painter's palette with dabs of colour."""
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.add_circle(Graphene.Point().init(0, 0), R * 0.92)
+        SeasonDecor._fill(s, pb, _hex("#d7b07a", color.alpha))
+        SeasonDecor._dot(s, R * 0.35, R * 0.4, R * 0.18, _hex("#5d4037", color.alpha))  # the thumb hole
+        for (x, y), c in zip(((-R * 0.5, -R * 0.2), (-R * 0.15, -R * 0.55), (R * 0.3, -R * 0.45), (-R * 0.45, R * 0.3)),
+                             ("#e53935", "#fdd835", "#1e88e5", "#43a047")):
+            SeasonDecor._dot(s, x, y, R * 0.17, _hex(c, color.alpha))
+
+    @staticmethod
+    def _temple(s, rng, size, color, _sea):
+        """A building with columns (museums, history, institutions)."""
+        R = size / 2
+        SeasonDecor._poly(s, [(-R, -R * 0.4), (0, -R * 0.95), (R, -R * 0.4)], color)
+        for i in range(4):
+            x = -R * 0.72 + i * R * 0.48
+            SeasonDecor._round_rect(s, x - R * 0.1, -R * 0.32, R * 0.2, R * 0.92, R * 0.03, color)
+        SeasonDecor._round_rect(s, -R, R * 0.62, R * 2, R * 0.22, R * 0.04, color)
+
+    @staticmethod
+    def _ban(s, rng, size, color, _sea):
+        """A 'no' sign: a red ring with a bar."""
+        R = size / 2
+        red = _hex("#e53935", color.alpha)
+        pb = Gsk.PathBuilder.new()
+        pb.add_circle(Graphene.Point().init(0, 0), R * 0.78)
+        s.append_stroke(pb.to_path(), Gsk.Stroke.new(max(1.0, size * 0.13)), red)
+        SeasonDecor._line(s, [(-R * 0.55, -R * 0.55), (R * 0.55, R * 0.55)], max(1.0, size * 0.13), red)
+
+    @staticmethod
+    def _drop(s, rng, size, color, _sea):
+        """A drop of water, lit from the upper left."""
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(0, -R)
+        pb.cubic_to(R * 0.35, -R * 0.45, R * 0.75, -R * 0.05, R * 0.75, R * 0.3)
+        pb.cubic_to(R * 0.75, R * 0.75, R * 0.4, R, 0, R)
+        pb.cubic_to(-R * 0.4, R, -R * 0.75, R * 0.75, -R * 0.75, R * 0.3)
+        pb.cubic_to(-R * 0.75, -R * 0.05, -R * 0.35, -R * 0.45, 0, -R)
+        pb.close()
+        SeasonDecor._fill(s, pb, color)
+        SeasonDecor._dot(s, -R * 0.3, R * 0.2, R * 0.16, _hex("#ffffff", 0.6))
 
     @staticmethod
     def _heart(s, rng, size, color, _sea):
@@ -8408,14 +8766,155 @@ class ClockView(Gtk.Widget):
 
 
 # The weather beside the logo (Open-Meteo, free, no key), for the place chosen in the gear menu.
-WMO = {0: ("☀️", "jasno"), 1: ("🌤️", "skoro jasno"), 2: ("⛅", "polojasno"), 3: ("☁️", "zataženo"),
-       45: ("🌫️", "mlha"), 48: ("🌫️", "mlha s námrazou"), 51: ("🌦️", "slabé mrholení"), 53: ("🌦️", "mrholení"),
-       55: ("🌦️", "silné mrholení"), 56: ("🌧️", "mrznoucí mrholení"), 57: ("🌧️", "mrznoucí mrholení"),
-       61: ("🌧️", "slabý déšť"), 63: ("🌧️", "déšť"), 65: ("🌧️", "silný déšť"), 66: ("🌧️", "mrznoucí déšť"),
-       67: ("🌧️", "mrznoucí déšť"), 71: ("🌨️", "slabé sněžení"), 73: ("🌨️", "sněžení"), 75: ("🌨️", "silné sněžení"),
-       77: ("🌨️", "sněhová zrna"), 80: ("🌦️", "přeháňky"), 81: ("🌦️", "přeháňky"), 82: ("⛈️", "prudké přeháňky"),
-       85: ("🌨️", "sněhové přeháňky"), 86: ("🌨️", "sněhové přeháňky"), 95: ("⛈️", "bouřka"),
-       96: ("⛈️", "bouřka s kroupami"), 99: ("⛈️", "bouřka s kroupami")}
+WMO = {0: ("clear", "jasno"), 1: ("few", "skoro jasno"), 2: ("partly", "polojasno"), 3: ("cloudy", "zataženo"),
+       45: ("fog", "mlha"), 48: ("rime", "mlha s námrazou"), 51: ("drizzle", "slabé mrholení"),
+       53: ("drizzle", "mrholení"), 55: ("drizzle", "silné mrholení"), 56: ("freezing", "mrznoucí mrholení"),
+       57: ("freezing", "mrznoucí mrholení"), 61: ("rain", "slabý déšť"), 63: ("rain", "déšť"),
+       65: ("rain", "silný déšť"), 66: ("freezing", "mrznoucí déšť"), 67: ("freezing", "mrznoucí déšť"),
+       71: ("snow", "slabé sněžení"), 73: ("snow", "sněžení"), 75: ("snow", "silné sněžení"),
+       77: ("snow", "sněhová zrna"), 80: ("showers", "přeháňky"), 81: ("showers", "přeháňky"),
+       82: ("rain", "prudké přeháňky"), 85: ("snow", "sněhové přeháňky"), 86: ("snow", "sněhové přeháňky"),
+       95: ("thunder", "bouřka"), 96: ("hail", "bouřka s kroupami"), 99: ("hail", "bouřka s kroupami")}
+
+
+# --- the weather's pictures, drawn (no emoji: the font's are flat, its fog a blank square) ----------------------
+def _sky_cloud(cr, cx, cy, size, top=(0.99, 0.99, 1.0), bottom=(0.74, 0.77, 0.83), shadow=0.35) -> None:
+    """A rounded cloud, `size` wide, centred on (cx, cy): lit from above, a soft shadow under it."""
+    bumps = ((-0.27, 0.06, 0.20), (-0.04, -0.10, 0.27), (0.24, 0.0, 0.22))
+    base = (-0.44, 0.04, 0.88, 0.22)  # x, y, w, h of the flat bottom, in sizes
+
+    def shape(dx, dy):
+        for bx, by, br in bumps:
+            cr.new_sub_path()
+            cr.arc(cx + bx * size + dx, cy + by * size + dy, br * size, 0, 2 * math.pi)
+        x, y, w, h = (v * size for v in base)
+        r = h / 2
+        cr.new_sub_path()
+        cr.arc(cx + x + r + dx, cy + y + r + dy, r, math.pi / 2, 3 * math.pi / 2)
+        cr.arc(cx + x + w - r + dx, cy + y + r + dy, r, -math.pi / 2, math.pi / 2)
+        cr.close_path()
+    cr.set_fill_rule(0)  # winding: the parts as one
+    shape(-size * 0.02, size * 0.05)
+    cr.set_source_rgba(0, 0, 0, shadow)
+    cr.fill()
+    shape(0, 0)
+    g = cairo_linear(0, cy - size * 0.38, 0, cy + size * 0.27)
+    g.add_color_stop_rgb(0, *top)
+    g.add_color_stop_rgb(1, *bottom)
+    cr.set_source(g)
+    cr.fill()
+
+
+def _sky_sun(cr, cx, cy, r) -> None:
+    cr.save()
+    cr.translate(cx, cy)
+    for i in range(10):  # rays
+        cr.save()
+        cr.rotate(2 * math.pi * i / 10)
+        cr.move_to(r * 1.18, -r * 0.17)
+        cr.line_to(r * 1.72, 0)
+        cr.line_to(r * 1.18, r * 0.17)
+        cr.close_path()
+        cr.set_source_rgb(1.0, 0.70, 0.12)
+        cr.fill()
+        cr.restore()
+    cr.arc(-r * 0.05, r * 0.08, r * 1.02, 0, 2 * math.pi)
+    cr.set_source_rgba(0, 0, 0, 0.3)
+    cr.fill()
+    cr.arc(0, 0, r, 0, 2 * math.pi)
+    cr.set_source(cairo_radial(0, 0, r, (1.0, 0.95, 0.55), (1.0, 0.66, 0.08)))
+    cr.fill()
+    cr.restore()
+
+
+def _sky_drops(cr, xs, y, length, color=(0.36, 0.72, 1.0), slant=0.35, width=None) -> None:
+    cr.set_line_cap(1)
+    for x in xs:
+        for w, c in (((width or length * 0.32) * 1.7, (0, 0, 0, 0.3)), ((width or length * 0.32), (*color, 1))):
+            cr.set_line_width(w)
+            cr.set_source_rgba(*c)
+            cr.move_to(x, y)
+            cr.line_to(x - length * slant, y + length)
+            cr.stroke()
+
+
+def _sky_flake(cr, x, y, r, color=(1, 1, 1)) -> None:
+    cr.set_line_cap(1)
+    for w, c in ((r * 0.5, (0, 0, 0, 0.35)), (r * 0.26, (*color, 1))):
+        cr.set_line_width(w)
+        cr.set_source_rgba(*c)
+        for i in range(3):
+            a = math.pi * i / 3
+            cr.move_to(x - r * math.cos(a), y - r * math.sin(a))
+            cr.line_to(x + r * math.cos(a), y + r * math.sin(a))
+        cr.stroke()
+
+
+def _sky_bolt(cr, x, y, h) -> None:
+    pts = ((0.10, 0), (-0.22, 0.52), (0.02, 0.52), (-0.12, 1.0), (0.30, 0.38), (0.06, 0.38), (0.24, 0))
+    for dx, dy, fill in ((-h * 0.03, h * 0.05, (0, 0, 0, 0.4)), (0, 0, (1.0, 0.84, 0.15, 1))):
+        cr.move_to(x + pts[0][0] * h + dx, y + pts[0][1] * h + dy)
+        for px, py in pts[1:]:
+            cr.line_to(x + px * h + dx, y + py * h + dy)
+        cr.close_path()
+        cr.set_source_rgba(*fill)
+        cr.fill()
+
+
+def draw_sky(cr, w: float, h: float, kind: str, night: bool = False) -> None:
+    """The weather's picture in a w x h square: the sun, clouds, rain, snow, a storm, fog (as Omarchy's bar draws
+    it: a cloud over lines of mist)."""
+    s = min(w, h)
+    if kind == "clear":
+        _sky_sun(cr, w / 2, h / 2, s * 0.24)
+    elif kind == "few":
+        _sky_sun(cr, w * 0.40, h * 0.40, s * 0.21)
+        _sky_cloud(cr, w * 0.62, h * 0.66, s * 0.56)
+    elif kind == "partly":
+        _sky_sun(cr, w * 0.36, h * 0.36, s * 0.22)
+        _sky_cloud(cr, w * 0.56, h * 0.60, s * 0.80)
+    elif kind == "cloudy":
+        _sky_cloud(cr, w * 0.64, h * 0.42, s * 0.62, (0.80, 0.82, 0.87), (0.58, 0.61, 0.68))
+        _sky_cloud(cr, w * 0.44, h * 0.60, s * 0.82)
+    elif kind in ("fog", "rime"):
+        _sky_cloud(cr, w * 0.5, h * 0.36, s * 0.78)
+        r, g, b = (0.86, 0.93, 1.0) if kind == "rime" else (0.80, 0.82, 0.87)
+        cr.set_line_cap(1)
+        for y, x0, x1 in ((0.66, 0.16, 0.84), (0.79, 0.08, 0.76), (0.92, 0.24, 0.92)):  # (Omarchy's: staggered)
+            for lw, c in ((s * 0.11, (0, 0, 0, 0.3)), (s * 0.065, (r, g, b, 1))):
+                cr.set_line_width(lw)
+                cr.set_source_rgba(*c)
+                cr.move_to(w * x0, h * y)
+                cr.line_to(w * x1, h * y)
+                cr.stroke()
+    else:  # a cloud with something falling from it
+        dark = kind in ("thunder", "hail")
+        if kind == "showers" and not night:
+            _sky_sun(cr, w * 0.32, h * 0.30, s * 0.19)
+        top, bottom = ((0.62, 0.64, 0.72), (0.38, 0.40, 0.48)) if dark else ((0.99, 0.99, 1.0), (0.70, 0.74, 0.81))
+        _sky_cloud(cr, w * 0.5, h * 0.38, s * 0.86, top, bottom)
+        y = h * 0.66
+        if kind == "drizzle":
+            _sky_drops(cr, (w * 0.34, w * 0.52, w * 0.70), y, s * 0.14)
+        elif kind in ("rain", "showers"):
+            _sky_drops(cr, (w * 0.30, w * 0.46, w * 0.62, w * 0.78), y, s * 0.24)
+        elif kind == "freezing":
+            _sky_drops(cr, (w * 0.32, w * 0.66), y, s * 0.20, (0.70, 0.88, 1.0))
+            _sky_flake(cr, w * 0.49, y + s * 0.12, s * 0.09, (0.86, 0.95, 1.0))
+        elif kind == "snow":
+            for fx, fy in ((0.30, 0.0), (0.52, 0.12), (0.72, 0.0)):
+                _sky_flake(cr, w * fx, y + s * fy + s * 0.06, s * 0.09)
+        elif kind in ("thunder", "hail"):
+            _sky_bolt(cr, w * 0.42, h * 0.52, s * 0.44)
+            if kind == "hail":
+                for fx, fy in ((0.26, 0.10), (0.72, 0.04), (0.66, 0.22)):
+                    cr.arc(w * fx, y + s * fy, s * 0.045, 0, 2 * math.pi)
+                    cr.set_source_rgb(0.95, 0.97, 1.0)
+                    cr.fill()
+            else:
+                _sky_drops(cr, (w * 0.24, w * 0.74), y, s * 0.18)
+
+
 def moon_sky(lat: float, lon: float, t: float = None) -> dict:
     """The moon as seen from (lat, lon) now (low-precision ephemeris, good to a degree or so): how much of it is
     lit (k 0..1), its elongation from the sun (0 new, 90 first quarter, 180 full, 270 last quarter), the Czech
@@ -8572,54 +9071,17 @@ def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
     """What the weather view shows, pictures and numbers only: the sky (an emoji, or the moon drawn as it is
     there now on a clear night, a cloud over it when partly cloudy), the temperature, the day's lowest and highest
     (arrows), the humidity (a drop of glass, then the %)."""
-    sky = WMO.get(w["code"], ("🌡️", ""))[0]
+    kind = WMO.get(w["code"], ("cloudy", ""))[0]
     moon = moon_sky(lat, lon)
-    big = {"emoji": sky, "moon": None, "cloud": False}
-    if w["code"] in (45, 48):  # fog: drawn, grey bands of mist (the font's fog emoji is a pale blank square)
-        big = {"emoji": None, "moon": None, "cloud": False, "fog": "rime" if w["code"] == 48 else "fog"}
-    elif not w["day"]:
-        if w["code"] in (0, 1, 2):
-            big = {"emoji": None, "moon": moon, "cloud": w["code"] == 2}
-        elif w["code"] in (51, 53, 55, 80, 81):
-            big["emoji"] = "🌧️"
+    big = {"kind": kind, "night": not w["day"], "moon": None, "cloud": False}
+    if not w["day"] and w["code"] in (0, 1, 2):  # a clear night: the moon as it is, a cloud over it when partly
+        big = {"kind": None, "night": True, "moon": moon, "cloud": w["code"] == 2}
     t, lo, hi = round(w["temp"]), round(w["min"]), round(w["max"])
     temps = (f"<span foreground='{_temp_color(w['temp'])}'>{t}</span>  "  # (no ° or C: plainly temperatures)
              f"<span foreground='{_temp_color(w['min'])}'>↓{lo}</span> "
              f"<span foreground='{_temp_color(w['max'])}'>↑{hi}</span>")
     return {"sky": big, "temps": temps, "hum": f"<span foreground='#9fe2ff'>{round(w['hum'])} %</span>",
             "moon": moon, "place": place}
-
-
-def draw_fog(cr, w: float, h: float, rime: bool = False) -> None:
-    """Fog: soft, gently waving bands of grey mist, staggered, fading out at their ends; icy blue-white with rime
-    (freezing fog). A faint wide shadow under them, like the other pictures', so they show on a bright cover."""
-    bands = ((0.30, 0.06, 0.78), (0.45, 0.20, 0.98), (0.60, 0.02, 0.84), (0.75, 0.14, 0.92))  # y, from, to
-    thick = h * 0.062
-    r, g, b = (0.88, 0.94, 1.0) if rime else (0.82, 0.84, 0.88)
-    cr.set_line_cap(1)  # round
-
-    def wave(a, z, y, phase):
-        cr.move_to(a, y)
-        n = 3
-        for i in range(n):  # a slow wave along the band
-            x0, x1 = a + (z - a) * i / n, a + (z - a) * (i + 1) / n
-            dy = h * 0.022 * (1 if (i + phase) % 2 else -1)
-            cr.curve_to(x0 + (x1 - x0) / 3, y + dy, x0 + 2 * (x1 - x0) / 3, y + dy, x1, y)
-
-    for i, (y, x0, x1) in enumerate(bands):
-        y, a, z = y * h, x0 * w, x1 * w
-        for width, alpha in ((thick * 3.0, 0.07), (thick * 2.0, 0.10)):  # the shadow: soft, a little lower
-            wave(a + thick, z - thick, y + h * 0.02, i)
-            cr.set_line_width(width)
-            cr.set_source_rgba(0, 0, 0, alpha)
-            cr.stroke()
-        grad = cairo_linear(a, 0, z, 0)  # brightest in the middle, thinning out into nothing at both ends
-        for stop, alpha in ((0.0, 0.0), (0.25, 0.7), (0.5, 0.92), (0.75, 0.7), (1.0, 0.0)):
-            grad.add_color_stop_rgba(stop, r, g, b, alpha)
-        cr.set_source(grad)
-        cr.set_line_width(thick)
-        wave(a, z, y, i)
-        cr.stroke()
 
 
 class WeatherView(Gtk.Widget):
@@ -8691,11 +9153,7 @@ class WeatherView(Gtk.Widget):
         px = 100 * min(room / max(1, a_ink.width + b_ink.width), h * 0.82 / max(1, tall)) * 0.98
         a, b = self._layout(self.info["temps"], px), self._layout(self.info["hum"], px)
         self.sy = max(1.0, min(1.6, h * 0.82 / max(1, max(a[1].height, b[1].height))))
-        sky = None
-        if self.info["sky"]["emoji"]:
-            ink = self._layout(self.info["sky"]["emoji"], 100, "Noto Color Emoji")[1]
-            sky = self._layout(self.info["sky"]["emoji"],
-                               100 * 0.95 * icon / max(1, ink.width, ink.height), "Noto Color Emoji")
+        sky = None  # (drawn in do_snapshot)
         x_a = icon + gap
         x_d = x_a + a[1].width + gap
         x_b = x_d + drop * 0.72 + gap * 0.3
@@ -8707,12 +9165,8 @@ class WeatherView(Gtk.Widget):
         w, h = self.room
         if self.off:
             if self.hover and h >= 12:
-                lay, ink = self._layout("⛅", h * 0.8, "Noto Color Emoji")
                 snap.push_opacity(0.5)
-                snap.save()
-                snap.translate(Graphene.Point().init((h - ink.width) / 2 - ink.x, (h - ink.height) / 2 - ink.y))
-                snap.append_layout(lay, _rgba(255, 255, 255, 1))
-                snap.restore()
+                draw_sky(snap.append_cairo(Graphene.Rect().init(0, 0, h, h)), h, h, "partly")
                 snap.pop()
             return
         if not self.parts:
@@ -8722,12 +9176,6 @@ class WeatherView(Gtk.Widget):
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.9), -1, 2, 3
         snap.push_shadow([shadow])
-        if P["sky"]:
-            lay, ink = P["sky"]
-            snap.save()
-            snap.translate(Graphene.Point().init((icon - ink.width) / 2 - ink.x, (h - ink.height) / 2 - ink.y))
-            snap.append_layout(lay, _rgba(255, 255, 255, 1))
-            snap.restore()
         sy = getattr(self, "sy", 1.0)
         for key in ("a", "b"):
             (lay, ink), x = P[key]
@@ -8737,18 +9185,17 @@ class WeatherView(Gtk.Widget):
             snap.append_layout(lay, _rgba(255, 255, 255, 0.95))
             snap.restore()
         snap.pop()
-        if sky.get("fog"):
-            draw_fog(snap.append_cairo(Graphene.Rect().init(0, 0, icon, h)), icon, h, sky["fog"] == "rime")
+        if sky.get("kind"):
+            pad = (h - icon * 0.96) / 2
+            cr = snap.append_cairo(Graphene.Rect().init(0, 0, icon, h))
+            cr.translate(icon * 0.02, pad)
+            draw_sky(cr, icon * 0.96, icon * 0.96, sky["kind"], sky.get("night", False))
         if sky["moon"]:  # the moon as it is (a cloud over part of it when partly cloudy)
             cr = snap.append_cairo(Graphene.Rect().init(0, 0, icon, h))
             cr.translate(icon / 2, h / 2)
             draw_moon(cr, icon * 0.42, self.info["moon"])
-            if sky["cloud"]:
-                lay, ink = self._layout("☁️", icon * 0.55, "Noto Color Emoji")
-                snap.save()
-                snap.translate(Graphene.Point().init(icon * 0.45 - ink.x, h * 0.5 - ink.y))
-                snap.append_layout(lay, _rgba(255, 255, 255, 1))
-                snap.restore()
+            if sky["cloud"]:  # (a layer of its own: the moon's drawing turned its own)
+                _sky_cloud(snap.append_cairo(Graphene.Rect().init(0, 0, icon, h)), icon * 0.66, h * 0.70, icon * 0.56)
 
     def drop_rect(self):
         """Where the glass drop goes (x, y, w, h) in its coordinates: the window puts a DropGlass there."""
@@ -9035,7 +9482,8 @@ class SnowFall:
                 j = i // 2 if days else i
                 sea = nxt if j < round((self.SPRITES // (2 if days else 1)) * share) else season
             kind = rng.choice(SEASON_KINDS[sea])
-            color = _hex(rng.choice(SEASON_COLORS[sea]), rng.uniform(0.85, 0.97))
+            kind, _, own = kind.partition("#")  # (a calendar day's motif may bring its own colour)
+            color = _hex("#" + own if own else rng.choice(SEASON_COLORS[sea]), rng.uniform(0.85, 0.97))
             s = Gtk.Snapshot()
             s.scale(k, k)
             s.translate(Graphene.Point().init(box / 2, box / 2))
@@ -9045,22 +9493,13 @@ class SnowFall:
             near = Gsk.Shadow()  # (and a tighter one: the edge lit, not only a haze)
             near.color, near.dx, near.dy, near.radius = _rgba(255, 250, 235, 0.7), 0, 0, max(1.5, size * 0.03)
             s.push_shadow([glow, near])
-            if kind.startswith("emoji:"):  # a calendar day's picture: the emoji, colored, as big as a motif
-                lay = self.widget.create_pango_layout(kind[6:])
-                desc = Pango.FontDescription.from_string("Noto Color Emoji")
-                desc.set_absolute_size(size * 0.85 * Pango.SCALE)
-                lay.set_font_description(desc)
-                ink = lay.get_pixel_extents()[1]
-                s.translate(Graphene.Point().init(-ink.x - ink.width / 2, -ink.y - ink.height / 2))
-                s.append_layout(lay, _hex("#ffffff"))
-            else:
-                getattr(SeasonDecor, "_" + kind)(s, rng, size, color, sea)
+            getattr(SeasonDecor, "_" + kind)(s, rng, size, color, sea)
             s.pop()
             node = s.to_node()
             if node is None:
                 continue
             tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, box * k, box * k))
-            self.sprites.append((tex, box, kind in UPRIGHT or kind.startswith("emoji:")))
+            self.sprites.append((tex, box, kind in UPRIGHT))
 
     def _sow(self, base: float, anywhere: bool) -> dict:
         x, y, w, h = self.field
