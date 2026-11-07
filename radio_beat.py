@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.7"
+APP_VERSION = "0.31.8"
 
 import collections
 import ctypes
@@ -10210,10 +10210,29 @@ class SquarePic(Gtk.Widget):
     def get_paintable(self):
         return self.tex
 
+    nobody = False  # no photo at all: a drawn silhouette (head and shoulders) instead
+
     def do_measure(self, orientation, for_size):
         return self.px, self.px, -1, -1
 
     def do_snapshot(self, snap) -> None:
+        if self.tex is None and self.nobody:
+            px = self.px
+            rr = Gsk.RoundedRect()
+            rr.init_from_rect(Graphene.Rect().init(0, 0, px, px), self.radius)
+            snap.push_rounded_clip(rr)
+            snap.append_linear_gradient(Graphene.Rect().init(0, 0, px, px), Graphene.Point().init(0, 0),
+                                        Graphene.Point().init(0, px), [_stop(0.0, 96, 110, 130, 0.9),
+                                                                       _stop(1.0, 52, 60, 74, 0.9)])
+            head, body = Gsk.PathBuilder.new(), Gsk.PathBuilder.new()
+            head.add_circle(Graphene.Point().init(px / 2, px * 0.38), px * 0.18)
+            body.move_to(px * 0.14, px * 1.02)
+            body.cubic_to(px * 0.16, px * 0.66, px * 0.84, px * 0.66, px * 0.86, px * 1.02)
+            body.close()
+            for pb in (head, body):
+                snap.append_fill(pb.to_path(), Gsk.FillRule.WINDING, _rgba(205, 214, 226, 0.95))
+            snap.pop()
+            return
         if self.tex is None:
             return
         px = self.px
@@ -11754,8 +11773,8 @@ class Window(Adw.ApplicationWindow):
                 a.want_name_pic(p["img"])
                 pic.set_paintable(a.show_pics.get(p["img"]) or a.logo_tex)
                 self._names_pics.append((pic, p["img"]))
-            else:
-                pic.set_paintable(a.logo_tex)
+            else:  # no photo anywhere: a drawn silhouette, not the station's logo
+                pic.nobody = True
             row.append(frame)
             lines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
             name = Gtk.Label(label=f"<b>{GLib.markup_escape_text(p['name'])}</b>", use_markup=True, xalign=0,
