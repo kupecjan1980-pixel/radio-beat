@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.12"
+APP_VERSION = "0.31.13"
 
 import collections
 import ctypes
@@ -13812,7 +13812,25 @@ class App(Adw.Application):
             w.fullscreen()
         elif w:
             print("Rádio Beat: okno po startu přes celou obrazovku", file=sys.stderr)
+        if w and os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            threading.Thread(target=self._hypr_full, daemon=True).start()
         return False
+
+    def _hypr_full(self) -> None:
+        """Hyprland: GTK may think the window is in full screen while Hyprland keeps it tiled (seen after an update's
+        restart): asked of Hyprland itself, by this process's window, without moving anyone's workspace."""
+        try:
+            clients = json.loads(subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True,
+                                                timeout=5).stdout)
+            mine = next((c for c in clients if c.get("pid") == os.getpid()), None)
+            if not mine or mine.get("fullscreen"):
+                return
+            r = subprocess.run(["hyprctl", "dispatch", 'hl.dsp.window.fullscreen({ mode = "fullscreen", '
+                                f'window = "pid:{os.getpid()}" }})'], capture_output=True, text=True, timeout=5)
+            print(f"Rádio Beat: Hyprland ho měl jako dlaždici, přepnuto na celou obrazovku ({r.stdout.strip()})",
+                  file=sys.stderr)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
 
     def toggle_window(self):
         """The tray icon: brings the window up, or minimises it when it's up (like its taskbar button).
