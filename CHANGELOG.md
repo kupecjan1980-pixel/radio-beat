@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.30 — Jmeniny se slavnými nositeli, NPU
+
+- **0.30.0** (2026-11-07) Skleněné okno jmenin nad obalem (klik na jméno, nebo samo každou hodinu v :45 na 2 minuty): slavní nositelé jména z Wikidat, čeští první, s AI vylepšenými fotkami, jménem v české podobě (Saskie Burešová), čím byli a roky; posouvá se, když se nevejdou. NPU se hledá při každém spuštění a používá se, jakmile je k dispozici (zapnuto), s pojistkou: když selže, trvá přes 2 minuty nebo výsledek nesedí s originálem, dělá to GPU; po třech nezdarech za sebou až do dalšího spuštění GPU
+
 ## 0.29 — Vlastní kreslené obrázky místo emoji
 
 - **0.29.8** (2026-11-07) Nářečí jako nabídka v nastavení místo přepínače Ostravština: Míchat (výchozí, 50 % spisovně a po 10 % ostatní), Spisovně, Ostravsky, Brněnsky, Hanácky, Jihomoravsky, Pražsky

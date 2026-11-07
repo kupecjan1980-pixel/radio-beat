@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.29.8"
+APP_VERSION = "0.30.0"
 
 import collections
 import ctypes
@@ -2701,8 +2701,10 @@ class Enhancer:
         self.sizes: dict[str, list] = {}  # kind -> [original bytes, enhanced bytes or None while working]
         threading.Thread(target=self._trim, daemon=True).start()
         # NPU (testing, off unless switched on): AMD XDNA through ONNX Runtime's Vitis AI provider.
-        self.npu_wanted = False
-        self.npu_ready = False  # driver, runtime and a model all found
+        self.npu_wanted = True  # (the settings: use the NPU once it can be)
+        self.npu_found = False  # driver, runtime and a model all found (looked at on every start)
+        self.npu_ready = False  # found, wanted and not given up on
+        self.npu_fails = 0  # NPU results refused in a row (failed, too slow, not like the original): 3 and it rests
         self.npu_text = "Vypnuto"
         self.npu_model = None
         self.plock = threading.Lock()
@@ -2714,9 +2716,6 @@ class Enhancer:
     def npu_probe(self) -> None:
         """What the NPU path has and lacks (for the gear menu): the amdxdna driver, ONNX Runtime with the Vitis
         AI provider (AMD's XRT and Ryzen AI Software), and a model for it."""
-        if not self.npu_wanted:
-            self.npu_ready, self.npu_text = False, "Vypnuto: AI běží na GPU"
-            return
         drivers = {os.path.basename(os.path.realpath(d))
                    for d in glob.glob("/sys/class/accel/accel*/device/driver")}
         have_npu = "amdxdna" in drivers
@@ -2735,10 +2734,36 @@ class Enhancer:
                                 else "chybí (ONNX Runtime s Vitis AI: AMD XRT + Ryzen AI Software)"),
                  "model: " + (os.path.basename(self.npu_model) if self.npu_model else
                               f"žádný (ONNX model pro zvětšování sestavený pro NPU do {self.NPU_DIR})")]
-        self.npu_ready = have_npu and has_vai and bool(self.npu_model)
-        self.npu_text = " · ".join(parts) + (" — AI zvětšování zkusí nejdřív NPU" if self.npu_ready
-                                              else " — AI zůstává na GPU")
+        self.npu_found = have_npu and has_vai and bool(self.npu_model)
+        self.npu_ready = self.npu_found and self.npu_wanted
+        self.npu_fails = 0
+        self.npu_text = " · ".join(parts) + (" — AI zvětšování zkouší nejdřív NPU (s pojistkou: když selže, trvá "
+                                              "dlouho nebo výsledek nesedí, dělá to GPU)" if self.npu_ready
+                                              else " — vypnuto v nastavení, AI běží na GPU" if self.npu_found
+                                              else " — AI běží na GPU; zkontroluje se znovu při každém spuštění")
         print(f"enhancer: {self.npu_text}", file=sys.stderr)
+
+    NPU_SLOW = 120  # s for the NPU's AI step at most (the GPU does a cover in seconds to a minute): then the GPU
+    NPU_LIKE = 22.0  # mean difference (0-255) from the original at 24 px at most: else the NPU's result is refused
+
+    def _npu_refused(self, why: str) -> None:
+        self.npu_fails += 1
+        print(f"enhancer: NPU: {why} (the GPU does it; refused {self.npu_fails}x in a row)", file=sys.stderr)
+        if self.npu_fails >= 3:
+            self.npu_ready = False
+            self.npu_text += " · tři nezdary za sebou: do dalšího spuštění AI běží na GPU"
+
+    @staticmethod
+    def _like(a_path: str, b_path: str) -> float:
+        """How different two pictures look at 24 px (mean of 0-255): the NPU's result against its source."""
+        from gi.repository import GdkPixbuf
+
+        def tiny(path):
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 24, 24, False)
+            px, n, st = pb.get_pixels(), pb.get_n_channels(), pb.get_rowstride()
+            return [px[y * st + x * n + c] for y in range(24) for x in range(24) for c in range(3)]
+        a, b = tiny(a_path), tiny(b_path)
+        return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
 
     def _npu(self, src: str, out: str, work: str) -> bool:
         """The AI step on the NPU (npu_upscale.py): True when it ran there and gave a picture."""
@@ -2756,19 +2781,40 @@ class Enhancer:
             return False
         proc = self.proc = self._spawn(["nice", "-n", "19", "python3", os.path.join(HERE, "npu_upscale.py"),
                                         self.npu_model, raw_in, str(w), str(h), raw_out])
-        _, err = proc.communicate()
+        try:
+            _, err = proc.communicate(timeout=self.NPU_SLOW)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            self._reap(proc)
+            self._npu_refused(f"slower than {self.NPU_SLOW} s")
+            return False
         self._reap(proc)
         if self.proc is proc:
             self.proc = None
+        if proc.returncode < 0:  # stopped (a newer picture): not the NPU's fault
+            return False
         if proc.returncode != 0:
-            print(f"enhancer: NPU: {err.strip()[-200:] or proc.returncode} (the GPU does it)", file=sys.stderr)
+            self._npu_refused(err.strip()[-200:] or f"exit {proc.returncode}")
             return False
         n = round(math.sqrt(os.path.getsize(raw_out) / (w * h * 3))) if os.path.exists(raw_out) else 0
         if n < 1:
+            self._npu_refused("no picture")
             return False
         r = subprocess.run([self.ffmpeg, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s",
                             f"{w * n}x{h * n}", "-i", raw_out, out], capture_output=True)
-        return r.returncode == 0 and self._not_black(out)
+        if r.returncode != 0 or not self._not_black(out):
+            self._npu_refused("a black or broken picture")
+            return False
+        try:
+            off = self._like(src, out)
+        except (GLib.Error, TypeError):
+            off = 255.0
+        if off > self.NPU_LIKE:
+            self._npu_refused(f"not like the original (difference {off:.0f})")
+            return False
+        self.npu_fails = 0
+        return True
 
     SHARE = 0.92  # of the CPU / GPU time the enhancing may take; the rest stays free for the animations
 
@@ -2910,7 +2956,7 @@ class Enhancer:
         lines.append("• U každého kroku: jak dlouho trval, kde běžel, vytížení a takt GPU, příkon čipu (čidlo amdgpu: na APU "
                      "celý čip), kolik vláken CPU v průměru vytížil, na co čekal a kolik paměti jeho programy nejvíc zabraly "
                      "(RAM a na GPU VRAM + GTT, ze /proc)")
-        lines.append(f"• NPU (testování): {self.npu_text}")
+        lines.append(f"• NPU: {self.npu_text}")
         return "\n".join(lines)
 
     def _picture(self, text: str) -> None:
@@ -7047,6 +7093,70 @@ def day_cz(t=None) -> dict:
     return d
 
 
+# Famous people of the day's name (the name-day box): from Wikidata, Czech and Czechoslovak citizens first (by how
+# known they are: their Wikipedia articles), then the world's best known. Kept 30 days per name.
+NAMESAKES_FILE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "radio-beat",
+                              "namesakes.json")
+CZECH_STATES = ("Q213", "Q33946", "Q42585")  # Czech Republic, Czechoslovakia, Kingdom of Bohemia
+NAMESAKES_KEEP = 30 * 86400
+
+
+def name_forms(name: str) -> list[str]:
+    """A calendar name and the forms Wikidata may know it by ("Saskie" there is "Saskia")."""
+    out = [name]
+    if name.endswith("ie"):
+        out.append(name[:-2] + "ia")
+    return out
+
+
+def _wikidata(query: str, timeout: float = 45):
+    req = urllib.request.Request("https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(query),
+                                 headers={"User-Agent": MB_UA, "Accept": "application/sparql-results+json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)["results"]["bindings"]
+
+
+def namesakes(names: list[str]) -> list[dict]:
+    """[{name, desc, img, years, czech}] of famous people with one of the given names; OSError when Wikidata can't
+    be asked (asked again later)."""
+    forms = [f for n in names for f in name_forms(n)]
+    vals = " ".join(f'"{f}"@cs "{f}"@en' for f in forms)
+    found = _wikidata(f"""SELECT DISTINCT ?g WHERE {{ VALUES ?nm {{ {vals} }}
+        VALUES ?cls {{ wd:Q202444 wd:Q12308941 wd:Q11879590 wd:Q3409032 }} ?g rdfs:label ?nm ; wdt:P31 ?cls . }}""", 20)
+    gids = " ".join("wd:" + r["g"]["value"].rsplit("/", 1)[1] for r in found)
+    if not gids:
+        return []
+    cz = " ".join("wd:" + q for q in CZECH_STATES)
+    out, seen = [], set()
+    for czech, most in ((True, 14), (False, 10)):
+        only = f"VALUES ?st {{ {cz} }} ?p wdt:P27 ?st ." if czech else ""
+        rows = _wikidata(f"""SELECT ?p ?pLabel ?pDescription ?img ?birth ?death WHERE {{
+            {{ SELECT ?p ?links WHERE {{ VALUES ?g {{ {gids} }} ?p wdt:P735 ?g ; wdt:P31 wd:Q5 ;
+               wikibase:sitelinks ?links . {only} }} ORDER BY DESC(?links) LIMIT {most * 2} }}
+            OPTIONAL {{ ?p wdt:P18 ?img }} OPTIONAL {{ ?p wdt:P569 ?birth }} OPTIONAL {{ ?p wdt:P570 ?death }}
+            SERVICE wikibase:label {{ bd:serviceParam wikibase:language "cs,en". }} }} ORDER BY DESC(?links)""")
+        n = 0
+        for r in rows:
+            pid = r["p"]["value"]
+            if pid in seen or n >= most:
+                continue
+            seen.add(pid)
+            n += 1
+            year = lambda k: (re.match(r"[+-]?(\d{3,4})", r.get(k, {}).get("value", "")) or [None, None])[1]
+            born, died = year("birth"), year("death")
+            img = r.get("img", {}).get("value", "")
+            if img:
+                img = img.replace("http://", "https://") + "?width=400"
+            label = r["pLabel"]["value"]
+            for cal in names:  # the name as the Czech calendar has it ("Saskia Burešová" shown "Saskie Burešová")
+                for alt in name_forms(cal)[1:]:
+                    label = re.sub(rf"\b{re.escape(alt)}\b", cal, label)
+            out.append({"name": label, "desc": r.get("pDescription", {}).get("value", ""),
+                        "img": img, "czech": czech,
+                        "years": f"{born}–{died}" if born and died else f"* {born}" if born else ""})
+    return out
+
+
 def name_day() -> str:
     """Whose name day it is, in capitals: "FELIX", "BRONISLAV / BRONISLAVA"; "" when nobody's."""
     names = [n.strip() for n in day_cz().get("names", "").split(",") if n.strip()]
@@ -9791,6 +9901,38 @@ class FitText(Gtk.Widget):
         snap.pop()
 
 
+class SquarePic(Gtk.Widget):
+    """A photo in a square of a fixed size, cropped to fill it, with rounded corners: always that size, whatever
+    the photo's shape (a Gtk.Picture asks for its photo's own size)."""
+
+    def __init__(self, px: int, radius: float = 10.0, **kw):
+        super().__init__(**kw)
+        self.px, self.radius, self.tex = px, radius, None
+
+    def set_paintable(self, tex) -> None:
+        if tex is not self.tex:
+            self.tex = tex
+            self.queue_draw()
+
+    def get_paintable(self):
+        return self.tex
+
+    def do_measure(self, orientation, for_size):
+        return self.px, self.px, -1, -1
+
+    def do_snapshot(self, snap) -> None:
+        if self.tex is None:
+            return
+        px = self.px
+        w, h = self.tex.get_width(), self.tex.get_height()
+        k = max(px / max(1, w), px / max(1, h))
+        rr = Gsk.RoundedRect()
+        rr.init_from_rect(Graphene.Rect().init(0, 0, px, px), self.radius)
+        snap.push_rounded_clip(rr)
+        snap.append_texture(self.tex, Graphene.Rect().init((px - w * k) / 2, (px - h * k) / 2, w * k, h * k))
+        snap.pop()
+
+
 class NamesView(ClockView):
     """Whose name day it is ("FELIX", "BRONISLAV / BRONISLAVA"), one line in the clock's letters, as wide as its
     room: below the volume slider and the quality pill, above the screen's bottom edge."""
@@ -10812,9 +10954,9 @@ class Window(Adw.ApplicationWindow):
         overlay.add_overlay(self.status_view)
         # whose name day it is, below the volume slider and the quality pill (a click: the same as on the date)
         self.names = NamesView(halign=Gtk.Align.END, valign=Gtk.Align.END, visible=False)
-        click = Gtk.GestureClick()
+        click = Gtk.GestureClick()  # (the famous people of the name: their box opens and closes)
         click.connect("pressed", lambda g, n, *_: (g.set_state(Gtk.EventSequenceState.CLAIMED),
-                                                   n == 1 and app.set_look(fx_season=not EFFECTS["season"])))
+                                                   n == 1 and self.names_toggle()))
         self.names.add_controller(click)
         self.names.set_cursor(Gdk.Cursor.new_from_name("pointer"))
         overlay.add_overlay(self.names)
@@ -10838,7 +10980,30 @@ class Window(Adw.ApplicationWindow):
         self.day_pop.set_can_target(False)
         self.day_pop.set_parent(self.clock)
         self._day_on = None
-        for view in (self.clock, self.names):
+        # the name day's box: famous people of the name, over the cover like the day's box (a click on the names,
+        # and by itself once an hour); scrolls when they're more than fit
+        self.names_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=6, margin_bottom=6)
+        nglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
+        nglass.radius = 16.0
+        nglass.curve, nglass.wall, nglass.reach, nglass.shine = 3.0, 2.8, 0.9, True
+        nglass.edge_mirror = True
+        self.names_scroll = Gtk.ScrolledWindow(child=self.names_list, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                               vscrollbar_policy=Gtk.PolicyType.EXTERNAL, hexpand=True, vexpand=True)
+        nglass.append(self.names_scroll)
+        self.names_pop = Gtk.Popover(child=nglass, has_arrow=False, position=Gtk.PositionType.BOTTOM, autohide=False,
+                                     can_focus=False)
+        self.names_pop.add_css_class("glass-menu")
+        self.names_pop.set_parent(self.clock)
+        shut = Gtk.GestureClick()  # a click on it puts it away
+        shut.connect("pressed", lambda *_: self.names_pop.popdown())
+        nglass.add_controller(shut)
+        wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        wheel.connect("scroll", self._names_wheel)
+        nglass.add_controller(wheel)
+        self._names_pics: list = []  # (picture widget, its photo's address)
+        self._names_glide = None
+        self._names_hold = 0.0
+        for view in (self.clock,):
             m = Gtk.EventControllerMotion()
             m.connect("enter", lambda *_, v=view: self._day_hover(v, True))
             m.connect("leave", lambda *_, v=view: self._day_hover(v, False))
@@ -10916,9 +11081,9 @@ class Window(Adw.ApplicationWindow):
         self.share_row.set_active(self.app.settings.get("share", True))
         self.share_row.connect("notify::active", lambda r, _: self.app.set_share(r.get_active()))
         group.add(self.share_row)
-        self.npu_row = Adw.SwitchRow(title="Použít NPU (testování)", subtitle=self.app.enhancer.npu_text,
+        self.npu_row = Adw.SwitchRow(title="Používat NPU, až to půjde", subtitle=self.app.enhancer.npu_text,
                                      subtitle_lines=0)
-        self.npu_row.set_active(self.app.settings.get("npu", False))
+        self.npu_row.set_active(self.app.settings.get("npu", True))
         self.npu_row.connect("notify::active", lambda r, _: self.app.set_npu(r.get_active()))
         group.add(self.npu_row)
         group.add(self._choice_row("Nářečí", DIALECT_CHOICES, self.app.dialect(), self.app.set_dialect))
@@ -11210,6 +11375,152 @@ class Window(Adw.ApplicationWindow):
         self._day_show(self.clock)
         GLib.timeout_add_seconds(self.DAY_AUTO[1], lambda: (self._day_on or self.day_pop.popdown(), False)[1])
 
+    NAMES_AUTO = (45, 120)  # the name day's box by itself once an hour: at :45 (away from :00, :20 and :30), 2 min
+
+    def names_toggle(self) -> None:
+        if self.names_pop.get_visible():
+            self.names_pop.popdown()
+        else:
+            self.names_show()
+
+    def _names_auto(self) -> None:
+        if not hasattr(self, "quality_pop") or not hasattr(self, "_tour"):
+            return
+        if (not self.get_visible() or not self.names.get_visible() or self._tour is not None
+                or any(w.open for w in self.waters) or self._day_on or self.quality_pop.get_visible()
+                or self.names_pop.get_visible()):
+            return
+        self.names_show()
+        shown = self._names_shown = object()
+        GLib.timeout_add_seconds(self.NAMES_AUTO[1], lambda: (self._names_shown is shown and self.names_pop.popdown(),
+                                                             False)[1])
+
+    def _names_fill(self) -> None:
+        """The box's content: the name day in a red pill, then each famous person: photo, name, what they were,
+        their years (Czech ones first, as they come)."""
+        a = self.app
+        box = self.names_list
+        while (c := box.get_first_child()) is not None:
+            box.remove(c)
+        self._names_pics = []
+        f = 1.25 * max(1.0, self._scale)
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_scale_new(f))
+        head = Gtk.Label(label=GLib.markup_escape_text(a.cz(f"Jmeniny: {name_day().title() or 'nikdo'}")),
+                         use_markup=True, halign=Gtk.Align.START, attributes=attrs)
+        head.add_css_class("day-head")
+        box.append(head)
+        people = a.namesakes_today()
+        if people is None:
+            box.append(Gtk.Label(label=a.cz("Hledají se slavní nositelé jména…"), xalign=0, attributes=attrs))
+            return
+        if not people:
+            box.append(Gtk.Label(label=a.cz("Slavné nositele toho jména se najít nepodařilo."), xalign=0,
+                                 wrap=True, attributes=attrs))
+            return
+        px = round(TEXT_PT["pic"] * 1.15 * max(1.0, self._scale))
+        for p in people:
+            row = Gtk.Box(spacing=14)
+            pic = SquarePic(px, 10 * max(1.0, self._scale), valign=Gtk.Align.START)  # (each the same square)
+            frame = pic
+            if p["img"]:
+                a.want_show_pic(p["img"])
+                pic.set_paintable(a.show_pics.get(p["img"]) or a.logo_tex)
+                self._names_pics.append((pic, p["img"]))
+            else:
+                pic.set_paintable(a.logo_tex)
+            row.append(frame)
+            lines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
+            name = Gtk.Label(label=p["name"], xalign=0, wrap=True, attributes=attrs)
+            name.add_css_class("show-title")
+            lines.append(name)
+            for text in (a.cz(p["desc"]) if p["desc"] else "", p["years"]):
+                if text:
+                    lab = Gtk.Label(label=text, xalign=0, wrap=True, attributes=attrs)
+                    lab.add_css_class("show-sub")
+                    lines.append(lab)
+            row.append(lines)
+            box.append(row)
+
+    def names_pics(self) -> None:
+        """The photos as they come (and come back AI-enhanced)."""
+        for pic, url in self._names_pics:
+            tex = self.app.show_pics.get(url)
+            if tex is not None and pic.get_paintable() is not tex:
+                pic.set_paintable(tex)
+
+    def names_refresh(self) -> None:
+        if self.names_pop.get_visible():
+            self._names_fill()
+
+    def names_show(self) -> None:
+        """Shown over the cover like the day's box (beside the names when there's no cover)."""
+        self.day_pop.popdown()
+        self._names_fill()
+        glass = self.names_pop.get_child()
+        area = self._day_area()
+        if area:
+            x, y, w, h = (round(v) for v in area)
+            glass.set_size_request(w, h)
+            glass.radius = 28 * max(1.0, self._scale)
+            r = int(glass.radius)
+            for setm in (self.names_scroll.set_margin_top, self.names_scroll.set_margin_bottom,
+                         self.names_scroll.set_margin_start, self.names_scroll.set_margin_end):
+                setm(r)
+            self.names_scroll.set_size_request(w - 2 * r, h - 2 * r)
+            self.names_pop.set_position(Gtk.PositionType.BOTTOM)
+            ok, at = self.compute_point(self.clock, Graphene.Point().init(x, y))
+            if ok:
+                rect = Gdk.Rectangle()
+                rect.x, rect.y, rect.width, rect.height = round(at.x), round(at.y) - 1, w, 1
+                self.names_pop.set_pointing_to(rect)
+        else:
+            glass.set_size_request(480, 420)
+            self.names_scroll.set_size_request(440, 380)
+            self.names_pop.set_position(Gtk.PositionType.LEFT)
+            ok, b = self.names.compute_bounds(self.clock)
+            if ok:
+                rect = Gdk.Rectangle()
+                rect.x, rect.y, rect.width, rect.height = round(b.get_x()) - 12, round(b.get_y()), 1, 1
+                self.names_pop.set_pointing_to(rect)
+        self.names_scroll.get_vadjustment().set_value(0)
+        glass.fresh()
+        if not area:
+            self.names_pop.set_offset(0, 0)
+        self.names_pop.popup()
+        GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
+        if area:
+            GLib.idle_add(self._day_true, area, self.names_pop)
+        if self._names_glide is None:
+            self._names_glide = GLib.timeout_add(40, self._names_glide_step, [time.monotonic(), 1])
+
+    NAMES_SPEED = 28  # px a second (at scale 1) while it glides through the people who don't fit
+    NAMES_PAUSE = 4.0  # s at the top and at the bottom
+
+    def _names_glide_step(self, st) -> bool:
+        """Down slowly to the end, a pause, back up, a pause, while the box is open (a turn of the wheel holds it
+        a while)."""
+        if not self.names_pop.get_visible():
+            self._names_glide = None
+            return GLib.SOURCE_REMOVE
+        adj = self.names_scroll.get_vadjustment()
+        room = adj.get_upper() - adj.get_page_size()
+        now = time.monotonic()
+        if room <= 1 or now < self._names_hold or now - st[0] < self.NAMES_PAUSE:
+            return GLib.SOURCE_CONTINUE
+        v = adj.get_value() + st[1] * self.NAMES_SPEED * max(1.0, self._scale) * 0.04
+        if v >= room or v <= 0:
+            v = min(max(v, 0), room)
+            st[0], st[1] = now, -st[1]
+        adj.set_value(v)
+        return GLib.SOURCE_CONTINUE
+
+    def _names_wheel(self, _ctl, _dx, dy) -> bool:
+        adj = self.names_scroll.get_vadjustment()
+        adj.set_value(adj.get_value() + dy * 60)
+        self._names_hold = time.monotonic() + 8
+        return True
+
     DAY_GAP = 18  # the day's box keeps this far inside the cover's edges and above the slider
 
     def _day_area(self):
@@ -11332,19 +11643,20 @@ class Window(Adw.ApplicationWindow):
         if area:
             GLib.idle_add(self._day_true, area)
 
-    def _day_true(self, area) -> bool:
+    def _day_true(self, area, pop=None) -> bool:
         """The popover puts its box a few px off where it was pointed (a gap of its own, the theme's): measured
         once shown and moved by that, so it keeps exactly the gaps from the cover's edges and the slider."""
-        glass, content = self.day_pop.get_child(), self.get_content()
-        ok, p = glass._where(content) if content and self.day_pop.get_visible() else (False, None)
+        pop = pop or self.day_pop
+        glass, content = pop.get_child(), self.get_content()
+        ok, p = glass._where(content) if content and pop.get_visible() else (False, None)
         ok_c, cp = content.compute_point(glass.win, Graphene.Point().init(0, 0)) if ok else (False, None)
         if not ok_c:
             return False
         dx, dy = round(area[0] - (cp.x - p.x)), round(area[1] - (cp.y - p.y))
         if dx or dy:
-            ox, oy = self.day_pop.get_offset()
-            self.day_pop.set_offset(ox + dx, oy + dy)
-            self.day_pop.present()
+            ox, oy = pop.get_offset()
+            pop.set_offset(ox + dx, oy + dy)
+            pop.present()
             glass.fresh()
             glass.queue_draw()
         return False
@@ -11389,6 +11701,9 @@ class Window(Adw.ApplicationWindow):
         if now.tm_min == self.DAY_AUTO[0] and getattr(self, "_day_auto_hour", None) != hour:
             self._day_auto_hour = hour
             self._day_auto()
+        if now.tm_min == self.NAMES_AUTO[0] and getattr(self, "_names_auto_hour", None) != hour:
+            self._names_auto_hour = hour
+            self._names_auto()
         return GLib.SOURCE_CONTINUE
 
     def _place_clock(self) -> bool:
@@ -12708,10 +13023,11 @@ class App(Adw.Application):
         self.share.hub_url = self.settings.get("hub_url", "")
         self.db.on_play = lambda: GLib.idle_add(lambda: (self.win and self.win.played_new(), False)[1])
         self.share.set_on(self.settings.get("share", True))
-        if self.settings.get("npu", False):
-            self.enhancer.npu_wanted = True
-            threading.Thread(target=lambda: (self.enhancer.npu_probe(), GLib.idle_add(self._npu_checked)),
-                             daemon=True).start()
+        # the NPU looked for on every start (a driver, a runtime or a model may have come since); used when there,
+        # unless switched off
+        self.enhancer.npu_wanted = self.settings.get("npu", True)
+        threading.Thread(target=lambda: (self.enhancer.npu_probe(), GLib.idle_add(self._npu_checked)),
+                         daemon=True).start()
         self.card = CardVolume(self._card_changed)
         self._holds = 0  # animations running: the enhancing waits while any is
         self._frame_tick_id = None  # their frames timed meanwhile (the gear notes: Animations)
@@ -13543,6 +13859,60 @@ class App(Adw.Application):
             time.sleep(0.4)
         self._art_busy = False
 
+    def namesakes_today(self) -> list | None:
+        """Famous people of today's name (None: still being looked up)."""
+        names = [n.strip() for n in day_cz().get("names", "").split(",") if n.strip()]
+        key = "|".join(names)
+        if not key:
+            return []
+        got = getattr(self, "_namesakes", {}).get(key)
+        if got is not None:
+            return got
+        self.want_namesakes(names, key)
+        return None
+
+    def want_namesakes(self, names: list, key: str) -> None:
+        if not hasattr(self, "_namesakes"):
+            self._namesakes = {}
+            try:
+                with open(NAMESAKES_FILE) as f:
+                    keep = json.load(f)
+                self._namesakes_file = {k: v for k, v in keep.items() if time.time() - v.get("at", 0) < NAMESAKES_KEEP}
+            except (OSError, ValueError, AttributeError):
+                self._namesakes_file = {}
+        if key in self._namesakes_file:
+            self._namesakes[key] = self._namesakes_file[key]["people"]
+            return
+        if getattr(self, "_namesakes_busy", None) == key:
+            return
+        self._namesakes_busy = key
+
+        def work():
+            try:
+                people = namesakes(names)
+            except (OSError, ValueError, KeyError) as e:
+                print(f"Rádio Beat: slavní nositelé jména {key}: {e}", file=sys.stderr)
+                people = None
+            GLib.idle_add(self._namesakes_done, key, people)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _namesakes_done(self, key, people):
+        self._namesakes_busy = None
+        if people is None:  # not reached: asked again when the box opens next
+            return False
+        self._namesakes[key] = people
+        self._namesakes_file[key] = {"at": time.time(), "people": people}
+        try:
+            os.makedirs(os.path.dirname(NAMESAKES_FILE), exist_ok=True)
+            with open(NAMESAKES_FILE + ".part", "w") as f:
+                json.dump(self._namesakes_file, f, ensure_ascii=False)
+            os.replace(NAMESAKES_FILE + ".part", NAMESAKES_FILE)
+        except OSError:
+            pass
+        if self.win:
+            self.win.names_refresh()
+        return False
+
     def want_show_pic(self, url: str) -> None:
         """A show's picture for the 'i' puddle's lineup: fetched once; the puddle fills it in."""
         if url and url not in self.show_pics:
@@ -13561,6 +13931,8 @@ class App(Adw.Application):
         self.update()
         if self.win and self.win.puddle_open:
             self.win.puddle_pics()
+        if self.win and self.win.names_pop.get_visible():
+            self.win.names_pics()
         return False
 
     def _enhance_small(self, url: str, data: bytes) -> None:
@@ -13588,6 +13960,8 @@ class App(Adw.Application):
                 return
             if self.win and self.win.puddle_open:
                 self.win.puddle_pics()
+            if self.win and self.win.names_pop.get_visible():  # (the name day's famous people too)
+                self.win.names_pics()
         self.enhancer.request(f"pic:{url}", url, data, (w, h), size, done, screen=px)
 
     def enhance_small_full(self) -> None:
@@ -14086,7 +14460,7 @@ class App(Adw.Application):
         return (max(size[0], SHARE_SCREEN[0]), max(size[1], SHARE_SCREEN[1])) if size else None
 
     def set_npu(self, on: bool) -> None:
-        """AI upscaling on the NPU first (testing): checks what's there, says so in the menu."""
+        """The NPU used once it can be (with the GPU behind it): checks what's there, says so in the menu."""
         self.settings["npu"] = on
         save_settings(self.settings)
         self.enhancer.npu_wanted = on
