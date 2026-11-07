@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.5"
+APP_VERSION = "0.31.6"
 
 import collections
 import ctypes
@@ -7353,6 +7353,24 @@ def article_picture(articles: list[str]) -> str:
     return ""
 
 
+def commons_picture(name: str) -> str:
+    """A photo on Wikimedia Commons whose file name has the person's whole name (a free one), 400 px; ''."""
+    if len(name.split()) < 2:
+        return ""
+    try:
+        hits = _wiki("https://commons.wikimedia.org/w/api.php?action=query&list=search&srnamespace=6&format=json"
+                     f"&srlimit=5&srsearch={urllib.parse.quote(chr(34) + name + chr(34))}")["query"]["search"]
+    except (OSError, ValueError, KeyError):
+        return ""
+    want = norm(name)
+    for h in hits:
+        title = h["title"]
+        if re.search(r"\.(jpe?g|png)$", title, re.I) and want in norm(title):
+            return ("https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote(title[5:])
+                    + "?width=400")
+    return ""
+
+
 def _wikidata(query: str, timeout: float = 45):
     req = urllib.request.Request("https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(query),
                                  headers={"User-Agent": MB_UA, "Accept": "application/sparql-results+json"})
@@ -7396,8 +7414,9 @@ def namesakes(names: list[str]) -> list[dict]:
             img = r.get("img", {}).get("value", "")
             if img:
                 img = img.replace("http://", "https://") + "?width=400"
-            else:  # no photo on Wikidata: their Wikipedia article's picture, if one has it (Saskia Reeves)
-                img = article_picture([r[k]["value"] for k in ("en", "cs", "de") if k in r])
+            else:  # no photo on Wikidata: their Wikipedia article's picture, else a Commons photo named after them
+                img = (article_picture([r[k]["value"] for k in ("en", "cs", "de") if k in r])
+                       or commons_picture(r["pLabel"]["value"]))
             label = r["pLabel"]["value"]
             for cal in names:  # the name as the Czech calendar has it ("Saskia Burešová" shown "Saskie Burešová")
                 for alt in name_forms(cal)[1:]:
