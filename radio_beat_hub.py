@@ -92,11 +92,18 @@ class Hub:
 
     def put_shot(self, who: str, data: bytes) -> int:
         """A picture of a computer's Rádio Beat window (its own window only), beside its log: logs/<who>.jpg."""
-        if not (data[:3] == b"\xff\xd8\xff" and data[-2:] == b"\xff\xd9"):
+        if data[:3] == b"\xff\xd8\xff" and data[-2:] == b"\xff\xd9":
+            ext = ".jpg"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            ext = ".png"  # (where the JPEG encoder isn't at hand: Bazzite's sandboxed image loaders)
+        else:
             return 400
         folder = os.path.join(os.path.dirname(self.dir), "logs")
         os.makedirs(folder, exist_ok=True)
-        path = os.path.join(folder, who + ".jpg")
+        for old in (".jpg", ".png"):
+            if old != ext and os.path.exists(os.path.join(folder, who + old)):
+                os.remove(os.path.join(folder, who + old))
+        path = os.path.join(folder, who + ext)
         with open(path + ".part", "wb") as f:
             f.write(data)
         os.replace(path + ".part", path)

@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.7** (2026-11-07) Fotky herců z TMDB (vlastní klíč TMDB v nastavení); obrázek okna pro sdílený server i tam, kde nejde JPEG (Bazzite: posílá se PNG)
 - **0.31.6** (2026-11-07) Fotka slavného nositele se hledá i na Wikimedia Commons podle celého jména
 - **0.31.5** (2026-11-07) Okno, které má být přes celou obrazovku, si to po startu ověří a případně o to požádá znovu
 - **0.31.4** (2026-11-07) Slavní nositelé bez fotky na Wikidatech dostanou obrázek z článku na Wikipedii, je-li tam; otevřením panelu ⓘ nebo nastavení se zavře okno, které se ukázalo samo (jmeniny, skladba, den), aby panel nebyl pod ním

@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.6"
+APP_VERSION = "0.31.7"
 
 import collections
 import ctypes
@@ -7353,6 +7353,27 @@ def article_picture(articles: list[str]) -> str:
     return ""
 
 
+TMDB_KEY = ""  # the user's own TMDB API key (v3) or read access token (v4), from the settings ("tmdb_key")
+
+
+def tmdb_picture(tmdb_id: str) -> str:
+    """A person's profile photo from TMDB (The Movie Database: actors, directors) by their TMDB id; '' without a
+    key or a photo. TMDB's terms ask for credit: given in the settings' row."""
+    if not (TMDB_KEY and tmdb_id):
+        return ""
+    v4 = len(TMDB_KEY) > 40  # (a read access token is a long JWT; a v3 key is 32 hex)
+    url = f"https://api.themoviedb.org/3/person/{urllib.parse.quote(tmdb_id)}" + ("" if v4 else f"?api_key={TMDB_KEY}")
+    headers = {"User-Agent": MB_UA, "Accept": "application/json"}
+    if v4:
+        headers["Authorization"] = f"Bearer {TMDB_KEY}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as r:
+            path = json.load(r).get("profile_path") or ""
+    except (OSError, ValueError):
+        return ""
+    return f"https://image.tmdb.org/t/p/w300{path}" if path else ""
+
+
 def commons_picture(name: str) -> str:
     """A photo on Wikimedia Commons whose file name has the person's whole name (a free one), 400 px; ''."""
     if len(name.split()) < 2:
@@ -7394,13 +7415,14 @@ def namesakes(names: list[str]) -> list[dict]:
     out, seen = [], set()
     for czech, most in ((True, 14), (False, 10)):
         only = f"VALUES ?st {{ {cz} }} ?p wdt:P27 ?st ." if czech else ""
-        rows = _wikidata(f"""SELECT ?p ?pLabel ?pDescription ?img ?birth ?death ?en ?cs ?de WHERE {{
+        rows = _wikidata(f"""SELECT ?p ?pLabel ?pDescription ?img ?birth ?death ?en ?cs ?de ?tmdb WHERE {{
             {{ SELECT ?p ?links WHERE {{ VALUES ?g {{ {gids} }} ?p wdt:P735 ?g ; wdt:P31 wd:Q5 ;
                wikibase:sitelinks ?links . {only} }} ORDER BY DESC(?links) LIMIT {most * 3} }}
             OPTIONAL {{ ?p wdt:P18 ?img }} OPTIONAL {{ ?p wdt:P569 ?birth }} OPTIONAL {{ ?p wdt:P570 ?death }}
             OPTIONAL {{ ?en schema:about ?p ; schema:isPartOf <https://en.wikipedia.org/> }}
             OPTIONAL {{ ?cs schema:about ?p ; schema:isPartOf <https://cs.wikipedia.org/> }}
             OPTIONAL {{ ?de schema:about ?p ; schema:isPartOf <https://de.wikipedia.org/> }}
+            OPTIONAL {{ ?p wdt:P4985 ?tmdb }}
             SERVICE wikibase:label {{ bd:serviceParam wikibase:language "cs,en". }} }} ORDER BY DESC(?links)""")
         n = 0
         for r in rows:
@@ -7416,7 +7438,8 @@ def namesakes(names: list[str]) -> list[dict]:
                 img = img.replace("http://", "https://") + "?width=400"
             else:  # no photo on Wikidata: their Wikipedia article's picture, else a Commons photo named after them
                 img = (article_picture([r[k]["value"] for k in ("en", "cs", "de") if k in r])
-                       or commons_picture(r["pLabel"]["value"]))
+                       or commons_picture(r["pLabel"]["value"])
+                       or tmdb_picture(r.get("tmdb", {}).get("value", "")))  # (actors: TMDB, with a key)
             label = r["pLabel"]["value"]
             for cal in names:  # the name as the Czech calendar has it ("Saskia Burešová" shown "Saskie Burešová")
                 for alt in name_forms(cal)[1:]:
@@ -11423,6 +11446,10 @@ class Window(Adw.ApplicationWindow):
         self.weather_row.connect("notify::active", lambda r, _: self.app.set_weather(on=r.get_active()))
         group.add(self.weather_row)
         group.add(self._weather_place_row())
+        tmdb = Adw.EntryRow(title="Klíč TMDB pro fotky herců (The Movie Database, zdarma po registraci)",
+                            text=self.app.settings.get("tmdb_key", ""), show_apply_button=True)
+        tmdb.connect("apply", lambda r: self.app.set_tmdb_key(r.get_text().strip()))
+        group.add(tmdb)
         self.moon_row = Adw.SwitchRow(title="Měsíc vlevo od tlačítka ⓘ", subtitle_lines=0,
                                       subtitle="Jak je teď vidět z vybraného místa, šipka a jeho příští fáze s datem. "
                                                "Vypne i zapne se také klepnutím přímo na něj")
@@ -13444,6 +13471,8 @@ class App(Adw.Application):
         self.enhancer.fix_level = self.settings.get("ai_fix", "strong")
         self.share = CacheShare(self.enhancer, self._share_changed, self.db)
         self.share.screenshot = self.window_shot
+        global TMDB_KEY
+        TMDB_KEY = self.settings.get("tmdb_key", "")
         self.share.hub_url = self.settings.get("hub_url", "")
         self.db.on_play = lambda: GLib.idle_add(lambda: (self.win and self.win.played_new(), False)[1])
         self.share.set_on(self.settings.get("share", True))
@@ -14315,11 +14344,17 @@ class App(Adw.Application):
                 if node is None:
                     return None
                 tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, round(w * k), round(h * k)))
-                loader = GdkPixbuf.PixbufLoader()
-                loader.write(tex.save_to_png_bytes().get_data())
-                loader.close()
-                ok, jpg = loader.get_pixbuf().save_to_bufferv("jpeg", ["quality"], ["90"])
-                return bytes(jpg) if ok else None
+                png = tex.save_to_png_bytes().get_data()
+                try:  # a JPEG is a fifth of the size; where the image loaders are sandboxed (Bazzite's glycin) the
+                    loader = GdkPixbuf.PixbufLoader()  # encoder fails: the PNG as it is
+                    loader.write(png)
+                    loader.close()
+                    ok, jpg = loader.get_pixbuf().save_to_bufferv("jpeg", ["quality"], ["90"])
+                    if ok:
+                        return bytes(jpg)
+                except Exception:
+                    pass
+                return bytes(png)
             except Exception as e:
                 print(f"Rádio Beat: obrázek okna: {e}", file=sys.stderr)
                 return None
@@ -14336,6 +14371,18 @@ class App(Adw.Application):
             self.want_namesakes(names, key)  # (from the file at once when it's there)
             got = self._namesakes.get(key)
         return got
+
+    def set_tmdb_key(self, key: str) -> None:
+        """The user's TMDB key: actors without a free photo get their TMDB profile photo; the days ahead looked up
+        again for it."""
+        global TMDB_KEY
+        self.settings["tmdb_key"] = key
+        save_settings(self.settings)
+        TMDB_KEY = key
+        if hasattr(self, "_namesakes_file"):
+            self._namesakes_file = {k: v for k, v in self._namesakes_file.items() if v.get("tmdb") == bool(key)}
+            self._namesakes = {}
+        threading.Thread(target=self._names_ahead_round, daemon=True).start()
 
     def name_meaning_today(self) -> str:
         """Where today's name(s) come from (kept; looked up in the background when not yet)."""
@@ -14451,7 +14498,7 @@ class App(Adw.Application):
         if people is None:  # not reached: asked again when the box opens next
             return False
         self._namesakes[key] = people
-        self._namesakes_file[key] = {"at": time.time(), "people": people, "v": 3}
+        self._namesakes_file[key] = {"at": time.time(), "people": people, "v": 3, "tmdb": bool(TMDB_KEY)}
         try:
             os.makedirs(os.path.dirname(NAMESAKES_FILE), exist_ok=True)
             with open(NAMESAKES_FILE + ".part", "w") as f:
@@ -14602,6 +14649,9 @@ class App(Adw.Application):
         text = self.enhancer.notes()
         if self.bg_text:
             text += f"\n• Staré obaly na pozadí, když je GPU volná: {self.bg_text}"
+        if TMDB_KEY:  # (TMDB's terms: credit where its photos are used)
+            text += ("\n• Fotky herců bez volné fotky: TMDB. This product uses the TMDB API but is not endorsed or "
+                     "certified by TMDB.")
         text += f"\n• Paměť celé aplikace: {app_memory()}"
         if self.win:
             GLib.idle_add(lambda: (self.win.refresh_effects(), False)[1])  # the animations' result is on its switch
