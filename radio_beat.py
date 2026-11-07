@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.14"
+APP_VERSION = "0.31.15"
 
 import collections
 import ctypes
@@ -11829,8 +11829,14 @@ class Window(Adw.ApplicationWindow):
         full = self.is_fullscreen()
         (self.add_css_class if full else self.remove_css_class)("full")
 
+    COMPACT_W, COMPACT_H = 1000, 640  # a window smaller than this, not in full screen (KDE's above the tray): compact
+
     def do_size_allocate(self, width, height, baseline):
         Adw.ApplicationWindow.do_size_allocate(self, width, height, baseline)
+        compact = not self.is_fullscreen() and (width < self.COMPACT_W or height < self.COMPACT_H)
+        if compact != getattr(self, "compact", False):
+            self.compact = compact
+            GLib.idle_add(self._apply_compact)
         f = round(max(1.0, min(width / BASE_SIZE[0], height / BASE_SIZE[1])), 2)  # the fit sizes the song info only
         if f != self._scale:
             self._scale, self._scale_pending = f, True
@@ -11955,6 +11961,8 @@ class Window(Adw.ApplicationWindow):
 
     def names_show(self) -> None:
         """Shown over the cover like the day's box (beside the names when there's no cover)."""
+        if self.compact:
+            return
         self.day_pop.popdown()
         area = self._day_area()
         if area and getattr(self, "_day_text_f", None) is None:  # (the day's box's text size, worked out once)
@@ -12056,6 +12064,8 @@ class Window(Adw.ApplicationWindow):
 
     def song_show(self) -> None:
         """Over the cover like the day's box."""
+        if self.compact:
+            return
         area = self._day_area()
         if not area:
             return
@@ -12214,6 +12224,8 @@ class Window(Adw.ApplicationWindow):
         self.day_text.set_margin_end(lr)
 
     def _day_show(self, view) -> None:
+        if self.compact:
+            return
         self._day_fill()
         area = self._day_area()
         glass = self.day_pop.get_child()
@@ -12278,6 +12290,9 @@ class Window(Adw.ApplicationWindow):
         return False
 
     def _place_status(self, top: float = None, stop: float = None) -> None:
+        if self.compact:
+            self.status_view.set_visible(False)
+            return
         """The status under the volume slider (below its knob, `top`), centred on it, from its start to its end
         or to `stop` (where the names begin), as big as fits, touching nothing."""
         sv, H = self.status_view, self.get_height()
@@ -12322,7 +12337,32 @@ class Window(Adw.ApplicationWindow):
             self._names_auto()
         return GLib.SOURCE_CONTINUE
 
+    compact = False
+
+    def _apply_compact(self) -> bool:
+        """The small window (above the tray): only the cover and the song's lines, fitting it. No glass menus, no
+        weather, moon, date, names or controls, no boxes popping up; all back in full screen or a big window."""
+        c = self.compact
+        for w in (getattr(self, "gear_tile", None), getattr(self, "info_tile", None), getattr(self, "controls", None)):
+            if w is not None:
+                w.set_visible(not c)
+        if c:
+            for w in self.waters:
+                w.hide()
+            for pop in (self.day_pop, self.names_pop, self.song_pop):
+                pop.popdown()
+            for v in (self.clock, self.names, self.weather_view, self.weather_drop, self.moon_view, self.status_view):
+                v.set_visible(False)
+        else:
+            self._place_clock()
+            self._place_weather()
+            self._place_moon()
+        GLib.idle_add(self._fit_info)
+        return False
+
     def _place_clock(self) -> bool:
+        if self.compact:
+            return False
         cover, W, H = self.cover_rect(), self.get_width(), self.get_height()
         # the falling motifs: right of the cover, the window's whole height
         left = cover[2] if cover else W
@@ -12554,7 +12594,7 @@ class Window(Adw.ApplicationWindow):
         """Right of the logo, as tall as it (a little more if there's room above the song info), up to the
         cover's left edge: never over the cover, the song info below or the screen's top edge."""
         view = getattr(self, "weather_view", None)
-        if view is None:
+        if view is None or self.compact:
             return
         cover, W = self.cover_rect(), self.get_width()
         ok_l, lb = self.logo.compute_bounds(self)
@@ -12570,7 +12610,11 @@ class Window(Adw.ApplicationWindow):
         right = (cover[0] - self.INFO_GAP) if cover else W * 0.45
         # the logo's band and a little more: the song info starts below the header the logo is in (its box may
         # start higher than its letters: not the limit, or there'd be no room at all)
-        h = lb.get_height() * 1.2
+        # as tall as a share of the window (the same look on a 4K desktop and a handheld: the logo's size varies),
+        # at least the logo's band, never down into the song's lines
+        ok_i, ib = self.info.compute_bounds(self)
+        band = (ib.get_y() - y0 - 4) if ok_i and ib.get_y() > y0 else lb.get_height() * 1.2
+        h = min(max(lb.get_height() * 1.2, self.get_height() * self.SKY_SHARE), max(band, lb.get_height() * 1.2))
         w = right - x0
         if w < 90 or h < 16:
             view.set_visible(False)
@@ -12590,11 +12634,13 @@ class Window(Adw.ApplicationWindow):
             drop.set_size_request(max(4, int(r[2])), max(4, int(r[3])))
         drop.set_visible(bool(r))
 
+    SKY_SHARE = 0.075  # the weather's and the moon's height: this much of the window's (the same on every screen)
+
     def _place_moon(self) -> None:
         """Left of the 'i' button, as tall as the logo's band, from the cover's right edge (a gap) to the button:
         never over the cover, the date below or the screen's top edge."""
         view = getattr(self, "moon_view", None)
-        if view is None:
+        if view is None or self.compact:
             return
         cover = self.cover_rect()
         tiles = [t for t in self.head_glass if t.get_mapped()]
@@ -12605,7 +12651,10 @@ class Window(Adw.ApplicationWindow):
             view.set_visible(False)
             return
         btn = min(boxes, key=lambda b: b.get_x())
-        h = min(lb.get_height() * 1.2, btn.get_height() * 1.1)
+        # the weather's height (a share of the window), the date below it the limit
+        ok_c, cb = self.clock.compute_bounds(self) if self.clock.get_visible() else (False, None)
+        floor = (cb.get_y() - 4) if ok_c and cb.get_y() > btn.get_y() else btn.get_y() + btn.get_height() * 1.6
+        h = min(max(lb.get_height() * 1.2, self.get_height() * self.SKY_SHARE), floor - max(6.0, btn.get_y()))
         y0 = max(6.0, btn.get_y() + (btn.get_height() - h) / 2)
         left = (cover[2] + self.INFO_GAP) if cover else self.get_width() * 0.55
         x1 = btn.get_x() - self.WEATHER_GAP
@@ -13837,11 +13886,7 @@ class App(Adw.Application):
         Wayland doesn't tell an app it's minimised: the app remembers it did it, until the window is active again."""
         w = self.win
         if w and w.get_visible() and not w.minimised and w.is_active():
-            if is_kde():
-                w.minimised = True
-                w.minimize()
-            else:
-                w.set_visible(False)  # not every desktop minimises (Hyprland): to the tray
+            w.set_visible(False)  # to the tray (not minimised: KDE flew it to the taskbar button at the left and back)
         else:
             self.show_window()
             if w and w.is_fullscreen():  # always a window in the bottom-right corner (KWin's script places it)

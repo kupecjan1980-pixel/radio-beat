@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.15** (2026-11-07) Malé okno (nad oznamovací oblastí v KDE) jen s obalem a údaji o skladbě: bez skleněných nabídek, počasí, Měsíce, data a ovládání; ikona v oznamovací oblasti okno skryje a ukáže (už nelétá přes levý okraj); počasí a Měsíc stejně velké na každé obrazovce (podíl výšky okna)
 - **0.31.14** (2026-11-07) „Den bizonů v USA“ místo „Národní den bizonů“
 - **0.31.13** (2026-11-07) Na Hyprlandu si okno po startu ověří celou obrazovku přímo u Hyprlandu (GTK si myslelo, že je, Hyprland ho nechal jako dlaždici) a přepne se
 - **0.31.12** (2026-11-07) Národní den bizonů (USA, první listopadová sobota) s nakreslenými bizony; přesunutý zvláštní den „Den skořice byl 1. 11.“ / „… bude zítra“
