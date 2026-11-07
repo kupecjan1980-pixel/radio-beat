@@ -32,6 +32,9 @@ PAGE = 2000  # rows per answer
 SAME = 1800  # s: the same song this close in time is the same play (as the app's History.SAME)
 COVER_HOSTS = re.compile(r"^https://([a-z0-9-]+\.)*(dzcdn\.net|mzstatic\.com|ytimg\.com|deezer\.com|"
                          r"apple\.com|googleusercontent\.com|radiobeat\.cz)/", re.I)
+LOG_MAX = 256 << 10  # bytes of a computer's log kept (its newest part); never served back over the internet
+LOGS_MAX = 40  # computers' logs at most (the oldest dropped)
+LOG_ID = re.compile(r"^(?!\.)[A-Za-z0-9._-]{1,80}$")  # (no leading dot: never .. or a hidden file)
 CLAIM_TTL = 240  # s: a picture being made is that computer's this long (it may have gone: then anyone's again)
 CLAIMS_MAX = 5000
 RATE = (3000, 600)  # requests per address in this many seconds at most (a first upload sends ~1000 pictures)
@@ -67,6 +70,24 @@ class Hub:
                                    (since, PAGE * 5)).fetchall()
         return {"id": "hub", "files": [n for _, n in rows], "next": rows[-1][0] if rows else since,
                 "more": len(rows) == PAGE * 5}
+
+    def put_log(self, who: str, text: bytes) -> int:
+        """A computer's log (its newest part), for whoever runs the hub to read (logs/<who>.log): the app's own
+        trouble on computers nobody here can look at. 204 kept, 400 not text."""
+        try:
+            text.decode()
+        except UnicodeDecodeError:
+            return 400
+        folder = os.path.join(os.path.dirname(self.dir), "logs")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, who + ".log")
+        with open(path + ".part", "wb") as f:
+            f.write(text[-LOG_MAX:])
+        os.replace(path + ".part", path)
+        logs = sorted((os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".log")), key=os.path.getmtime)
+        for old in logs[:-LOGS_MAX]:
+            os.remove(old)
+        return 204
 
     def claim(self, name: str, by: str) -> dict:
         """A computer about to make a picture asks first, so no two make the same one. state: "have" (it's here:
@@ -293,6 +314,11 @@ def serve(hub: Hub, port: int) -> None:
                 got = hub.put_plays(rows) if p.endswith("plays") else hub.put_songinfo(rows)
                 return self._json({"new": got})
             name = p.rsplit("/", 1)[-1]
+            if p.startswith("/radio-beat/v1/log/") and LOG_ID.match(name):
+                body = self._body(LOG_MAX)
+                if body is None:
+                    return
+                return self._send(hub.put_log(name, body), b"")
             if p.startswith("/radio-beat/v1/claim/") and NAME.match(name):
                 body = self._body(512)
                 if body is None:

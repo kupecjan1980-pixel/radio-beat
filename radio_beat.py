@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.30.7"
+APP_VERSION = "0.30.8"
 
 import collections
 import ctypes
@@ -4642,6 +4642,25 @@ class CacheShare:
         except OSError:
             pass
 
+    LOG_SEND = 200 << 10  # bytes of the log's newest part sent to the hub (each round, when it changed)
+
+    def _send_log(self, base: str) -> None:
+        """This computer's log to the hub, so its trouble can be read and fixed from there (the DeskMini's glass,
+        a handheld's NPU): the newest part, only when it changed; stored there, never served back out."""
+        try:
+            size, mtime = os.path.getsize(LOG), os.path.getmtime(LOG)
+            if getattr(self, "_log_sent", None) == (size, mtime):
+                return
+            with open(LOG, "rb") as f:
+                f.seek(max(0, size - self.LOG_SEND))
+                text = f.read()
+            who = re.sub(r"[^A-Za-z0-9._-]", "-", self.id)[:80] or "unknown"
+            head = f"--- {who} · Rádio Beat {APP_VERSION} · sent {time.strftime('%Y-%m-%d %H:%M:%S')}\n".encode()
+            self._hub(base, f"/radio-beat/v1/log/{who}", head + text, timeout=60)
+            self._log_sent = (size, mtime)
+        except (OSError, ValueError):
+            pass  # (an older hub, or out of reach: next round)
+
     def _hub_round(self) -> None:
         """Pictures, plays and track info both ways with the hub; each kind from where it got to last time (the
         hub numbers what it takes: nothing another computer sent late is missed)."""
@@ -4649,6 +4668,7 @@ class CacheShare:
         if not base:
             self.hub_text = ""
             return
+        self._send_log(base)
         m = self.marks.setdefault("hub", {})
         for k in ("files", "plays", "info", "files_out", "plays_out", "info_out"):
             m.setdefault(k, 0)
