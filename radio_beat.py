@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.29.2"
+APP_VERSION = "0.29.3"
 
 import collections
 import ctypes
@@ -6872,8 +6872,8 @@ except (OSError, ValueError):
 
 # How much a special day matters here, for which one the date shows (it shows one) and which give way to a
 # nearby day: Czech tradition first (the user: svatý Martin, Dušičky "have the most priority"), then the days the
-# Czech law names, the UN family's, anyone else's, and last the marketing and joke days (Den skořice by a spice
-# company, "Mezinárodní den prasklých těsnění" by nobody).
+# Czech law names, then the marketing and joke days (Den skořice by a spice company, "Mezinárodní den prasklých
+# těsnění" by nobody), anyone else's, and last the UN family's (the user's order).
 CZ_TRADITION = re.compile(r"^(svat[ýá]|sv\. )|Dušičky|Den všech svatých|Mikuláš|Štědr|Silvestr|Velikono|Velký pátek|"
                           r"Masopust|Popeleční|Hromnice|Tři králové|Den matek|Den otců|Den učitelů|Valentýn|"
                           r"čarodějnic|Filipojakub|Boží hod|Advent|Vánoc|Svatodušní|Nanebe|Den dětí|Den Země|"
@@ -6891,12 +6891,12 @@ def day_weight(day) -> int:
     if "V ČR" in by or "zákon" in by:
         return 4
     if UN_FAMILY.search(by):
-        return 3
-    if FUN_MAKER.search(by):
         return 1
+    if FUN_MAKER.search(by):
+        return 3
     if by:
         return 2
-    return 2 if re.match(r"(Mezinárodní|Světový|Evropský) den", name) and "prasklých" not in name else 1
+    return 2 if re.match(r"(Mezinárodní|Světový|Evropský) den", name) and "prasklých" not in name else 3
 
 
 def ranked(days) -> list:
