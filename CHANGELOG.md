@@ -4,6 +4,7 @@
 
 ## 0.29 — Vlastní kreslené obrázky místo emoji
 
+- **0.29.5** (2026-11-07) Hrad nakreslený jako středověký z oblých kamenů s věžemi, cimbuřím, střechami, praporem a branou; japonský hrad se zahnutými střechami; dům, kostel s věží, továrna s komínem; kopretina bílá se žlutým středem, růže, tulipán, kytice a květy ve svých barvách
 - **0.29.4** (2026-11-07) Den skořice: skořice nakreslená jako svinutá kůra rezavé barvy se spirálou na konci; nově i croissant, kaštan a duha; opraveno přiřazení obrázků podle části slova (croissant byl tlapka, mozek a duha kapka, hrad mince)
 - **0.29.3** (2026-11-07) Pořadí zvláštních dnů: česká tradice, dny ze zákona, reklamní a recesní dny, ostatní a nakonec dny OSN, UNESCO, WHO
 - **0.29.2** (2026-11-07) Pořadí zvláštních dnů: česká tradice první (svatý Martin, Dušičky, Mikuláš i před Chanukou), pak významné dny ze zákona, dny OSN a spol., ostatní a nakonec reklamní a recesní (Den skořice); ty méně důležité se posunou na volný den; dny s vlastním svátkem (Diwali, Chanuka) se za volné nepočítají

@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.29.4"
+APP_VERSION = "0.29.5"
 
 import collections
 import ctypes
@@ -6843,7 +6843,7 @@ HOLIDAYS = {
                  ("candle", "candle", "david"), ("#1e88e5", "#ffffff", "#90caf9", "#ffd54f"), None),
 }
 HOLIDAY_PERIODS = {"advent"}  # whole stretches: mixed with the season, not instead of it
-UPRIGHT = {"rainbow", "nut", "book", "drop", "dove", "hands", "apple", "cup", "glass", "cheese", "cross", "scales", "peace",
+UPRIGHT = {"castle", "pagoda", "house", "church", "factory", "tulip", "bouquet", "rainbow", "nut", "book", "drop", "dove", "hands", "apple", "cup", "glass", "cheese", "cross", "scales", "peace",
            "ribbon", "temple", "ban", "palette", "menpo", "jpflag", "palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
            "skull", "gift", "crown", "broom", "guitar", "mimosa", "gravelight", "calavera", "papel", "mum"}
 
@@ -7625,8 +7625,13 @@ EMOJI_MOTIFS = [
     # holds RAIN, STEAMING BOWL holds OWL, EUROPEAN CASTLE holds EURO, CHESS PAWN holds PAW)
     (r"RAINBOW", "rainbow", None), (r"CROISSANT|BREAD|BAGUETTE|PRETZEL|BAGEL|PANCAKE|WAFFLE|FLATBREAD", "croissant", None),
     (r"CHESTNUT|PEANUT|\bNUT\b|ACORN|HAZELNUT|COCONUT", "nut", None), (r"\bBRAIN\b", "cross", "#e53935"),
-    (r"\bBOWL\b", "cup", "#ffb74d"), (r"CASTLE", "temple", "#cfd8dc"), (r"UNICORN|CHESS", "star", "#ffd54f"),
+    (r"\bBOWL\b", "cup", "#ffb74d"), (r"UNICORN|CHESS", "star", "#ffd54f"),
     (r"HONEYBEE", "paw", "#ffca28"),
+    (r"JAPANESE CASTLE", "pagoda", None), (r"CASTLE", "castle", None), (r"CHURCH", "church", None),
+    (r"\bHOUSE", "house", None), (r"FACTORY", "factory", None), (r"SCHOOL SATCHEL", "book", "#5c6bc0"),
+    (r"^BLOSSOM$|DAISY", "daisy", None), (r"WILTED FLOWER", "rose", "#8d6e63"), (r"\bROSE\b", "rose", "#d32f2f"),
+    (r"TULIP", "tulip", "#ec407a"), (r"BOUQUET", "bouquet", None), (r"HIBISCUS", "blossom", "#e91e63"),
+    (r"LOTUS", "blossom", "#f48fb1"),
     (r"BLUE HEART", "heart", "#1e88e5"), (r"PURPLE HEART", "heart", "#8e24aa"), (r"WHITE HEART", "heart", "#f5f5f5"),
     (r"GREEN HEART", "heart", "#43a047"), (r"YELLOW HEART", "heart", "#fdd835"), (r"ORANGE HEART", "heart", "#fb8c00"),
     (r"BLACK HEART", "heart", "#424242"), (r"BROWN HEART", "heart", "#8d6e63"),
@@ -8217,6 +8222,189 @@ class SeasonDecor:
             st = Gsk.Stroke.new(max(1.0, th * 0.09))
             st.set_line_cap(Gsk.LineCap.ROUND)
             s.append_stroke(pb.to_path(), st, SeasonDecor._darker(bark, 0.55))
+
+    @staticmethod
+    def _stones(s, x, y, w, h, rng, color):
+        """A wall of rounded stones (a castle's): grey rocks of a few shades, packed in rows, mortar between."""
+        SeasonDecor._round_rect(s, x, y, w, h, min(w, h) * 0.05, SeasonDecor._darker(color, 0.55))  # the mortar
+        rows = max(2, int(h / (w * 0.16 + 1)))
+        rh = h / rows
+        for r in range(rows):
+            cx = x + (rh * 0.5 if r % 2 else 0)
+            while cx < x + w - rh * 0.3:
+                sw = rh * rng.uniform(1.0, 1.6)
+                sw = min(sw, x + w - cx)
+                shade = rng.uniform(0.82, 1.08)
+                c = _rgba(min(255, int(color.red * 255 * shade)), min(255, int(color.green * 255 * shade)),
+                          min(255, int(color.blue * 255 * shade)), color.alpha)
+                SeasonDecor._round_rect(s, cx + rh * 0.06, y + r * rh + rh * 0.07, sw - rh * 0.12, rh * 0.86,
+                                        rh * 0.38, c)
+                cx += sw
+
+    @staticmethod
+    def _battlements(s, x, y, w, merlon, color):
+        n = max(2, int(w / (merlon * 1.6)))
+        step = w / n
+        for i in range(n):
+            SeasonDecor._round_rect(s, x + i * step + step * 0.15, y - merlon, step * 0.7, merlon * 1.05,
+                                    merlon * 0.1, color)
+
+    @staticmethod
+    def _castle(s, rng, size, color, _sea):
+        """A medieval castle: two round-stone towers with battlements and pointed roofs, a wall between with
+        battlements too, an arched gate, a flag."""
+        R = size / 2
+        stone = _hex(rng.choice(("#9e9e9e", "#a1887f", "#b0a99f")), color.alpha)
+        roof = _hex("#8e3b2e", color.alpha)
+        SeasonDecor._stones(s, -R * 0.62, -R * 0.1, R * 1.24, R * 0.95, rng, stone)  # the wall
+        SeasonDecor._battlements(s, -R * 0.62, -R * 0.1, R * 1.24, R * 0.16, stone)
+        for x in (-R * 0.95, R * 0.55):  # the towers
+            SeasonDecor._stones(s, x, -R * 0.5, R * 0.4, R * 1.35, rng, stone)
+            SeasonDecor._battlements(s, x - R * 0.04, -R * 0.5, R * 0.48, R * 0.13, stone)
+            SeasonDecor._poly(s, [(x - R * 0.02, -R * 0.63), (x + R * 0.2, -R), (x + R * 0.42, -R * 0.63)], roof)
+            SeasonDecor._round_rect(s, x + R * 0.15, -R * 0.3, R * 0.1, R * 0.18, R * 0.05, _hex("#263238"))
+        gate = Gsk.PathBuilder.new()  # the arched gate
+        gate.move_to(-R * 0.2, R * 0.85)
+        gate.line_to(-R * 0.2, R * 0.42)
+        gate.cubic_to(-R * 0.2, R * 0.14, R * 0.2, R * 0.14, R * 0.2, R * 0.42)
+        gate.line_to(R * 0.2, R * 0.85)
+        gate.close()
+        SeasonDecor._fill(s, gate, _hex("#4e342e", color.alpha))
+        SeasonDecor._line(s, [(R * 0.2 + R * 0.55, -R), (R * 0.75, -R * 1.25)], max(1.0, size * 0.02), _hex("#5d4037"))
+        SeasonDecor._poly(s, [(R * 0.75, -R * 1.25), (R * 1.0, -R * 1.17), (R * 0.75, -R * 1.09)], _hex("#e53935"))
+
+    @staticmethod
+    def _pagoda(s, rng, size, color, _sea):
+        """A Japanese castle: white walls under stacked, upturned dark roofs."""
+        R = size / 2
+        wall, roof = _hex("#f5f5f5", color.alpha), _hex("#607d8b", color.alpha)  # (slate: seen on a dark cover)
+        for i, (w, y) in enumerate(((0.95, 0.45), (0.72, 0.05), (0.5, -0.35))):
+            SeasonDecor._round_rect(s, -R * w * 0.62, R * y - R * 0.02, R * w * 1.24, R * 0.36, R * 0.02, wall)
+            pb = Gsk.PathBuilder.new()  # an upturned roof: the eaves curl up at both ends
+            pb.move_to(-R * w * 1.1, R * y - R * 0.12)
+            pb.cubic_to(-R * w * 0.8, R * y + R * 0.02, -R * w * 0.5, R * y - R * 0.08, -R * w * 0.35, R * y - R * 0.3)
+            pb.line_to(R * w * 0.35, R * y - R * 0.3)
+            pb.cubic_to(R * w * 0.5, R * y - R * 0.08, R * w * 0.8, R * y + R * 0.02, R * w * 1.1, R * y - R * 0.12)
+            pb.line_to(R * w * 0.9, R * y + R * 0.04)
+            pb.line_to(-R * w * 0.9, R * y + R * 0.04)
+            pb.close()
+            SeasonDecor._fill(s, pb, roof)
+        SeasonDecor._poly(s, [(-R * 0.15, -R * 0.6), (0, -R * 0.85), (R * 0.15, -R * 0.6)], roof)
+        SeasonDecor._round_rect(s, -R * 0.75, R * 0.8, R * 1.5, R * 0.18, R * 0.04, _hex("#9e9e9e", color.alpha))
+
+    @staticmethod
+    def _house(s, rng, size, color, _sea):
+        R = size / 2
+        SeasonDecor._round_rect(s, -R * 0.65, -R * 0.15, R * 1.3, R * 1.0, R * 0.04, _hex("#fff3e0", color.alpha))
+        SeasonDecor._poly(s, [(-R * 0.85, -R * 0.1), (0, -R * 0.85), (R * 0.85, -R * 0.1)], _hex("#c62828", color.alpha))
+        SeasonDecor._round_rect(s, R * 0.35, -R * 0.75, R * 0.18, R * 0.35, R * 0.02, _hex("#8d6e63", color.alpha))
+        SeasonDecor._round_rect(s, -R * 0.15, R * 0.35, R * 0.3, R * 0.5, R * 0.04, _hex("#6d4c41", color.alpha))
+        for x in (-R * 0.5, R * 0.25):
+            SeasonDecor._round_rect(s, x, R * 0.05, R * 0.25, R * 0.22, R * 0.03, _hex("#81d4fa", color.alpha))
+
+    @staticmethod
+    def _church(s, rng, size, color, _sea):
+        """A village church: a nave and a tall steeple with a cross."""
+        R = size / 2
+        wall, roof = _hex("#fafafa", color.alpha), _hex("#5d4037", color.alpha)
+        SeasonDecor._round_rect(s, -R * 0.75, R * 0.05, R * 1.0, R * 0.8, R * 0.03, wall)
+        SeasonDecor._poly(s, [(-R * 0.85, R * 0.1), (-R * 0.25, -R * 0.3), (R * 0.35, R * 0.1)], roof)
+        SeasonDecor._round_rect(s, R * 0.15, -R * 0.35, R * 0.45, R * 1.2, R * 0.03, wall)
+        SeasonDecor._poly(s, [(R * 0.1, -R * 0.33), (R * 0.375, -R * 0.95), (R * 0.65, -R * 0.33)], roof)
+        SeasonDecor._line(s, [(R * 0.375, -R * 0.95), (R * 0.375, -R * 1.2)], max(1.0, size * 0.03), _hex("#ffd54f"))
+        SeasonDecor._line(s, [(R * 0.29, -R * 1.1), (R * 0.46, -R * 1.1)], max(1.0, size * 0.03), _hex("#ffd54f"))
+        arch = Gsk.PathBuilder.new()
+        arch.move_to(R * 0.27, R * 0.85)
+        arch.line_to(R * 0.27, R * 0.5)
+        arch.cubic_to(R * 0.27, R * 0.32, R * 0.48, R * 0.32, R * 0.48, R * 0.5)
+        arch.line_to(R * 0.48, R * 0.85)
+        arch.close()
+        SeasonDecor._fill(s, arch, _hex("#6d4c41", color.alpha))
+        SeasonDecor._dot(s, R * 0.375, -R * 0.05, R * 0.09, _hex("#81d4fa", color.alpha))
+
+    @staticmethod
+    def _factory(s, rng, size, color, _sea):
+        R = size / 2
+        body = _hex("#90a4ae", color.alpha)
+        SeasonDecor._poly(s, [(-R * 0.9, R * 0.85), (-R * 0.9, -R * 0.05), (-R * 0.45, -R * 0.35), (-R * 0.45, -R * 0.05),
+                              (0, -R * 0.35), (0, -R * 0.05), (R * 0.45, -R * 0.35), (R * 0.45, R * 0.85)], body)
+        SeasonDecor._round_rect(s, R * 0.52, -R * 0.75, R * 0.25, R * 1.6, R * 0.03, _hex("#8d6e63", color.alpha))
+        for x, y, r in ((R * 0.7, -R * 0.9, R * 0.13), (R * 0.85, -R * 1.05, R * 0.17)):
+            SeasonDecor._dot(s, x, y, r, _hex("#eceff1", 0.7))
+        for x in (-R * 0.7, -R * 0.25, R * 0.2):
+            SeasonDecor._round_rect(s, x, R * 0.25, R * 0.2, R * 0.2, R * 0.03, _hex("#fff59d", color.alpha))
+
+    @staticmethod
+    def _daisy(s, rng, size, color, _sea):
+        """A daisy: many narrow white petals round a yellow heart."""
+        R = size / 2
+        n = rng.randint(14, 18)
+        petal = _hex("#fafafa", color.alpha)
+        for k in range(n):
+            s.save()
+            s.rotate(360 * k / n)
+            pb = Gsk.PathBuilder.new()
+            pb.move_to(0, -R * 0.2)
+            pb.cubic_to(R * 0.13, -R * 0.45, R * 0.1, -R * 0.9, 0, -R * 0.95)
+            pb.cubic_to(-R * 0.1, -R * 0.9, -R * 0.13, -R * 0.45, 0, -R * 0.2)
+            pb.close()
+            SeasonDecor._fill(s, pb, petal)
+            s.restore()
+        SeasonDecor._dot(s, 0, 0, R * 0.26, _hex("#fbc02d", color.alpha))
+        SeasonDecor._dot(s, -R * 0.07, -R * 0.07, R * 0.08, _hex("#fff59d", 0.8))
+
+    @staticmethod
+    def _rose(s, rng, size, color, _sea):
+        """A rose: tightly wrapped petals spiralling in, two leaves."""
+        R = size / 2
+        leaf = _hex("#388e3c", color.alpha)
+        for sx in (-1, 1):
+            SeasonDecor._poly(s, [(sx * R * 0.2, R * 0.45), (sx * R * 0.9, R * 0.55), (sx * R * 0.45, R * 0.85)], leaf)
+        SeasonDecor._dot(s, 0, 0, R * 0.62, color)
+        dark = SeasonDecor._darker(color, 0.65)
+        pb = Gsk.PathBuilder.new()
+        for j in range(60):
+            a = j / 59 * 2.6 * 2 * math.pi
+            r = R * 0.56 * (1 - j / 66)
+            (pb.move_to if j == 0 else pb.line_to)(r * math.cos(a), r * math.sin(a) * 0.9)
+        st = Gsk.Stroke.new(max(1.0, size * 0.04))
+        st.set_line_cap(Gsk.LineCap.ROUND)
+        s.append_stroke(pb.to_path(), st, dark)
+
+    @staticmethod
+    def _tulip(s, rng, size, color, _sea):
+        """A tulip: a cup of three petals on a green stem with a long leaf."""
+        R = size / 2
+        green = _hex("#43a047", color.alpha)
+        SeasonDecor._line(s, [(0, -R * 0.05), (0, R * 0.95)], max(1.0, size * 0.06), green)
+        SeasonDecor._poly(s, [(0, R * 0.9), (R * 0.45, R * 0.15), (R * 0.12, R * 0.6)], green)
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(-R * 0.45, -R * 0.75)
+        pb.line_to(-R * 0.22, -R * 0.5)
+        pb.line_to(0, -R * 0.85)
+        pb.line_to(R * 0.22, -R * 0.5)
+        pb.line_to(R * 0.45, -R * 0.75)
+        pb.cubic_to(R * 0.55, -R * 0.2, R * 0.3, R * 0.05, 0, R * 0.05)
+        pb.cubic_to(-R * 0.3, R * 0.05, -R * 0.55, -R * 0.2, -R * 0.45, -R * 0.75)
+        pb.close()
+        SeasonDecor._fill(s, pb, color)
+        SeasonDecor._line(s, [(-R * 0.22, -R * 0.45), (-R * 0.15, -R * 0.1)], max(1.0, size * 0.03), _hex("#ffffff", 0.35))
+
+    @staticmethod
+    def _bouquet(s, rng, size, color, sea):
+        """A bouquet: a few flowers of different colours over green stems, tied in paper."""
+        R = size / 2
+        green = _hex("#43a047", color.alpha)
+        for x in (-R * 0.35, 0, R * 0.35):
+            SeasonDecor._line(s, [(x, -R * 0.3), (0, R * 0.6)], max(1.0, size * 0.04), green)
+        SeasonDecor._poly(s, [(-R * 0.45, R * 0.15), (R * 0.45, R * 0.15), (R * 0.15, R * 0.95), (-R * 0.15, R * 0.95)],
+                          _hex("#fff8e1", color.alpha))
+        for (x, y), c in zip(((-R * 0.4, -R * 0.45), (R * 0.4, -R * 0.45), (0, -R * 0.7)),
+                             rng.sample(("#e53935", "#f06292", "#fdd835", "#ab47bc", "#ff7043", "#fafafa"), 3)):
+            s.save()
+            s.translate(Graphene.Point().init(x, y))
+            SeasonDecor._blossom(s, rng, size * 0.42, _hex(c, color.alpha), sea)
+            s.restore()
 
     @staticmethod
     def _croissant(s, rng, size, color, _sea):
