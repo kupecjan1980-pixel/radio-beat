@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.30.3"
+APP_VERSION = "0.30.4"
 
 import collections
 import ctypes
@@ -11457,13 +11457,11 @@ class Window(Adw.ApplicationWindow):
         while (c := box.get_first_child()) is not None:
             box.remove(c)
         self._names_pics = []
-        # the day's box's text size (its labels at most DAY_TEXT_MOST): the names a little under it, the photos as
-        # they were (the app's text is already 1.64x on a big screen: GTK's dpi)
-        f = 0.75 * max(1.0, self._scale)
+        # exactly the day's box's text: plain labels (not the ⓘ panel's bigger styles) at the scale that box uses
+        f = getattr(self, "_day_text_f", None) or 0.7
         attrs = Pango.AttrList()
         attrs.insert(Pango.attr_scale_new(f))
-        big = Pango.AttrList()
-        big.insert(Pango.attr_scale_new(self.DAY_TEXT_MOST * max(1.0, self._scale)))
+        big = attrs
         head = Gtk.Label(label=GLib.markup_escape_text(a.cz(f"Jmeniny: {name_day().title() or 'nikdo'}")),
                          use_markup=True, halign=Gtk.Align.START, attributes=big)
         head.add_css_class("day-head")
@@ -11489,13 +11487,13 @@ class Window(Adw.ApplicationWindow):
                 pic.set_paintable(a.logo_tex)
             row.append(frame)
             lines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
-            name = Gtk.Label(label=p["name"], xalign=0, wrap=True, attributes=attrs)
-            name.add_css_class("show-title")
+            name = Gtk.Label(label=f"<b>{GLib.markup_escape_text(p['name'])}</b>", use_markup=True, xalign=0,
+                             wrap=True, attributes=attrs)
             lines.append(name)
             about = " · ".join(t for t in (a.cz(p["desc"]) if p["desc"] else "", p["years"]) if t)
             if about:  # what they were and their years, on one line (wrapped when long)
-                lab = Gtk.Label(label=about, xalign=0, wrap=True, attributes=attrs)
-                lab.add_css_class("show-sub")
+                lab = Gtk.Label(label=f"<span alpha='80%'>{GLib.markup_escape_text(about)}</span>", use_markup=True,
+                                xalign=0, wrap=True, attributes=attrs)
                 lines.append(lab)
             row.append(lines)
             box.append(row)
@@ -11514,9 +11512,12 @@ class Window(Adw.ApplicationWindow):
     def names_show(self) -> None:
         """Shown over the cover like the day's box (beside the names when there's no cover)."""
         self.day_pop.popdown()
+        area = self._day_area()
+        if area and getattr(self, "_day_text_f", None) is None:  # (the day's box's text size, worked out once)
+            self._day_fill()
+            self._day_fit(round(area[2]), round(area[3]))
         self._names_fill()
         glass = self.names_pop.get_child()
-        area = self._day_area()
         if area:
             x, y, w, h = (round(v) for v in area)
             glass.set_size_request(w, h)
@@ -11617,6 +11618,7 @@ class Window(Adw.ApplicationWindow):
             else:
                 hi = f
         self._day_scale(lo)
+        self._day_text_f = lo  # (the name day's box uses the same size)
 
     def _day_scale(self, f) -> None:
         """All the day's labels at `f` times their size (None: as they are); the gaps before headlines too."""
