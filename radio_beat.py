@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.29.0"
+APP_VERSION = "0.29.1"
 
 import collections
 import ctypes
@@ -6874,9 +6874,9 @@ _MOVED: dict | None = None
 
 
 def moved_days() -> dict:
-    """Days with more special days than the date shows (it shows one name) lend one to a neighbour that has none:
-    the day after first (yesterday's missed one today), else the day before. "MM-DD" -> (day, its own "MM-DD",
-    "včera"/"zítra")."""
+    """Days with more special days than the date shows (it shows one name) lend one to a nearby day that has none:
+    from up to a week before (the user: a missed one from 2-3 days ago is better than none) or 3 days after, the
+    nearest first, the earlier on a tie. "MM-DD" -> (day, its own "MM-DD", how it's said: "včera", "z 1. 11."…)."""
     global _MOVED
     if _MOVED is not None:
         return _MOVED
@@ -6885,11 +6885,14 @@ def moved_days() -> dict:
     spare = {k: list((DAYS_CZ.get(k, {}).get("days") or [])[1:]) for k in keys}
     empty = [k for k in keys if not DAYS_CZ.get(k, {}).get("days") and not DAYS_CZ.get(k, {}).get("state")]
     _MOVED = {}
+    near = sorted([-d for d in range(1, 8)] + list(range(1, 4)), key=lambda d: (abs(d), d > 0))
+    words = {-1: "včera", -2: "předevčírem", 1: "zítra", 2: "pozítří"}
     for k in empty:
         i = keys.index(k)
-        for j, when in ((i - 1, "včera"), (i + 1, "zítra")):
-            src = keys[j % len(keys)]
+        for d in near:
+            src = keys[(i + d) % len(keys)]
             if spare[src]:
+                when = words.get(d) or (f"z {int(src[3:])}. {int(src[:2])}." if d < 0 else f"{int(src[3:])}. {int(src[:2])}.")
                 _MOVED[k] = (spare[src].pop(0), src, when)
                 break
     return _MOVED
