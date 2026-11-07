@@ -4,6 +4,7 @@
 
 ## 0.28 — Společné vylepšování obrázků
 
+- **0.28.6** (2026-11-07) Mlha u počasí je nakreslená: jemné vlnité šedé pruhy, při námraze do ledově modrobílé (emoji mlhy byl jen bledý čtverec)
 - **0.28.5** (2026-11-06) Odšumování na integrovaných GPU běží na procesoru (dlouhá úloha GPU vedle skla mohla vypršet a riskovat reset celé GPU); samostatné grafické karty dál na GPU
 - **0.28.4** (2026-11-06) Kde bylo nahráno: místo z původní studiové nahrávky, ne z koncertní (Aqualung „Eventim Apollo“ → Basing Street Studios, Dreams „Kia Forum“ → Criteria Studios); koncertní nahrávky se do hledání vůbec nepletou; 42 skladeb s koncertní halou místo studia se dohledá znovu
 - **0.28.3** (2026-11-05) Data vydání: „1. ledna“ byla jen náhražka služeb za neznámý den (U2 The Joshua Tree vyšlo 9. března 1987) a „1970“ Deezerovo „nevím“: teď rok sám, nebo přesné datum odjinud; 159 takových přehrání se dohledá znovu. MusicBrainz najde i „Mr.“ místo „Mister“ a název s „The“, živé nahrávky se nepočítají za první vydání

@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.28.5"
+APP_VERSION = "0.28.6"
 
 import collections
 import ctypes
@@ -8524,6 +8524,11 @@ def draw_moon(cr, rad: float, m: dict) -> None:
     cr.stroke()
 
 
+def cairo_linear(x0, y0, x1, y1):
+    import cairo
+    return cairo.LinearGradient(x0, y0, x1, y1)
+
+
 def cairo_radial(x, y, rad, inner, outer):
     import cairo
     g = cairo.RadialGradient(x - rad * 0.25, y - rad * 0.25, rad * 0.1, x, y, rad)
@@ -8570,7 +8575,9 @@ def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
     sky = WMO.get(w["code"], ("🌡️", ""))[0]
     moon = moon_sky(lat, lon)
     big = {"emoji": sky, "moon": None, "cloud": False}
-    if not w["day"]:
+    if w["code"] in (45, 48):  # fog: drawn, grey bands of mist (the font's fog emoji is a pale blank square)
+        big = {"emoji": None, "moon": None, "cloud": False, "fog": "rime" if w["code"] == 48 else "fog"}
+    elif not w["day"]:
         if w["code"] in (0, 1, 2):
             big = {"emoji": None, "moon": moon, "cloud": w["code"] == 2}
         elif w["code"] in (51, 53, 55, 80, 81):
@@ -8581,6 +8588,38 @@ def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
              f"<span foreground='{_temp_color(w['max'])}'>↑{hi}</span>")
     return {"sky": big, "temps": temps, "hum": f"<span foreground='#9fe2ff'>{round(w['hum'])} %</span>",
             "moon": moon, "place": place}
+
+
+def draw_fog(cr, w: float, h: float, rime: bool = False) -> None:
+    """Fog: soft, gently waving bands of grey mist, staggered, fading out at their ends; icy blue-white with rime
+    (freezing fog). A faint wide shadow under them, like the other pictures', so they show on a bright cover."""
+    bands = ((0.30, 0.06, 0.78), (0.45, 0.20, 0.98), (0.60, 0.02, 0.84), (0.75, 0.14, 0.92))  # y, from, to
+    thick = h * 0.062
+    r, g, b = (0.88, 0.94, 1.0) if rime else (0.82, 0.84, 0.88)
+    cr.set_line_cap(1)  # round
+
+    def wave(a, z, y, phase):
+        cr.move_to(a, y)
+        n = 3
+        for i in range(n):  # a slow wave along the band
+            x0, x1 = a + (z - a) * i / n, a + (z - a) * (i + 1) / n
+            dy = h * 0.022 * (1 if (i + phase) % 2 else -1)
+            cr.curve_to(x0 + (x1 - x0) / 3, y + dy, x0 + 2 * (x1 - x0) / 3, y + dy, x1, y)
+
+    for i, (y, x0, x1) in enumerate(bands):
+        y, a, z = y * h, x0 * w, x1 * w
+        for width, alpha in ((thick * 3.0, 0.07), (thick * 2.0, 0.10)):  # the shadow: soft, a little lower
+            wave(a + thick, z - thick, y + h * 0.02, i)
+            cr.set_line_width(width)
+            cr.set_source_rgba(0, 0, 0, alpha)
+            cr.stroke()
+        grad = cairo_linear(a, 0, z, 0)  # brightest in the middle, thinning out into nothing at both ends
+        for stop, alpha in ((0.0, 0.0), (0.25, 0.7), (0.5, 0.92), (0.75, 0.7), (1.0, 0.0)):
+            grad.add_color_stop_rgba(stop, r, g, b, alpha)
+        cr.set_source(grad)
+        cr.set_line_width(thick)
+        wave(a, z, y, i)
+        cr.stroke()
 
 
 class WeatherView(Gtk.Widget):
@@ -8698,6 +8737,8 @@ class WeatherView(Gtk.Widget):
             snap.append_layout(lay, _rgba(255, 255, 255, 0.95))
             snap.restore()
         snap.pop()
+        if sky.get("fog"):
+            draw_fog(snap.append_cairo(Graphene.Rect().init(0, 0, icon, h)), icon, h, sky["fog"] == "rime")
         if sky["moon"]:  # the moon as it is (a cloud over part of it when partly cloudy)
             cr = snap.append_cairo(Graphene.Rect().init(0, 0, icon, h))
             cr.translate(icon / 2, h / 2)
