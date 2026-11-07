@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.11"
+APP_VERSION = "0.31.12"
 
 import collections
 import ctypes
@@ -7124,6 +7124,8 @@ HOLIDAYS = {
               ("#ffd54f", "#ffffff", "#e3051a", "#40c4ff"), None),
     "republic": ("Den vzniku Československa", "česká vlajka", lambda y: [(10, 28)], ("star",), ("#ffffff",), "cz"),
     # Halloween runs on into Všech svatých and Dušičky (1–2 Nov), together with them and Día de los Muertos
+    "bison": ("Národní den bizonů", "bizoni a tráva prérie", lambda y: [_nth_weekday(y, 11, 5, 1)],
+              ("bison", "bison", "sprig"), ("#5d4037", "#6d4c41", "#4e342e", "#8d6e63"), None),
     "halloween": ("Halloween", "dýně, netopýři, duchové a pavouci", lambda y: [(10, 31), (11, 1), (11, 2)],
                   ("pumpkin", "pumpkin", "bat", "bat", "ghost", "spider", "web"),
                   ("#ff6d00", "#212121", "#ffffff", "#7c4dff", "#76ff03"), None),
@@ -7160,7 +7162,7 @@ HOLIDAYS = {
                  ("candle", "candle", "david"), ("#1e88e5", "#ffffff", "#90caf9", "#ffd54f"), None),
 }
 HOLIDAY_PERIODS = {"advent"}  # whole stretches: mixed with the season, not instead of it
-UPRIGHT = {"castle", "pagoda", "house", "church", "factory", "tulip", "bouquet", "rainbow", "nut", "book", "drop", "dove", "hands", "apple", "cup", "glass", "cheese", "cross", "scales", "peace",
+UPRIGHT = {"bison", "castle", "pagoda", "house", "church", "factory", "tulip", "bouquet", "rainbow", "nut", "book", "drop", "dove", "hands", "apple", "cup", "glass", "cheese", "cross", "scales", "peace",
            "ribbon", "temple", "ban", "palette", "menpo", "jpflag", "palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
            "skull", "gift", "crown", "broom", "guitar", "mimosa", "gravelight", "calavera", "papel", "mum"}
 
@@ -7256,7 +7258,8 @@ def moved_days(year: int = None) -> dict:
         for d in near:
             src = keys[(i + d) % len(keys)]
             if spare[src]:
-                when = words.get(d) or (f"z {int(src[3:])}. {int(src[:2])}." if d < 0 else f"{int(src[3:])}. {int(src[:2])}.")
+                date = words.get(d) or f"{int(src[3:])}. {int(src[:2])}."
+                when = f"byl {date}" if d < 0 else f"bude {date}"  # ("Den skořice byl 1. 11.", "… bude zítra")
                 moved[k] = (spare[src].pop(0), src, when)
                 break
     return moved
@@ -7503,7 +7506,7 @@ def special_day_name() -> str:
     if themed:
         return " · ".join(themed)
     if d.get("moved"):  # a neighbour's: said so
-        return f"{d['days'][0][0]} ({d['moved'][1]})"
+        return f"{d['days'][0][0]} {d['moved'][1]}"
     return d["days"][0][0] if d.get("days") else ""
 
 
@@ -7530,6 +7533,8 @@ def balanced_rows(text: str, most: int = 20) -> list:
 
 # What each special day is, in brief (the hover box over the date)
 HOLIDAY_ABOUT = {
+    "bison": "Národní den bizonů (USA, první listopadová sobota): bizon americký je od roku 2016 národním savcem USA; "
+             "z desítek milionů jich koncem 19. století zbylo jen pár stovek, dnes jich žije zas na půl milionu.",
     "newyear": "První den roku: přání, předsevzetí a dozvuky silvestrovských ohňostrojů.",
     "kings": "Svátek Tří králů (Kašpar, Melichar, Baltazar) končí Vánoce; koledníci píšou na dveře K+M+B.",
     "radio": "Den vyhlášený UNESCO (2011) na počest rádia: od 13. února 1946 vysílá rozhlas OSN.",
@@ -8768,6 +8773,35 @@ class SeasonDecor:
         for i in range(n):
             SeasonDecor._round_rect(s, x + i * step + step * 0.15, y - merlon, step * 0.7, merlon * 1.05,
                                     merlon * 0.1, color)
+
+    @staticmethod
+    def _bison(s, rng, size, color, _sea):
+        """An American bison: the big shaggy hump and head carried low, short horns, a beard, thin legs; a dark
+        woolly brown, the hind part lighter."""
+        R = size / 2
+        coat, dark = _hex("#6d4c41", color.alpha), _hex("#3e2723", color.alpha)
+        hind = Gsk.PathBuilder.new()  # the back half: lighter, short hair
+        hind.move_to(-R * 0.1, -R * 0.25)
+        hind.cubic_to(R * 0.4, -R * 0.35, R * 0.85, -R * 0.2, R * 0.9, R * 0.15)
+        hind.cubic_to(R * 0.9, R * 0.35, R * 0.6, R * 0.4, R * 0.2, R * 0.38)
+        hind.line_to(-R * 0.1, R * 0.38)
+        hind.close()
+        SeasonDecor._fill(s, hind, _hex("#8d6e63", color.alpha))
+        for x in (R * 0.25, R * 0.72, -R * 0.25, -R * 0.02):  # the legs
+            SeasonDecor._line(s, [(x, R * 0.3), (x + R * 0.03, R * 0.85)], max(1.0, size * 0.07), dark)
+        front = Gsk.PathBuilder.new()  # the hump and the woolly front
+        front.move_to(R * 0.05, R * 0.42)
+        front.cubic_to(R * 0.1, -R * 0.1, -R * 0.05, -R * 0.75, -R * 0.4, -R * 0.62)
+        front.cubic_to(-R * 0.65, -R * 0.55, -R * 0.75, -R * 0.2, -R * 0.78, R * 0.05)
+        front.cubic_to(-R * 0.6, R * 0.45, -R * 0.2, R * 0.5, R * 0.05, R * 0.42)
+        front.close()
+        SeasonDecor._fill(s, front, coat)
+        SeasonDecor._dot(s, -R * 0.82, R * 0.1, R * 0.2, dark)  # the head, low
+        SeasonDecor._poly(s, [(-R * 0.9, R * 0.2), (-R * 0.72, R * 0.22), (-R * 0.8, R * 0.5)], dark)  # the beard
+        SeasonDecor._line(s, [(-R * 0.7, -R * 0.02), (-R * 0.6, -R * 0.14), (-R * 0.62, -R * 0.24)],
+                          max(1.0, size * 0.04), _hex("#efebe9", color.alpha))  # a horn
+        SeasonDecor._dot(s, -R * 0.88, R * 0.04, R * 0.035, _hex("#efebe9", color.alpha))  # the eye's glint
+        SeasonDecor._line(s, [(R * 0.9, R * 0.1), (R * 1.0, R * 0.35)], max(1.0, size * 0.03), dark)  # the tail
 
     @staticmethod
     def _castle(s, rng, size, color, _sea):

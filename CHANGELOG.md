@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.12** (2026-11-07) Národní den bizonů (USA, první listopadová sobota) s nakreslenými bizony; přesunutý zvláštní den „Den skořice byl 1. 11.“ / „… bude zítra“
 - **0.31.11** (2026-11-07) Okno jmenin ukazuje věk: „* 1946 (80 let)“, u zemřelých křížek a věk při úmrtí „1612–1642 († 30 let)“; s klíčem TMDB se uložené dny dohledají znovu kvůli fotkám herců
 - **0.31.10** (2026-11-07) Klíč TMDB může být i v souboru ~/.config/radio-beat/tmdb-key
 - **0.31.9** (2026-11-07) Slavný nositel bez fotky má nakreslený odznak: iniciály v jeho barvě a v rohu značku toho, čím je (klapka, mikrofon, míč, nota, kniha, budova, paleta, koruna); žádná vymyšlená tvář
