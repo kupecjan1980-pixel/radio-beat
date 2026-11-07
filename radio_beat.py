@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.30.5"
+APP_VERSION = "0.30.6"
 
 import collections
 import ctypes
@@ -7165,6 +7165,13 @@ def name_forms(name: str) -> list[str]:
     return out
 
 
+def namesake_ok(person: dict, forms) -> bool:
+    """Is the name (in any of its forms: Evžen is Eugen, Bohdan Bogdan) in the name they're known by? Wikidata
+    lists every given name, middle ones too: Daryll Neita came up under Saskie for one nobody calls her by."""
+    label = norm(person.get("name", ""))
+    return any(re.search(rf"\b{re.escape(norm(f))}\b", label) for f in forms if f)
+
+
 def _wikidata(query: str, timeout: float = 45):
     req = urllib.request.Request("https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(query),
                                  headers={"User-Agent": MB_UA, "Accept": "application/sparql-results+json"})
@@ -7177,24 +7184,26 @@ def namesakes(names: list[str]) -> list[dict]:
     be asked (asked again later)."""
     forms = [f for n in names for f in name_forms(n)]
     vals = " ".join(f'"{f}"@cs "{f}"@en' for f in forms)
-    found = _wikidata(f"""SELECT DISTINCT ?g WHERE {{ VALUES ?nm {{ {vals} }}
-        VALUES ?cls {{ wd:Q202444 wd:Q12308941 wd:Q11879590 wd:Q3409032 }} ?g rdfs:label ?nm ; wdt:P31 ?cls . }}""", 20)
-    gids = " ".join("wd:" + r["g"]["value"].rsplit("/", 1)[1] for r in found)
+    found = _wikidata(f"""SELECT DISTINCT ?g ?l WHERE {{ VALUES ?nm {{ {vals} }}
+        VALUES ?cls {{ wd:Q202444 wd:Q12308941 wd:Q11879590 wd:Q3409032 }} ?g rdfs:label ?nm ; wdt:P31 ?cls .
+        ?g rdfs:label ?l . FILTER(LANG(?l) IN ("cs", "en", "de", "sk", "pl")) }}""", 20)
+    gids = " ".join(sorted({"wd:" + r["g"]["value"].rsplit("/", 1)[1] for r in found}))
     if not gids:
         return []
+    forms += [r["l"]["value"] for r in found]  # (the name's forms in the languages around: Eugen for Evžen)
     cz = " ".join("wd:" + q for q in CZECH_STATES)
     out, seen = [], set()
     for czech, most in ((True, 14), (False, 10)):
         only = f"VALUES ?st {{ {cz} }} ?p wdt:P27 ?st ." if czech else ""
         rows = _wikidata(f"""SELECT ?p ?pLabel ?pDescription ?img ?birth ?death WHERE {{
             {{ SELECT ?p ?links WHERE {{ VALUES ?g {{ {gids} }} ?p wdt:P735 ?g ; wdt:P31 wd:Q5 ;
-               wikibase:sitelinks ?links . {only} }} ORDER BY DESC(?links) LIMIT {most * 2} }}
+               wikibase:sitelinks ?links . {only} }} ORDER BY DESC(?links) LIMIT {most * 3} }}
             OPTIONAL {{ ?p wdt:P18 ?img }} OPTIONAL {{ ?p wdt:P569 ?birth }} OPTIONAL {{ ?p wdt:P570 ?death }}
             SERVICE wikibase:label {{ bd:serviceParam wikibase:language "cs,en". }} }} ORDER BY DESC(?links)""")
         n = 0
         for r in rows:
             pid = r["p"]["value"]
-            if pid in seen or n >= most:
+            if pid in seen or n >= most or not namesake_ok({"name": r["pLabel"]["value"]}, forms):
                 continue
             seen.add(pid)
             n += 1
@@ -14011,7 +14020,7 @@ class App(Adw.Application):
                 self._namesakes_file = {k: v for k, v in keep.items() if time.time() - v.get("at", 0) < NAMESAKES_KEEP}
             except (OSError, ValueError, AttributeError):
                 self._namesakes_file = {}
-        if key in self._namesakes_file:
+        if self._namesakes_file.get(key, {}).get("v") == 2:  # (kept before the forms were checked: looked up anew)
             self._namesakes[key] = self._namesakes_file[key]["people"]
             return
         if getattr(self, "_namesakes_busy", None) == key:
@@ -14032,7 +14041,7 @@ class App(Adw.Application):
         if people is None:  # not reached: asked again when the box opens next
             return False
         self._namesakes[key] = people
-        self._namesakes_file[key] = {"at": time.time(), "people": people}
+        self._namesakes_file[key] = {"at": time.time(), "people": people, "v": 2}
         try:
             os.makedirs(os.path.dirname(NAMESAKES_FILE), exist_ok=True)
             with open(NAMESAKES_FILE + ".part", "w") as f:
