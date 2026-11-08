@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.17"
+APP_VERSION = "0.31.18"
 
 import collections
 import ctypes
@@ -2800,6 +2800,8 @@ class Enhancer:
         self.status = "Spouští se…"
         self.on_status, self.on_picture = on_status, on_picture
         self.jobs: dict[str, tuple] = {}  # kind ("logo" / "cover") -> job
+        self.first: set[str] = set()  # small pictures on the screen now (a panel's, the name box's): before the
+        # ones made ready for later days
         self.running: tuple | None = None
         self.proc: subprocess.Popen | None = None
         self.wake = threading.Event()
@@ -3317,9 +3319,12 @@ class Enhancer:
     # --- jobs ---------------------------------------------------------------------------
 
     def request(self, kind: str, key: str, data: bytes, src_size: tuple[int, int], size: tuple[int, int], done,
-                screen: tuple[int, int] | None = None) -> None:
+                screen: tuple[int, int] | None = None, first: bool = False) -> None:
         """Main thread. done(picture bytes) runs on the main thread after each
-        step. A newer request of the same kind replaces (and stops) the older one."""
+        step. A newer request of the same kind replaces (and stops) the older one. first: shown now, made before
+        the other small pictures waiting."""
+        if first:
+            self.first.add(kind)
         # Enhanced before (the AI's final picture is kept): shown at once, even before the GPU test is done, and
         # not made again.
         hit = self._cache_path(key, size, ai=True)
@@ -3379,12 +3384,14 @@ class Enhancer:
             # Nothing before the GPU test is done: no plain resizes while AI may still come.
             while self.jobs and self.ai is not None:
                 if self.quiet:  # a panel open: only the small pictures' quick steps, the rest after it closes
-                    kind = next((k for k in self.jobs if k.startswith("pic:")), None)
+                    kind = next((k for k in self.jobs if k in self.first),
+                                next((k for k in self.jobs if k.startswith("pic:")), None))
                     if kind is None:
                         break
                 else:
                     kind = next((k for k in ("cover", "track", "logo", "show") if k in self.jobs),
-                                next((k for k in list(self.jobs) if k != "bg"), "bg"))
+                                next((k for k in list(self.jobs) if k in self.first),
+                                     next((k for k in list(self.jobs) if k != "bg"), "bg")))
                     if kind not in self.jobs:
                         break
                 job = self.jobs[kind]
@@ -3397,6 +3404,7 @@ class Enhancer:
                 # (made to wait for the picture on the screen: it stays queued, and starts again after it)
                 if self.jobs.get(kind) is job and not self._must_yield(kind):
                     del self.jobs[kind]
+                    self.first.discard(kind)
 
     def _current(self, kind: str, job: tuple) -> bool:
         return self.jobs.get(kind) is job and not self._must_yield(kind)
@@ -14928,7 +14936,7 @@ class App(Adw.Application):
                 self.win.puddle_pics()
             if self.win and self.win.names_pop.get_visible():  # (the name day's famous people too)
                 self.win.names_pics()
-        self.enhancer.request(f"pic:{url}", url, data, (w, h), size, done, screen=px)
+        self.enhancer.request(f"pic:{url}", url, data, (w, h), size, done, screen=px, first=True)
 
     def enhance_small_full(self) -> None:
         """The panels closed: the small pictures shown with the quick pass get the full enhancing now."""
