@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.15"
+APP_VERSION = "0.31.16"
 
 import collections
 import ctypes
@@ -7289,6 +7289,7 @@ NAMESAKES_FILE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expand
                               "namesakes.json")
 CZECH_STATES = ("Q213", "Q33946", "Q42585")  # Czech Republic, Czechoslovakia, Kingdom of Bohemia
 NAMESAKES_KEEP = 30 * 86400
+NAMESAKES_V = 5  # (5: pictures that aren't of the person dropped, people with a photo chosen first)
 
 
 NAMESAKE_PHOTOS = os.path.join(os.path.dirname(NAMESAKES_FILE), "namesakes")  # their photos, as downloaded
@@ -7434,6 +7435,62 @@ def _wikidata(query: str, timeout: float = 45):
         return json.load(r)["results"]["bindings"]
 
 
+NOT_PORTRAIT = re.compile(r"\b(mural|nástěnn\w*|sgrafit\w*|mosai\w*|mozai\w*|sculpture|statue|socha|sochy|bust|busta|"
+                          r"relief|reliéf|grave|graves|hrob\w*|tomb\w*|signature|signatura|podpis\w*|building|budova|"
+                          r"church|kostel\w*|plaque|pamětní deska|memorial|pomník\w*|památník\w*|monument|"
+                          r"exhibition|výstav\w*|artwork|interior|interiér|facade|fasáda|logo|coat of arms|erb)\b", re.I)
+PORTRAIT = re.compile(r"\b(portrait|portrét\w*|photo\w*|foto\w*|headshot|selfie)\b", re.I)
+
+
+def commons_file(url: str) -> str:
+    """The Commons file name a picture's address is of ("Bohumír Matal,1959.jpg"); '' when it isn't one."""
+    m = (re.search(r"/Special:FilePath/([^?#]+)", url)
+         or re.search(r"upload\.wikimedia\.org/wikipedia/commons/thumb/\w/\w\w/([^/]+)/", url)
+         or re.search(r"upload\.wikimedia\.org/wikipedia/commons/\w/\w\w/([^/?#]+)$", url))
+    return urllib.parse.unquote(m.group(1)).replace("_", " ") if m else ""
+
+
+def not_of_them(pics: dict) -> set:
+    """Of {picture url: the person's Wikidata id}, the pictures that don't show the person (Bohumír Matal's
+    Wikidata picture is his mural): unless the file's 'depicts' names them, one whose description, categories or
+    name say it's a mural, statue, grave, signature, building... and not a portrait or photo."""
+    files = {u: commons_file(u) for u in pics}
+    titles = sorted({f for f in files.values() if f})
+    bad = set()
+    for i in range(0, len(titles), 40):
+        chunk = titles[i:i + 40]
+        q = urllib.parse.quote("|".join("File:" + t for t in chunk))
+        try:
+            ents = _wiki("https://commons.wikimedia.org/w/api.php?action=wbgetentities&format=json&sites=commonswiki"
+                         f"&props=claims|info&titles={q}").get("entities", {})
+            info = _wiki("https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=categories|imageinfo"
+                         f"&iiprop=extmetadata&iiextmetadatafilter=ImageDescription&cllimit=max&titles={q}"
+                         ).get("query", {}).get("pages", {})
+        except (OSError, ValueError, KeyError):
+            continue  # (not asked: the pictures kept as they are)
+        depicts, text = {}, {}
+        for e in ents.values():
+            t = (e.get("title") or "")[5:]
+            claims = e.get("statements") or e.get("claims") or {}
+            depicts[t] = {c.get("mainsnak", {}).get("datavalue", {}).get("value", {}).get("id")
+                          for c in claims.get("P180", [])} - {None}
+        for page in info.values():
+            t = (page.get("title") or "")[5:]
+            desc = ((page.get("imageinfo") or [{}])[0].get("extmetadata", {}).get("ImageDescription", {})
+                    .get("value", ""))
+            cats = " ".join(c.get("title", "")[9:] for c in page.get("categories", []))
+            text[t] = re.sub(r"<[^>]+>", " ", desc) + " " + cats + " " + t
+        for url, f in files.items():
+            if f not in chunk:
+                continue
+            seen, words = depicts.get(f, set()), text.get(f, f)
+            if pics[url] in seen:  # (tagged as showing them; other tags may be a thing they wear: Karel Herbst)
+                continue
+            if NOT_PORTRAIT.search(words) and not PORTRAIT.search(words):
+                bad.add(url)
+    return bad
+
+
 def namesakes(names: list[str]) -> list[dict]:
     """[{name, desc, img, years, czech}] of famous people with one of the given names; OSError when Wikidata can't
     be asked (asked again later)."""
@@ -7447,7 +7504,7 @@ def namesakes(names: list[str]) -> list[dict]:
         return []
     forms += [r["l"]["value"] for r in found]  # (the name's forms in the languages around: Eugen for Evžen)
     cz = " ".join("wd:" + q for q in CZECH_STATES)
-    out, seen = [], set()
+    out, seen, shown = [], set(), {""}
     for czech, most in ((True, 14), (False, 10)):
         only = f"VALUES ?st {{ {cz} }} ?p wdt:P27 ?st ." if czech else ""
         rows = _wikidata(f"""SELECT ?p ?pLabel ?pDescription ?img ?birth ?death ?en ?cs ?de ?tmdb WHERE {{
@@ -7459,30 +7516,47 @@ def namesakes(names: list[str]) -> list[dict]:
             OPTIONAL {{ ?de schema:about ?p ; schema:isPartOf <https://de.wikipedia.org/> }}
             OPTIONAL {{ ?p wdt:P4985 ?tmdb }}
             SERVICE wikibase:label {{ bd:serviceParam wikibase:language "cs,en". }} }} ORDER BY DESC(?links)""")
-        n = 0
-        for r in rows:
+        rows = [r for r in rows if namesake_ok({"name": r["pLabel"]["value"]}, forms)]
+        qid = lambda r: r["p"]["value"].rsplit("/", 1)[1]
+        p18 = {r["img"]["value"].replace("http://", "https://") + "?width=400": qid(r) for r in rows if "img" in r}
+        wrong = not_of_them(p18)
+        # The most famous first, but those with a photo of them before those without (a drawn badge only when
+        # too few have one): the rows are three times as many as shown, so a photo-less one gives way.
+        picked, bare = [], []
+        for rank, r in enumerate(rows):
             pid = r["p"]["value"]
-            if pid in seen or n >= most or not namesake_ok({"name": r["pLabel"]["value"]}, forms):
+            if pid in seen or len(picked) >= most:
                 continue
             seen.add(pid)
-            n += 1
             year = lambda k: (re.match(r"[+-]?(\d{3,4})", r.get(k, {}).get("value", "")) or [None, None])[1]
             day = lambda k: (re.match(r"[+-]?(\d{4}-\d\d-\d\d)", r.get(k, {}).get("value", "")) or [None, ""])[1]
             born, died = year("birth"), year("death")
             img = r.get("img", {}).get("value", "")
             if img:
                 img = img.replace("http://", "https://") + "?width=400"
-            else:  # no photo on Wikidata: their Wikipedia article's picture, else a Commons photo named after them
-                img = (article_picture([r[k]["value"] for k in ("en", "cs", "de") if k in r])
-                       or commons_picture(r["pLabel"]["value"])
-                       or tmdb_picture(r.get("tmdb", {}).get("value", "")))  # (actors: TMDB, with a key)
+            if not img or img in wrong:  # no photo of them on Wikidata: their article's picture, else a Commons
+                # photo named after them, else TMDB (actors, with a key); each only when it shows them
+                img = ""
+                for find in (lambda: article_picture([r[k]["value"] for k in ("en", "cs", "de") if k in r]),
+                             lambda: commons_picture(r["pLabel"]["value"]),
+                             lambda: tmdb_picture(r.get("tmdb", {}).get("value", ""))):
+                    got = find()
+                    if got and not (commons_file(got) and not_of_them({got: qid(r)})):
+                        img = got
+                        break
+            if img and img in shown:  # the same photo twice: one person in two Wikidata items (Bohumír Bunža)
+                continue
+            shown.add(img)
             label = r["pLabel"]["value"]
             for cal in names:  # the name as the Czech calendar has it ("Saskia Burešová" shown "Saskie Burešová")
                 for alt in name_forms(cal)[1:]:
                     label = re.sub(rf"\b{re.escape(alt)}\b", cal, label)
-            out.append({"name": label, "desc": r.get("pDescription", {}).get("value", ""),
-                        "img": img, "czech": czech, "born": day("birth") or born or "", "died": day("death") or died or "",
-                        "years": f"{born}–{died}" if born and died else f"* {born}" if born else ""})
+            (picked if img else bare).append((rank, {
+                "name": label, "desc": r.get("pDescription", {}).get("value", ""),
+                "img": img, "czech": czech, "born": day("birth") or born or "", "died": day("death") or died or "",
+                "years": f"{born}–{died}" if born and died else f"* {born}" if born else ""}))
+        chosen = picked + bare[:max(0, most - len(picked))]
+        out += [p for _, p in sorted(chosen, key=lambda x: x[0])]
     return out
 
 
@@ -14714,7 +14788,7 @@ class App(Adw.Application):
             except (OSError, ValueError, AttributeError):
                 self._namesakes_file = {}
         kept = self._namesakes_file.get(key, {})
-        if kept.get("v") == 4 and (kept.get("tmdb") or not TMDB_KEY):  # (older, or before a TMDB key: anew)
+        if kept.get("v") == NAMESAKES_V and (kept.get("tmdb") or not TMDB_KEY):  # (older, or before a TMDB key: anew)
             self._namesakes[key] = self._namesakes_file[key]["people"]
             return
         if getattr(self, "_namesakes_busy", None) == key:
@@ -14735,7 +14809,7 @@ class App(Adw.Application):
         if people is None:  # not reached: asked again when the box opens next
             return False
         self._namesakes[key] = people
-        self._namesakes_file[key] = {"at": time.time(), "people": people, "v": 4, "tmdb": bool(TMDB_KEY)}
+        self._namesakes_file[key] = {"at": time.time(), "people": people, "v": NAMESAKES_V, "tmdb": bool(TMDB_KEY)}
         try:
             os.makedirs(os.path.dirname(NAMESAKES_FILE), exist_ok=True)
             with open(NAMESAKES_FILE + ".part", "w") as f:
