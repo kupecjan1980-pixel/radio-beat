@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.18"
+APP_VERSION = "0.31.19"
 
 import collections
 import ctypes
@@ -6493,6 +6493,16 @@ class GlassCard(Gtk.Box):
         return tuple((id(v.pic), id(self._morph(v)[0]), self._morph(v)[1]) for v, _ in self.behind) + \
             (TEXT_MAP["version"],)
 
+    def fresh_if_changed(self) -> None:
+        """A menu opening: its lens drawn anew only when what's behind it changed since it was built (forgetting
+        a good one made the panel rebuild it during its own opening animation: the stutter); the mirrored strips
+        (the date, the buttons) always anew, they're cheap."""
+        if self._lens_cache[0] is not None and getattr(self, "_lens_what", None) == self._what_behind():
+            self._mirror_tex = None
+            self.queue_draw()
+            return
+        self.fresh()
+
     def fresh(self) -> None:
         """Forget the lens and its mirrored strips: drawn anew from what's behind now (a menu opening)."""
         self._lens_cache = (None, None)
@@ -11104,6 +11114,65 @@ class Puddle(GlassCard):
         snap.pop()
 
 
+class OpenProfile:
+    """For 2 s after a menu, panel or box opens: what the main thread is doing (looked at every 5 ms from a thread
+    of its own) and the frames that came late; one log line each time ("Otevření …"), to find what stutters.
+    Python code shows by its function; time in GTK itself (layout, drawing, the GPU) as "GTK"."""
+    SECONDS, EVERY = 2.0, 0.005
+
+    def __init__(self):
+        self.busy = False
+        self.main = threading.main_thread().ident
+
+    def start(self, what: str, widget) -> None:
+        if self.busy or widget is None:
+            return
+        self.busy = True
+        samples: collections.Counter = collections.Counter()
+        frames: list = []
+        tick = widget.add_tick_callback(lambda w, fc: (frames.append(fc.get_frame_time()), True)[1])
+        me = os.path.abspath(__file__)
+
+        def where() -> str:
+            f = sys._current_frames().get(self.main)
+            names = []
+            while f is not None:
+                if os.path.abspath(f.f_code.co_filename) == me and f.f_code.co_name != "<module>":
+                    if f.f_code.co_name not in ("<genexpr>", "<listcomp>", "<lambda>") or not names:
+                        names.append(f.f_code.co_name)
+                f = f.f_back
+            if not names:  # only the main loop's run(): GTK's own work, or waiting
+                return "GTK"
+            return " < ".join(names[:3])
+
+        def look():
+            end = time.monotonic() + self.SECONDS
+            while time.monotonic() < end:
+                samples[where()] += 1
+                time.sleep(self.EVERY)
+            GLib.idle_add(report)
+
+        def report():
+            try:
+                widget.remove_tick_callback(tick)
+            except Exception:
+                pass
+            gaps = [(b - a) / 1000 for a, b in zip(frames, frames[1:])]
+            late = [g for g in gaps if g > 25]
+            total = sum(samples.values()) or 1
+            busy = [(k, n) for k, n in samples.most_common() if k != "GTK"][:6]
+            print(f"Otevření {what}: {len(frames)} snímků za {self.SECONDS:.0f} s, pozdě {len(late)}"
+                  + (f" (nejhorší {max(late):.0f} ms, celkem {sum(late):.0f} ms)" if late else "")
+                  + f"; Python {100 * sum(n for k, n in samples.items() if k != 'GTK') / total:.0f} % času: "
+                  + "; ".join(f"{k} {n * self.EVERY * 1000:.0f} ms" for k, n in busy), file=sys.stderr)
+            self.busy = False
+            return False
+        threading.Thread(target=look, daemon=True).start()
+
+
+OPEN_PROFILE = OpenProfile()
+
+
 class Water:
     """A glass button's water: a neck from the button, then a tall body with what it holds; it flows down
     when opened and is drawn back up into the button when closed. Over the cover when there's room (from its
@@ -11878,6 +11947,8 @@ class Window(Adw.ApplicationWindow):
         # when open, and the pill grew to the menu's width, squeezing the volume slider to half
         self.quality_pop.set_parent(self.quality_tab)
         self.quality_pop.connect("show", self._place_quality)
+        self.quality_pop.connect("show", lambda *_: (OPEN_PROFILE.start("menu kvality", self), self._close_menus(
+            keep=self.quality_pop)))
         self.quality_tab.connect("clicked", lambda *_: self.quality_pop.popup())
         self.fill_quality()
         return pill
@@ -12021,6 +12092,7 @@ class Window(Adw.ApplicationWindow):
         if self.names_pop.get_visible():
             self.names_pop.popdown()
         else:
+            self._close_menus(keep=self.names_pop)  # (a click: asked for, so the open menu makes way)
             self.names_show()
 
     def _names_auto(self) -> None:
@@ -12100,10 +12172,13 @@ class Window(Adw.ApplicationWindow):
             self._names_fill()
 
     def names_show(self) -> None:
-        """Shown over the cover like the day's box (beside the names when there's no cover)."""
-        if self.compact:
+        """Shown over the cover like the day's box (beside the names when there's no cover); not over an open
+        menu."""
+        if self.compact or self._menu_open():
             return
+        OPEN_PROFILE.start("okna jmenin", self)
         self.day_pop.popdown()
+        self.song_pop.popdown()
         area = self._day_area()
         if area and getattr(self, "_day_text_f", None) is None:  # (the day's box's text size, worked out once)
             self._day_fill()
@@ -12135,7 +12210,7 @@ class Window(Adw.ApplicationWindow):
                 rect.x, rect.y, rect.width, rect.height = round(b.get_x()) - 12, round(b.get_y()), 1, 1
                 self.names_pop.set_pointing_to(rect)
         self.names_scroll.get_vadjustment().set_value(0)
-        glass.fresh()
+        glass.fresh_if_changed()
         if not area:
             self.names_pop.set_offset(0, 0)
         self.names_pop.popup()
@@ -12203,12 +12278,13 @@ class Window(Adw.ApplicationWindow):
                                  attributes=attrs))
 
     def song_show(self) -> None:
-        """Over the cover like the day's box."""
-        if self.compact:
+        """Over the cover like the day's box; not over an open menu."""
+        if self.compact or self._menu_open():
             return
         area = self._day_area()
         if not area:
             return
+        OPEN_PROFILE.start("okna o skladbě", self)
         self.day_pop.popdown()
         self.names_pop.popdown()
         if getattr(self, "_day_text_f", None) is None:
@@ -12230,7 +12306,7 @@ class Window(Adw.ApplicationWindow):
             rect.x, rect.y, rect.width, rect.height = round(at.x), round(at.y) - 1, w, 1
             self.song_pop.set_pointing_to(rect)
         self.song_scroll.get_vadjustment().set_value(0)
-        glass.fresh()
+        glass.fresh_if_changed()
         self.song_pop.popup()
         GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
         GLib.idle_add(self._day_true, area, self.song_pop)
@@ -12364,8 +12440,12 @@ class Window(Adw.ApplicationWindow):
         self.day_text.set_margin_end(lr)
 
     def _day_show(self, view) -> None:
-        if self.compact:
+        if self.compact or self._menu_open():
             return
+        if not self.day_pop.get_visible():
+            OPEN_PROFILE.start("okna dne", self)
+        self.names_pop.popdown()
+        self.song_pop.popdown()
         self._day_fill()
         area = self._day_area()
         glass = self.day_pop.get_child()
@@ -12403,7 +12483,7 @@ class Window(Adw.ApplicationWindow):
                 r = Gdk.Rectangle()
                 r.x, r.y, r.width, r.height = round(b.get_x()) - 12, round(b.get_y()), 1, max(1, round(b.get_height()))
                 self.day_pop.set_pointing_to(r)
-        self.day_pop.get_child().fresh()  # never an earlier picture behind it
+        self.day_pop.get_child().fresh_if_changed()  # never an earlier picture behind it
         if not area:
             self.day_pop.set_offset(0, 0)
         self.day_pop.popup()
@@ -12916,13 +12996,29 @@ class Window(Adw.ApplicationWindow):
     def puddle_open(self) -> bool:
         return self.info_water.open
 
+    def _menu_open(self) -> bool:
+        """A menu the user opened (⚙, ⓘ, quality) is open: no box pops up over it."""
+        return any(w.open for w in getattr(self, "waters", [])) or (
+            hasattr(self, "quality_pop") and self.quality_pop.get_visible())
+
+    def _close_menus(self, keep=None) -> None:
+        """One at a time: every menu and box but keep put away (one opening over another looked bad and cost)."""
+        for w in getattr(self, "waters", []):
+            if w is not keep:
+                w.hide()
+        for pop in (getattr(self, "quality_pop", None), self.day_pop, self.names_pop, self.song_pop):
+            if pop is not None and pop is not keep:
+                pop.popdown()
+
     def toggle_water(self, water) -> None:
         if water.open:
             water.hide()
             return
+        OPEN_PROFILE.start("panelu ⓘ" if water is self.info_water else "panelu ⚙", self)
         for other in self.waters:
             if other is not water:
                 other.hide()
+        self.quality_pop.popdown()  # one menu at a time: never one over another
         # a box shown by itself (the day's, the name day's, the song's) is a popup above the window: what's opened
         # now must be seen, so it goes
         for pop in (self.day_pop, self.names_pop, self.song_pop):
@@ -12930,12 +13026,15 @@ class Window(Adw.ApplicationWindow):
         if water is self.info_water:
             self.puddle_mode = 0
             self._puddle_touched = time.monotonic()
-            self._fill_puddle()
+            if getattr(self, "_puddle_filled", None) != self._puddle_sig():  # (unchanged: as it was, from the top)
+                self._fill_puddle()
+            else:
+                self.puddle_scroll.get_vadjustment().set_value(0)
             if self._puddle_tick is None:
                 self._puddle_last = None
                 self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
         self.day_pop.popdown()  # the day's box makes way
-        water.body.fresh()  # never an earlier picture's lens or mirror while it opens: drawn anew
+        water.body.fresh_if_changed()  # never an earlier picture's lens or mirror while it opens
         self.refresh_effects()
         GLib.timeout_add_seconds(3, lambda: (self.refresh_effects(), False)[1])  # the strips' memory, once built
         GLib.timeout_add_seconds(4, self._warm_glass)
@@ -13174,7 +13273,14 @@ class Window(Adw.ApplicationWindow):
                 stack.append(c)
                 c = c.get_next_sibling()
 
+    def _puddle_sig(self) -> tuple:
+        """What the panel's first page shows depends on: unchanged since it was filled, it isn't built again."""
+        a = self.app
+        return (self.puddle_mode, a.about, a.facts, a.song, time.strftime("%H:%M"), len(a.news or []),
+                id(a.schedule), len(self.puddle_items), a.cz("x"))
+
     def _fill_puddle(self) -> None:
+        self._puddle_filled = self._puddle_sig() if self.puddle_mode == 0 else None
         a = self.app
         mode = self.PUDDLE_MODES[self.puddle_mode]
         for i, tab in enumerate(self.puddle_tabs):
