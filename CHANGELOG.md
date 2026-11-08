@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.20** (2026-11-08) Okno dne se při každém najetí na datum znovu neměří (velikost písma pro stejný text si pamatuje: čtvrt sekundy méně); hledání fotek slavných nositelů už nepadá na souboru bez popisu na Commons
 - **0.31.19** (2026-11-08) Vždy jen jedna nabídka: otevření ⚙, ⓘ nebo kvality zavře ostatní nabídky i okna (den, jmeniny, skladba); okna se přes otevřenou nabídku neukazují (klik na jména nabídku zavře); plynulejší otevírání: sklo panelu a oken se kreslí znovu, jen když se za ním změnil obrázek, a panel ⓘ se znovu neskládá, když se nic nezměnilo; měření trhání při otevírání do záznamu („Otevření …“)
 - **0.31.18** (2026-11-08) Fotky, které jsou právě vidět (okno jmenin, panel ⓘ), se vylepšují před fotkami připravovanými na další dny
 - **0.31.17** (2026-11-08) Okno jmenin: společná fotka více lidí (Bohumír Lomský s Ludvíkem Svobodou) se nahradí fotkou jen toho člověka z jeho kategorie na Commons nebo z článku (výřez), je-li; pozná se podle popisu „(vpravo)“, označení jiného člověka na snímku nebo kategorie jiného člověka (ne fotografa)

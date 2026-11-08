@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.19"
+APP_VERSION = "0.31.20"
 
 import collections
 import ctypes
@@ -7507,13 +7507,16 @@ def picture_verdicts(pics: dict) -> dict:
             claims = e.get("statements") or e.get("claims") or {}
             depicts[(e.get("title") or "")[5:]] = {c.get("mainsnak", {}).get("datavalue", {}).get("value", {})
                                                    .get("id") for c in claims.get("P180", [])} - {None}
+        def meta(page, field: str) -> str:  # (extmetadata is [] for a file without any, a value may be no text)
+            m = ((page.get("imageinfo") or [{}])[0] or {}).get("extmetadata")
+            v = m.get(field) if isinstance(m, dict) else None
+            v = v.get("value", "") if isinstance(v, dict) else ""
+            return re.sub(r"<[^>]+>", " ", v if isinstance(v, str) else "")
         for page in info.values():
             t = (page.get("title") or "")[5:]
-            desc[t] = re.sub(r"<[^>]+>", " ", ((page.get("imageinfo") or [{}])[0].get("extmetadata", {})
-                                              .get("ImageDescription", {}).get("value", "")))
+            desc[t] = meta(page, "ImageDescription")
             cats[t] = [c.get("title", "")[9:] for c in page.get("categories", [])]
-            artist[t] = norm(re.sub(r"<[^>]+>", " ", ((page.get("imageinfo") or [{}])[0].get("extmetadata", {})
-                                                      .get("Artist", {}).get("value", ""))))
+            artist[t] = norm(meta(page, "Artist"))
         humans = set()  # the people (not things) the files are tagged as showing
         ids = sorted(set().union(*depicts.values()) if depicts else set())
         for j in range(0, len(ids), 50):
@@ -12387,6 +12390,10 @@ class Window(Adw.ApplicationWindow):
         r = self.day_fit.get_margin_start()  # (the glass's corner radius on every side)
         tw = w - box.get_margin_start() - box.get_margin_end() - 2 * r - 4
         th = h - box.get_margin_top() - box.get_margin_bottom() - 2 * r
+        key = (tw, th, self._scale, tuple(lab.get_label() for lab in self._day_labels))
+        if getattr(self, "_day_fit_key", None) == key:  # (the same text in the same box: the size found before;
+            self._day_scale(self._day_text_f)          # twelve layouts of it cost a quarter of a second)
+            return
         lo, hi = 0.3, self.DAY_TEXT_MOST * max(1.0, self._scale)
         for _ in range(12):  # (a binary search over the scale)
             f = (lo + hi) / 2
@@ -12398,6 +12405,7 @@ class Window(Adw.ApplicationWindow):
                 hi = f
         self._day_scale(lo)
         self._day_text_f = lo  # (the name day's box uses the same size)
+        self._day_fit_key = key
 
     def _day_scale(self, f) -> None:
         """All the day's labels at `f` times their size (None: as they are); the gaps before headlines too."""
