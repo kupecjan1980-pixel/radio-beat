@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.16"
+APP_VERSION = "0.31.17"
 
 import collections
 import ctypes
@@ -7289,7 +7289,7 @@ NAMESAKES_FILE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expand
                               "namesakes.json")
 CZECH_STATES = ("Q213", "Q33946", "Q42585")  # Czech Republic, Czechoslovakia, Kingdom of Bohemia
 NAMESAKES_KEEP = 30 * 86400
-NAMESAKES_V = 5  # (5: pictures that aren't of the person dropped, people with a photo chosen first)
+NAMESAKES_V = 6  # (5: pictures that aren't of the person dropped, people with a photo first; 6: group photos)
 
 
 NAMESAKE_PHOTOS = os.path.join(os.path.dirname(NAMESAKES_FILE), "namesakes")  # their photos, as downloaded
@@ -7446,17 +7446,33 @@ def commons_file(url: str) -> str:
     """The Commons file name a picture's address is of ("Bohumír Matal,1959.jpg"); '' when it isn't one."""
     m = (re.search(r"/Special:FilePath/([^?#]+)", url)
          or re.search(r"upload\.wikimedia\.org/wikipedia/commons/thumb/\w/\w\w/([^/]+)/", url)
-         or re.search(r"upload\.wikimedia\.org/wikipedia/commons/\w/\w\w/([^/?#]+)$", url))
+         or re.search(r"upload\.wikimedia\.org/wikipedia/commons/\w/\w\w/([^/?#]+)(?:[?#]|$)", url))
     return urllib.parse.unquote(m.group(1)).replace("_", " ") if m else ""
 
 
-def not_of_them(pics: dict) -> set:
-    """Of {picture url: the person's Wikidata id}, the pictures that don't show the person (Bohumír Matal's
-    Wikidata picture is his mural): unless the file's 'depicts' names them, one whose description, categories or
-    name say it's a mural, statue, grave, signature, building... and not a portrait or photo."""
+PERSON_CAT = re.compile(r"^[A-ZÀ-ŽА-Я][a-zà-žа-я'.-]+(?: [A-ZÀ-ŽА-Я][a-zà-žа-я'.-]+){1,2}$")
+NOT_PERSON_CAT = re.compile(r"\b(?:Team|Club|Band|Orchestra|Festival|Cup|Prize|Award|Awards|Gallery|Museum|Hall|"
+                            r"Theatre|Theater|Stadium|Arena|Street|Square|Bridge|Castle|Church|Park|Station|Airport|"
+                            r"Hotel|Palace|Records|Studio|Studios|Tour|Games|Olympics|Party|University|School|Academy|"
+                            r"Company|Group|Railway|Island|Lake|River|Mountain|Mountains|Valley|City|Republic|Kingdom|"
+                            r"Empire|Army|Navy|Force|Regiment|Division|Corps|Brigade|Battalion|Volley|Basket|Hockey|Football|Handball|"
+                            r"Rugby|Racing|Motorsport|Sport|Sports|Champions?|Players?|Medall?ists?|Winners?|Members?|"
+                            r"People|Olympians?|Boxers?|Cyclists?|Athletes?|Teams|Clubs|Bands)\b")  # "Ludvík Svoboda"
+SIDE_WORDS = re.compile(r"\((?:vpravo|vlevo|zprava|zleva|right|left|rechts|links|справа|слева|uprostřed|center|"
+                        r"centre|middle)\)|\b(?:on the (?:left|right)|vpravo|vlevo|справа|слева)\b", re.I)
+META_CAT = re.compile(r"^(?:PD|CC|GFDL|FAL|Photos? |Images? |Files? |Pictures? |Portraits? |Self-published|Uploaded|"
+                      r"Media |Paintings |Template |Location |Creator)", re.I)
+
+
+def picture_verdicts(pics: dict) -> dict:
+    """{picture url: (Wikidata id, name, their Commons category)} -> {url: "ok" | "not" | "group"}: "not" when the picture doesn't show
+    them (Bohumír Matal's Wikidata picture is his mural: a mural, statue, grave, signature, building... and no word
+    of a portrait), "group" when it shows others too (Bohumír Lomský's is him with Ludvík Svoboda): tagged as showing
+    another person, in another person's category (not the photographer's), or "(vpravo)" in the description. A file whose 'depicts' names them alone
+    is theirs; one Commons can't be asked about stays "ok"."""
     files = {u: commons_file(u) for u in pics}
     titles = sorted({f for f in files.values() if f})
-    bad = set()
+    out = {u: "ok" for u in pics}
     for i in range(0, len(titles), 40):
         chunk = titles[i:i + 40]
         q = urllib.parse.quote("|".join("File:" + t for t in chunk))
@@ -7464,31 +7480,70 @@ def not_of_them(pics: dict) -> set:
             ents = _wiki("https://commons.wikimedia.org/w/api.php?action=wbgetentities&format=json&sites=commonswiki"
                          f"&props=claims|info&titles={q}").get("entities", {})
             info = _wiki("https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=categories|imageinfo"
-                         f"&iiprop=extmetadata&iiextmetadatafilter=ImageDescription&cllimit=max&titles={q}"
+                         f"&iiprop=extmetadata&iiextmetadatafilter=ImageDescription|Artist&cllimit=max&titles={q}"
                          ).get("query", {}).get("pages", {})
         except (OSError, ValueError, KeyError):
             continue  # (not asked: the pictures kept as they are)
-        depicts, text = {}, {}
+        depicts, desc, cats, artist = {}, {}, {}, {}
         for e in ents.values():
-            t = (e.get("title") or "")[5:]
             claims = e.get("statements") or e.get("claims") or {}
-            depicts[t] = {c.get("mainsnak", {}).get("datavalue", {}).get("value", {}).get("id")
-                          for c in claims.get("P180", [])} - {None}
+            depicts[(e.get("title") or "")[5:]] = {c.get("mainsnak", {}).get("datavalue", {}).get("value", {})
+                                                   .get("id") for c in claims.get("P180", [])} - {None}
         for page in info.values():
             t = (page.get("title") or "")[5:]
-            desc = ((page.get("imageinfo") or [{}])[0].get("extmetadata", {}).get("ImageDescription", {})
-                    .get("value", ""))
-            cats = " ".join(c.get("title", "")[9:] for c in page.get("categories", []))
-            text[t] = re.sub(r"<[^>]+>", " ", desc) + " " + cats + " " + t
+            desc[t] = re.sub(r"<[^>]+>", " ", ((page.get("imageinfo") or [{}])[0].get("extmetadata", {})
+                                              .get("ImageDescription", {}).get("value", "")))
+            cats[t] = [c.get("title", "")[9:] for c in page.get("categories", [])]
+            artist[t] = norm(re.sub(r"<[^>]+>", " ", ((page.get("imageinfo") or [{}])[0].get("extmetadata", {})
+                                                      .get("Artist", {}).get("value", ""))))
+        humans = set()  # the people (not things) the files are tagged as showing
+        ids = sorted(set().union(*depicts.values()) if depicts else set())
+        for j in range(0, len(ids), 50):
+            try:
+                found = _wiki("https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims"
+                              f"&ids={'|'.join(ids[j:j + 50])}").get("entities", {})
+            except (OSError, ValueError, KeyError):
+                continue
+            humans |= {k for k, e in found.items() if any(c.get("mainsnak", {}).get("datavalue", {}).get("value", {})
+                                                          .get("id") == "Q5" for c in e.get("claims", {}).get("P31", []))}
         for url, f in files.items():
             if f not in chunk:
                 continue
-            seen, words = depicts.get(f, set()), text.get(f, f)
-            if pics[url] in seen:  # (tagged as showing them; other tags may be a thing they wear: Karel Herbst)
+            qid, name, own = (tuple(pics[url]) + ("",))[:3]
+            seen = depicts.get(f, set())
+            words = desc.get(f, "") + " " + " ".join(cats.get(f, [])) + " " + f
+            if qid not in seen and NOT_PORTRAIT.search(words) and not PORTRAIT.search(words):
+                out[url] = "not"
                 continue
-            if NOT_PORTRAIT.search(words) and not PORTRAIT.search(words):
-                bad.add(url)
-    return bad
+            others = [c for c in cats.get(f, []) if PERSON_CAT.match(c) and not META_CAT.match(c) and not NOT_PERSON_CAT.search(c)
+                      and norm(c) not in (norm(name), norm(own)) and not set(norm(c).split()) <= set(norm(name).split())
+                      and norm(c) not in artist.get(f, "")]  # (not their own: "Karel Růžička"; not the photographer's)
+            if (seen & humans) - {qid} or others or SIDE_WORDS.search(desc.get(f, "")):
+                out[url] = "group"
+    return out
+
+
+def not_of_them(pics: dict) -> set:
+    """The pictures of {url: (Wikidata id, name)} that aren't of the person alone (picture_verdicts)."""
+    return {u for u, v in picture_verdicts(pics).items() if v != "ok"}
+
+
+def category_photo(category: str, qid: str, name: str, skip: str = "") -> str:
+    """A photo of the person alone from their Commons category ("Bohumír Lomský": the crop of him from a photo
+    with Ludvík Svoboda), 400 px; ''. Files tagged as showing them come first."""
+    if not category:
+        return ""
+    try:
+        members = _wiki("https://commons.wikimedia.org/w/api.php?action=query&format=json&list=categorymembers"
+                        f"&cmtype=file&cmlimit=50&cmtitle={urllib.parse.quote('Category:' + category)}"
+                        )["query"]["categorymembers"]
+    except (OSError, ValueError, KeyError):
+        return ""
+    urls = ["https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote(m["title"][5:]) + "?width=400"
+            for m in members if re.search(r"\.(jpe?g|png|tiff?)$", m["title"], re.I)]
+    urls = [u for u in urls if commons_file(u) != commons_file(skip)]
+    good = picture_verdicts({u: (qid, name, category) for u in urls})
+    return next((u for u in urls if good.get(u) == "ok"), "")
 
 
 def namesakes(names: list[str]) -> list[dict]:
@@ -7514,12 +7569,13 @@ def namesakes(names: list[str]) -> list[dict]:
             OPTIONAL {{ ?en schema:about ?p ; schema:isPartOf <https://en.wikipedia.org/> }}
             OPTIONAL {{ ?cs schema:about ?p ; schema:isPartOf <https://cs.wikipedia.org/> }}
             OPTIONAL {{ ?de schema:about ?p ; schema:isPartOf <https://de.wikipedia.org/> }}
-            OPTIONAL {{ ?p wdt:P4985 ?tmdb }}
+            OPTIONAL {{ ?p wdt:P4985 ?tmdb }} OPTIONAL {{ ?p wdt:P373 ?cat }}
             SERVICE wikibase:label {{ bd:serviceParam wikibase:language "cs,en". }} }} ORDER BY DESC(?links)""")
         rows = [r for r in rows if namesake_ok({"name": r["pLabel"]["value"]}, forms)]
         qid = lambda r: r["p"]["value"].rsplit("/", 1)[1]
-        p18 = {r["img"]["value"].replace("http://", "https://") + "?width=400": qid(r) for r in rows if "img" in r}
-        wrong = not_of_them(p18)
+        p18 = {r["img"]["value"].replace("http://", "https://") + "?width=400":
+               (qid(r), r["pLabel"]["value"], r.get("cat", {}).get("value", "")) for r in rows if "img" in r}
+        verdict = picture_verdicts(p18)
         # The most famous first, but those with a photo of them before those without (a drawn badge only when
         # too few have one): the rows are three times as many as shown, so a photo-less one gives way.
         picked, bare = [], []
@@ -7534,14 +7590,16 @@ def namesakes(names: list[str]) -> list[dict]:
             img = r.get("img", {}).get("value", "")
             if img:
                 img = img.replace("http://", "https://") + "?width=400"
-            if not img or img in wrong:  # no photo of them on Wikidata: their article's picture, else a Commons
-                # photo named after them, else TMDB (actors, with a key); each only when it shows them
-                img = ""
-                for find in (lambda: article_picture([r[k]["value"] for k in ("en", "cs", "de") if k in r]),
+            if not img or verdict.get(img) != "ok":  # no photo of them alone on Wikidata: one from their Commons
+                # category, their article's picture, a Commons photo named after them, TMDB (actors, with a key);
+                # each only when it shows them alone
+                who, skip, img = (qid(r), r["pLabel"]["value"], r.get("cat", {}).get("value", "")), img, ""
+                for find in (lambda: category_photo(who[2], who[0], who[1], skip=skip),
+                             lambda: article_picture([r[k]["value"] for k in ("en", "cs", "de") if k in r]),
                              lambda: commons_picture(r["pLabel"]["value"]),
                              lambda: tmdb_picture(r.get("tmdb", {}).get("value", ""))):
                     got = find()
-                    if got and not (commons_file(got) and not_of_them({got: qid(r)})):
+                    if got and not (commons_file(got) and not_of_them({got: who})):
                         img = got
                         break
             if img and img in shown:  # the same photo twice: one person in two Wikidata items (Bohumír Bunža)

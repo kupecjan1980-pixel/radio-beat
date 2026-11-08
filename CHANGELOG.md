@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.17** (2026-11-08) Okno jmenin: společná fotka více lidí (Bohumír Lomský s Ludvíkem Svobodou) se nahradí fotkou jen toho člověka z jeho kategorie na Commons nebo z článku (výřez), je-li; pozná se podle popisu „(vpravo)“, označení jiného člověka na snímku nebo kategorie jiného člověka (ne fotografa)
 - **0.31.16** (2026-11-08) Okno jmenin dává přednost slavným nositelům s jejich fotkou (bez fotky jen, když jich je s fotkou málo); obrázek, který je neukazuje (u Bohumíra Matala jeho nástěnná malba), se nepočítá; tentýž člověk dvakrát (dvě položky na Wikidatech) jen jednou
 - **0.31.15** (2026-11-07) Malé okno (nad oznamovací oblastí v KDE) jen s obalem a údaji o skladbě: bez skleněných nabídek, počasí, Měsíce, data a ovládání; ikona v oznamovací oblasti okno skryje a ukáže (už nelétá přes levý okraj); počasí a Měsíc stejně velké na každé obrazovce (podíl výšky okna)
 - **0.31.14** (2026-11-07) „Den bizonů v USA“ místo „Národní den bizonů“
