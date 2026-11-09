@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.32"
+APP_VERSION = "0.31.33"
 
 import collections
 import ctypes
@@ -13302,6 +13302,12 @@ class Window(Adw.ApplicationWindow):
         gear_body = Puddle(behind, orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.END, valign=Gtk.Align.START)
         gear_body.append(self.menu_content)
         self.gear_water = Water(self, self.gear_tile, gear_body, overlay)
+        # its scrollbar only once the mouse is in it: one fading in as it opens changes the panel every frame for a
+        # second or two, and it can't be kept as one picture (the opening at half the frames)
+        move = Gtk.EventControllerMotion()
+        move.connect("motion", lambda *_: self.menu_content.get_policy()[1] == Gtk.PolicyType.AUTOMATIC
+                     or self.menu_content.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC))
+        gear_body.add_controller(move)
 
         self.waters = [self.info_water, self.gear_water]
         # a click anywhere else draws it back into its button
@@ -13371,6 +13377,8 @@ class Window(Adw.ApplicationWindow):
             if self._puddle_tick is None:
                 self._puddle_last = None
                 self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
+        if water is self.gear_water:
+            self.menu_content.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)  # (see the panel's making)
         self.day_pop.popdown()  # the day's box makes way
         water.body.fresh_if_changed()  # never an earlier picture's lens or mirror while it opens
         self.refresh_effects()
