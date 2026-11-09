@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.27"
+APP_VERSION = "0.31.28"
 
 import collections
 import ctypes
@@ -5729,6 +5729,19 @@ def widget_sig(w, out: list) -> None:
         c = c.get_next_sibling()
 
 
+def _node_leaves(node) -> list:
+    """The nodes a snapshot of a widget's children came to, without the moves GTK wraps them in: for each child that
+    didn't change these are the very same ones as last time."""
+    def bare(n):
+        while isinstance(n, Gsk.TransformNode):
+            n = n.get_child()
+        return n
+    node = bare(node)
+    if isinstance(node, Gsk.ContainerNode):
+        return [bare(node.get_child(i)) for i in range(node.get_n_children())]
+    return [node]
+
+
 class GlassCard(Gtk.Box):
     """A liquid-glass panel: what's behind it (the backdrop and the cover) is
     not blurred but refracted, like through a lens: sharp and true in the
@@ -6187,9 +6200,46 @@ class GlassCard(Gtk.Box):
             # (bent once it's open: while it flows, the content as it is, light)
             self._warped_children(snap, self.get_width(), self.get_height())
         else:
-            Gtk.Box.do_snapshot(self, snap)
+            self._kids(snap, self.get_width(), self.get_height())
         if self.lift:
             snap.restore()
+
+    KIDS_STILL = 2  # frames what's inside must stay the same before it's kept as a picture
+
+    def _kids(self, snap, w: int, h: int) -> None:
+        """What's inside the glass. A big glass keeps it as one picture while it doesn't change: the falling motifs
+        redraw the glass every frame, and with them every label's blurred halo (over half the frame at 4K). GTK
+        hands back the very same nodes for widgets that didn't change, so comparing those is exact: anything
+        moving (a scroll, a switch) is drawn live, and kept again once it's still."""
+        if w * h < self.FINISH_BAKE or not self.get_native():
+            Gtk.Box.do_snapshot(self, snap)
+            return
+        s = Gtk.Snapshot()
+        Gtk.Box.do_snapshot(self, s)
+        node = s.to_node()
+        if node is None:
+            return
+        leaves = _node_leaves(node)
+        old = getattr(self, "_kids_leaves", None)
+        same = old is not None and len(old) == len(leaves) and all(a == b for a, b in zip(old, leaves))
+        self._kids_leaves = leaves  # (held: a node let go of could give its address to a new one)
+        self._kids_still = getattr(self, "_kids_still", 0) + 1 if same else 0
+        native = self.get_native()
+        surf = native.get_surface()
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+        baked = getattr(self, "_kids_baked", None)
+        if not same or (baked and baked[0] != (w, h, k)):
+            baked = self._kids_baked = None
+        if baked is None and self._kids_still >= self.KIDS_STILL:
+            b = Gtk.Snapshot()
+            b.scale(k, k)
+            b.append_node(node)
+            baked = self._kids_baked = ((w, h, k), native.get_renderer().render_texture(
+                b.to_node(), Graphene.Rect().init(0, 0, w * k, h * k)))
+        if baked:
+            snap.append_texture(baked[1], Graphene.Rect().init(0, 0, w, h))
+        else:
+            snap.append_node(node)
 
     def draw_mirrored(self, snap, tile) -> None:
         """A button seen through the glass upside down, as in a mirror: `tile` (its glass) where it is, the
