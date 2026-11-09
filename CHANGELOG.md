@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.30** (2026-11-09) Změna obalu za sklem: sklo spočítá jen starý a nový obraz a plynule je prolne (dřív každý ze 24 kroků na každém skle znovu, z grafické karty a zpět; trhalo to až na 10 snímků za sekundu)
 - **0.31.29** (2026-11-09) Padající motivy se pod otevřeným panelem nekreslí (nejsou tam vidět) a přes sklo se kreslí přímo, ne přes samostatnou vrstvu velikosti panelu kvůli zaobleným rohům
 - **0.31.28** (2026-11-09) Obsah velkých skleněných panelů a oken se, dokud se nemění, kreslí jako jeden obrázek: padající motivy za ním už nenutí grafickou kartu překreslovat text a jeho záře v každém snímku
 - **0.31.27** (2026-11-09) Podtitulky v panelech ⚙ a ⓘ světlejší: čitelné i na světlém obalu

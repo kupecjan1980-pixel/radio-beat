@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.29"
+APP_VERSION = "0.31.30"
 
 import collections
 import ctypes
@@ -5901,6 +5901,10 @@ class GlassCard(Gtk.Box):
         keep up with: smooth on the GPU, else just halfway (the layers take frames to build)."""
         if not hasattr(view, "morph"):
             return None, 1.0
+        pin = self._morph_pin
+        if pin is not None:  # (the lens worked out for one end of the morph: the old picture or the new one alone)
+            old, _ = view.morph(24)
+            return (None, 1.0) if old is None or pin else (old, 0.0)
         return view.morph(24 if EFFECTS["gpu"] and GPU.ok else 2)
 
     @staticmethod
@@ -6298,7 +6302,13 @@ class GlassCard(Gtk.Box):
         snap.push_rounded_clip(rr)
         gpu = self._gpu_lens(w, h) if EFFECTS["gpu"] and GPU.start() else None
         tex = gpu or (self._lens_texture(w, h) if self.cache_lens else None)
-        if tex:
+        if isinstance(tex, tuple):  # the picture behind changing: its two lenses, cross-faded
+            snap.push_cross_fade(tex[2])
+            snap.append_texture(tex[0], box)
+            snap.pop()
+            snap.append_texture(tex[1], box)
+            snap.pop()
+        elif tex:
             snap.append_texture(tex, box)
         elif self.cache_lens:  # its first texture still being built: plainly magnified meanwhile
             self._behind(snap, w, h, self.mag, self.mag)
@@ -6462,7 +6472,66 @@ class GlassCard(Gtk.Box):
             return None  # the last lens shows an earlier picture (and its mirror): the current one plainly meanwhile
         return self._lens_cache[1]
 
+    _morph_pin = None  # 0/1: _morph answers for that end of the picture's change
+    _morph_lens = None  # {"who": which pictures, "ends": [(lens, its GPU state, its flat picture) or None] x 2}
+    _morph_built = [None]  # the frame a morph's lens was last built in: one a frame, all glass together
+
+    def _morph_t(self):
+        """How far the picture behind is into its change (0..1, exactly: the cross-fade costs nothing), or None."""
+        for view, _ in self.behind:
+            if hasattr(view, "morph") and view.morph(24)[0] is not None:
+                return view.t
+        return None
+
+    def _morph_drop(self, keep_new: bool = False) -> None:
+        """A morph's lenses let go of; `keep_new`: the new picture's goes on as the glass's own, ready."""
+        m, self._morph_lens = self._morph_lens, None
+        if not m:
+            return
+        ends = m["ends"]
+        if keep_new and ends[1]:
+            GPU.forget(self._gpu.get("src", 0))
+            _, self._gpu, self._flat_cache = ends[1]
+            ends[1] = None
+        for e in ends:
+            if e:
+                GPU.forget(e[1].get("src", 0))
+
     def _gpu_lens(self, w: float, h: float):
+        """The lens: one texture, or while the picture behind changes (old lens, new lens, how far): those two are
+        worked out once and cross-faded. Bending every step of a 4 s morph on every glass was a picture rendered,
+        taken off the graphics card and back 24 x 12 times; the screen dropped to 10 frames a second."""
+        t = self._morph_t()
+        if t is None:
+            if self._morph_lens:
+                self._morph_drop(keep_new=True)
+            return self._gpu_lens_one(w, h)
+        who = tuple((id(v.pic), id(getattr(v, "old", None))) for v, _ in self.behind)
+        m = self._morph_lens
+        if not m or m["who"] != who:
+            self._morph_drop()
+            m = self._morph_lens = {"who": who, "ends": [None, None]}
+        ends = m["ends"]
+        if ends[0] is None and self._gpu.get("out") is not None:  # the glass as it was: already the old picture
+            ends[0], self._gpu, self._flat_cache = (self._gpu["out"], self._gpu, self._flat_cache), {}, (None, None)
+        clock = self.get_frame_clock()
+        frame = clock.get_frame_counter() if clock else None
+        for pin in (0, 1):
+            if ends[pin] is None and GlassCard._morph_built[0] != frame:
+                GlassCard._morph_built[0] = frame
+                self._morph_pin = pin
+                try:
+                    out = self._gpu_lens_one(w, h)
+                finally:
+                    self._morph_pin = None
+                if out is None:
+                    return None
+                ends[pin], self._gpu, self._flat_cache = (out, self._gpu, self._flat_cache), {}, (None, None)
+        if ends[0] and ends[1]:
+            return ends[0][0], ends[1][0], t
+        return (ends[0] or ends[1] or (None,))[0]
+
+    def _gpu_lens_one(self, w: float, h: float):
         """The lens worked out by the graphics card (GPU): what's behind as one picture (uploaded when it
         changes), bent in one pass; drawn again only when the glass, its magnification or the picture change."""
         try:
@@ -6591,6 +6660,7 @@ class GlassCard(Gtk.Box):
         self._build = None
         self._mirror_tex = None
         self._lens_what = None
+        self._morph_drop()
         self._gpu.update(flat=None, out=None)
         self.queue_draw()
 
