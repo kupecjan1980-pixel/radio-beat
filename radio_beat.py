@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.24"
+APP_VERSION = "0.31.25"
 
 import collections
 import ctypes
@@ -11289,6 +11289,23 @@ class OpenProfile:
             self.busy = False
             return False
         threading.Thread(target=look, daemon=True).start()
+        GLib.timeout_add(1500, self._dump_nodes, widget)
+
+    @staticmethod
+    def _dump_nodes(widget) -> bool:
+        """Only if the file `dump-nodes` is there (it's removed): what the window draws, at the screen's scale, written
+        as a render node file next to the log, for measuring it apart (gtk4-rendernode-tool benchmark)."""
+        flag = os.path.expanduser("~/.local/state/radio-beat/dump-nodes")
+        if os.path.exists(flag):
+            os.remove(flag)
+            content = widget.get_content()
+            k = widget.get_surface().get_scale()
+            s = Gtk.Snapshot()
+            s.scale(k, k)
+            Gtk.WidgetPaintable.new(content).snapshot(s, content.get_width(), content.get_height())
+            s.to_node().write_to_file(flag + ".node")
+            print("Otevření: uloženo", flag + ".node", file=sys.stderr)
+        return False
 
 
 OPEN_PROFILE = OpenProfile()
