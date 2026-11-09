@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.24** (2026-11-09) Stíny a světlo velkých skleněných panelů a oken se kreslí jednou jako obrázek, ne znovu v každém snímku
 - **0.31.23** (2026-11-09) Obrázek za sklem velkých panelů a oken má nejvýš 8 Mpx (bylo až 24 Mpx, 95 MB při každém přenosu z grafické karty a zpět); měření otevírání rozepíše čas snímku (rozvržení, kreslení, čekání) a vytížení procesoru
 - **0.31.22** (2026-11-09) Plynulejší otevírání nabídek a oken: během otevírání se okno za sklem znovu nefotí (snímek z grafické karty a zpět stál snímek či dva), až potom; padající motivy se při rozlévání panelu nezrcadlí v jeho okraji; velikost písma okna dne se spočítá předem (první otevření okna dne, jmenin nebo skladby po startu bez čtvrtvteřinového zaseknutí); měření otevírání ukáže i vytížení GPU a nic nezapisuje, když okno není vidět
 - **0.31.21** (2026-11-09) Měsíc vlevo od ⓘ ukazuje příští fázi po osminách (nov, dorůstající srpek, první čtvrť, dorůstající měsíc, úplněk, couvající měsíc, poslední čtvrť, couvající srpek), ne jen čtvrtě

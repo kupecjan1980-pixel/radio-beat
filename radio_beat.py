@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.23"
+APP_VERSION = "0.31.24"
 
 import collections
 import ctypes
@@ -6639,10 +6639,49 @@ class GlassCard(Gtk.Box):
     def _glare(self, snap, w: float, h: float) -> None:
         glass_glare(snap, w, h, self.radius)
 
+    FINISH_BAKE = 120_000  # glass at least this big (logical px²): its shading and light drawn once, as a picture
+    _finish_baked = (None, None, 0.0)  # (what it depends on, the picture, when it was made)
+
+    def _finish_tex(self, w: float, h: float, box, rr, rim: float):
+        """The shading and light of a big glass as one picture, made again only when they change: at 4K the blurred
+        inset shadows are worked out for every pixel of the panel, every frame the falling motifs redraw it."""
+        native = self.get_native()
+        surf = native.get_surface() if native else None
+        if not surf:
+            return None
+        k = surf.get_scale() if hasattr(surf, "get_scale") else self.get_scale_factor()
+        ok, sb = self.scrim.compute_bounds(self) if self.scrim else (False, None)
+        key = (w, h, k, self.radius, rim, self.shade, self.tint, self.color, self.shine, self.frame, self.concave,
+               (round(sb.get_y(), 1), round(sb.get_height(), 1)) if ok else None)
+        baked = self._finish_baked
+        if baked[0] == key:
+            return baked[1]
+        now = time.monotonic()
+        if now - baked[2] < 0.3:  # (changing all the time, a resize: drawn as it is till it settles)
+            return None
+        s = Gtk.Snapshot()
+        s.scale(k, k)
+        s.push_rounded_clip(rr)  # (popped in the layers, as the glass's own is)
+        self._finish_layers(s, w, h, box, rr, rim)
+        node = s.to_node()
+        if node is None:
+            return None
+        tex = native.get_renderer().render_texture(node, Graphene.Rect().init(0, 0, w * k, h * k))
+        self._finish_baked = (key, tex, now)
+        return tex
+
     def _finish(self, snap, w: float, h: float, box, rr, rim: float) -> None:
-        """Over the lens: the flash, the shading, the light on the edges (cheap, drawn each time)."""
+        """Over the lens: the flash, then the shading and the light on the edges."""
         if self.flash > 0:
             snap.append_color(_rgba(255, 255, 255, 0.28 * self.flash), box)
+        tex = self._finish_tex(w, h, box, rr, rim) if w * h >= self.FINISH_BAKE else None
+        if tex:
+            snap.pop()  # (the glass's rounded clip: the picture has its own)
+            snap.append_texture(tex, box)
+            return
+        self._finish_layers(snap, w, h, box, rr, rim)
+
+    def _finish_layers(self, snap, w: float, h: float, box, rr, rim: float) -> None:
         ok, sb = self.scrim.compute_bounds(self) if self.scrim else (False, None)
         if ok:
             # See-through: the same shading the window has here (the text panel's gradient), nothing more.
