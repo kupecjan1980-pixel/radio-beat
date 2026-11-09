@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.26** (2026-11-09) Panely ⚙ a ⓘ a skleněná nabídka: tmavá záře kolem písmen má místo sedmi vrstev tři (každá vrstva každého popisku byl jeden průchod rozostření v každém snímku; 343 z nich zabíralo víc než polovinu času snímku), podtitulky bez samostatné průhledné vrstvy
 - **0.31.25** (2026-11-09) Pro hledání trhání: na vyžádání (soubor `dump-nodes` vedle záznamu) se uloží, co okno kreslí
 - **0.31.24** (2026-11-09) Stíny a světlo velkých skleněných panelů a oken se kreslí jednou jako obrázek, ne znovu v každém snímku
 - **0.31.23** (2026-11-09) Obrázek za sklem velkých panelů a oken má nejvýš 8 Mpx (bylo až 24 Mpx, 95 MB při každém přenosu z grafické karty a zpět); měření otevírání rozepíše čas snímku (rozvržení, kreslení, čekání) a vytížení procesoru

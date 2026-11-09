@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.25"
+APP_VERSION = "0.31.26"
 
 import collections
 import ctypes
@@ -4969,7 +4969,8 @@ scale.vol-slider slider { box-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px
                                      padding-left: 0; padding-right: 0; }  /* square, like the gear's */
 /* the panels' and menus' text: a dark halo round the letters themselves (readable on a bright cover), the glass
    as clear as ever */
-.puddle label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), 0 0 1px rgba(0,0,0,1), 0 0 3px rgba(0,0,0,1), 0 0 7px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.9), 0 0 14px rgba(0,0,0,0.85), 0 0 22px rgba(0,0,0,0.75); }
+.puddle label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,1); }  /* (three layers: each is a blur pass per label every frame; seven on 49 labels were 50 of the 85 ms a frame took) */
+.puddle label.subtitle, .puddle label.dim-label { opacity: 1; color: rgba(255,255,255,0.6); }  /* (no see-through group per label: drawn apart each frame) */
 .puddle button.puddle-tab label { text-shadow: -1px 2px 1px rgba(0,0,0,0.9), -2px 3px 5px rgba(0,0,0,0.65); }
 .puddle switch, popover.glass-menu switch { box-shadow: inset 0 0 0 2px rgba(0,0,0,0.6), 0 0 0 1px rgba(0,0,0,0.5),
                                                        0 0 7px rgba(0,0,0,0.85); }  /* a dark outline: seen on white too */
@@ -5017,7 +5018,7 @@ button.quality-tab label { color: white; text-shadow: -1px 2px 1px rgba(0,0,0,0.
 .glass-disc > button.disc-btn:active { background: rgba(0,0,0,0.15); }
 
 popover.glass-menu > contents { background: none; box-shadow: 0 6px 22px rgba(0,0,0,0.45); padding: 0; border-radius: 16px; }
-popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8), 0 0 1px rgba(0,0,0,1), 0 0 3px rgba(0,0,0,1), 0 0 7px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.9), 0 0 14px rgba(0,0,0,0.85), 0 0 22px rgba(0,0,0,0.75); }
+popover.glass-menu label { text-shadow: -1px 1px 2px rgba(0,0,0,0.8), 0 0 3px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,1); }
 .overlay-header:backdrop, .overlay-header:backdrop * { opacity: 1; filter: none; }  /* not faded when unfocused */
 
 /* Under the mouse: pause, stop, the speaker and close pump once a second; the gear ticks round like a watch's
