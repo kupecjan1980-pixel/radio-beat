@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.28"
+APP_VERSION = "0.31.29"
 
 import collections
 import ctypes
@@ -6304,6 +6304,14 @@ class GlassCard(Gtk.Box):
             self._behind(snap, w, h, self.mag, self.mag)
         else:
             self._lens(snap, w, h)
+        baked = self._finish_tex(w, h, box, rr, rim) if w * h >= self.FINISH_BAKE else None
+        if baked:
+            if self.flash > 0:
+                snap.append_color(_rgba(255, 255, 255, 0.28 * self.flash), box)
+            snap.pop()  # (the rounded clip: the picture has its corners, the motifs have faded out by the edge)
+            self._snow_through(snap, w, h, rr if getattr(self, "reveal", 1.0) >= 1.0 else None)
+            snap.append_texture(baked, box)
+            return
         self._snow_through(snap, w, h)
         self._finish(snap, w, h, box, rr, rim)
 
@@ -6313,9 +6321,11 @@ class GlassCard(Gtk.Box):
 
     SNOW_FAINT = 1.0  # the falling motifs behind glass as bright as beside it (the glass darker instead)
 
-    def _snow_through(self, snap, w: float, h: float) -> None:
+    def _snow_through(self, snap, w: float, h: float, rr=None) -> None:
         """The falling motifs seen through it: magnified like its middle, fading out towards the edges, where
-        those just beyond are mirrored in the rim; drawn every frame over the lens."""
+        those just beyond are mirrored in the rim; drawn every frame over the lens. `rr`: no rounded clip around
+        it (the glass's corners, for the mirrored ones here): under one each turned picture, or a whole-panel
+        group of them, is drawn apart first, and those in the middle have faded out before they reach a corner."""
         snow = getattr(getattr(self, "win", None), "snow", None)
         if snow is None or not snow.area:
             return
@@ -6334,17 +6344,23 @@ class GlassCard(Gtk.Box):
         def middle(fx, fy):
             px, py = w / 2 + (fx - gx - w / 2) * mag, h / 2 + (fy - gy - h / 2) * mag
             return faint * max(0.0, min(1.0, min(px, w - px, py, h - py) / f))
+        if rr is not None:
+            snap.push_clip(Graphene.Rect().init(0, 0, w, h))
         snap.save()
         snap.translate(Graphene.Point().init(w / 2, h / 2))
         snap.scale(mag, mag)
         snap.translate(Graphene.Point().init(-w / 2, -h / 2))
-        snow.draw(snap, o.x, o.y, (gx, gy, w, h), middle)
+        snow.draw(snap, o.x, o.y, (gx, gy, w, h), middle, group=rr is None)
         snap.restore()
+        if rr is not None:
+            snap.pop()
         if m < 2 or not EFFECTS.get("mirror", True) or getattr(self, "reveal", 1.0) < 1.0:
             return  # (flowing open or shut: not yet, four more drawings of them each frame)
         # In the rim, those just beyond each edge mirrored (like the date and time there): upside down, the
         # nearest right at the edge, fading out inwards where the middle's magnified view takes over.
         reach = m / squeeze
+        if rr is not None:
+            snap.push_rounded_clip(rr)
 
         def beyond(d):
             return 0.95 * faint * max(0.0, 1.0 - max(0.0, d) / reach)
@@ -6363,6 +6379,8 @@ class GlassCard(Gtk.Box):
             snap.scale(flip[2], flip[3])
             snow.draw(snap, o.x, o.y, view, fade)
             snap.restore()
+            snap.pop()
+        if rr is not None:
             snap.pop()
 
     def _lens_key(self, w: float, h: float):
@@ -6725,11 +6743,6 @@ class GlassCard(Gtk.Box):
         """Over the lens: the flash, then the shading and the light on the edges."""
         if self.flash > 0:
             snap.append_color(_rgba(255, 255, 255, 0.28 * self.flash), box)
-        tex = self._finish_tex(w, h, box, rr, rim) if w * h >= self.FINISH_BAKE else None
-        if tex:
-            snap.pop()  # (the glass's rounded clip: the picture has its own)
-            snap.append_texture(tex, box)
-            return
         self._finish_layers(snap, w, h, box, rr, rim)
 
     def _finish_layers(self, snap, w: float, h: float, box, rr, rim: float) -> None:
@@ -10703,6 +10716,7 @@ class SnowFall:
         self.area = None  # (x, y, w, h) in its coordinates: where the window shows them (right of the cover)
         self.field = None  # where they fall (the whole window): the glass shows them all over, not just there
         self.flakes: list = []
+        self._cover_memo = (None, [])
         self.sprites: list = []  # [(texture, box px, upright)]
         self._key = None
         self._tick = None
@@ -10823,7 +10837,23 @@ class SnowFall:
             GlassCard.own_redraw -= 1
         return True
 
-    def draw(self, snap, dx: float = 0.0, dy: float = 0.0, view=None, fade=None) -> None:
+    def _covered(self) -> list:
+        """(x0, y0, x1, y1) on the window of each open panel, its corners left out: the motifs wholly under one
+        aren't seen there (the glass shows them itself)."""
+        if self._cover_memo[0] == self._frame:
+            return self._cover_memo[1]
+        out = []
+        for v in self.viewers:
+            if getattr(v, "reveal", 0.0) >= 1.0 and v.get_mapped():
+                w, h = v.get_width(), v.get_height()
+                ok, o = v._snow_origin()
+                if ok and w * h >= v.FINISH_BAKE:
+                    i = v.radius * 0.3 + 2
+                    out.append((-o.x + i, -o.y + i, -o.x + w - i, -o.y + h - i))
+        self._cover_memo = (self._frame, out)
+        return out
+
+    def draw(self, snap, dx: float = 0.0, dy: float = 0.0, view=None, fade=None, group: bool = True) -> None:
         """Into `snap`, shifted by (dx, dy) (the drawing widget isn't where the area's coordinates start): those
         inside `view` (x, y, w, h; the area right of the cover by default; the glass: what it sees), each
         fainter by fade(x, y) 0..1 if given (the glass's edges)."""
@@ -10845,8 +10875,11 @@ class SnowFall:
         del self.flakes[want:]
         nodes = []
         Opacity, Turn = Gsk.OpacityNode.new, Gsk.TransformNode.new
+        covered = self._covered() if view is None else ()
         for fx, fy, r, tex, tr, alpha in self._all():  # those inside it only: the renderer has less to do
             if fx + r < x or fx - r > x + w or fy + r < y or fy - r > y + h:
+                continue
+            if covered and any(c[0] <= fx - r and fx + r <= c[2] and c[1] <= fy - r and fy + r <= c[3] for c in covered):
                 continue
             a = alpha * fade(fx, fy) if fade else alpha
             if a > 0.02:  # (faded, then turned: the other way round each would be drawn apart first)
@@ -10856,10 +10889,10 @@ class SnowFall:
         snap.save()
         snap.translate(Graphene.Point().init(dx, dy))
         snap.push_clip(Graphene.Rect().init(x, y, w, h))
-        group = Gsk.ContainerNode.new(nodes)
+        nodes_group = Gsk.ContainerNode.new(nodes)
         # as one group (drawn once, then put in place): turned pictures under the glass's round corners would
         # otherwise each be drawn apart first, the renderer can't round them off turned (3x the work)
-        snap.append_node(Gsk.OpacityNode.new(group, 0.999) if fade else group)
+        snap.append_node(Gsk.OpacityNode.new(nodes_group, 0.999) if fade and group else nodes_group)
         snap.pop()
         snap.restore()
 
@@ -11220,6 +11253,9 @@ class Puddle(GlassCard):
             rim = min(self.radius * self.RIM, h / 2, w / 2)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
+        if r >= 1:  # (the glass rounds itself; a second clip around it would have everything in it drawn apart)
+            GlassCard.do_snapshot(self, snap)
+            return
         snap.push_rounded_clip(rr)
         GlassCard.do_snapshot(self, snap)
         snap.pop()
