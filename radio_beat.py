@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.30"
+APP_VERSION = "0.31.31"
 
 import collections
 import ctypes
@@ -10978,7 +10978,7 @@ class SnowFall:
             self._tex_nodes = (sprites, [Gsk.TextureNode.new(t, Graphene.Rect().init(-b / 2, -b / 2, b, b))
                                          for t, b, _ in sprites])
         tex_nodes = self._tex_nodes[1]
-        P, T, sin = Graphene.Point, Gsk.Transform, math.sin
+        T, sin, pt = Gsk.Transform, math.sin, Graphene.Point()  # (one point, reused: the transform copies it)
         out = []
         for f in self.flakes:
             i = f["sprite"] % n
@@ -10986,7 +10986,7 @@ class SnowFall:
             fx = f["x"] + f["sway"] * sin(f["t"] * f["freq"] * 6.283 + f["phase"])
             # pictures that stand (palms, candles, pumpkins): rocking a little, the rest turning round slowly
             turn = 18 * sin(f["t"] * f["freq"] * 4 + f["phase"]) if upright else f["angle"]
-            tr = T.new().translate(P().init(fx, f["y"])).rotate(turn).scale(f["scale"], f["scale"])
+            tr = T.new().translate(pt.init(fx, f["y"])).rotate(turn).scale(f["scale"], f["scale"])
             out.append((fx, f["y"], box * f["scale"] * 0.75, tex_nodes[i], tr, f["alpha"]))
         self._node = (key, out)
         return out
@@ -11431,10 +11431,13 @@ class OpenProfile:
             gaps = [(b - a) / 1000 for a, b in zip(frames, frames[1:])]
             ups, mb = GPU.stats["uploads"] - up0[0], (GPU.stats["upload_bytes"] - up0[1]) / 1e6
             late = [g for g in gaps if g > 25]
+            opening = [g for g, b in zip(gaps, frames[1:]) if b - frames[0] < 900_000]  # (the panels' animation)
+            n_open, late_open = len(opening), sum(g > 25 for g in opening)
             total = sum(samples.values()) or 1
             busy = [(k, n) for k, n in samples.most_common() if k != "GTK"][:6]
             print(f"Otevření {what}: {len(frames)} snímků za {self.SECONDS:.0f} s, pozdě {len(late)}"
                   + (f" (nejhorší {max(late):.0f} ms, celkem {sum(late):.0f} ms)" if late else "")
+                  + f"; při otevírání {n_open} snímků, pozdě {late_open}; potom {len(gaps) - n_open}, pozdě {len(late) - late_open}"
                   + (f"; GPU {sum(gpu_load) / len(gpu_load):.0f} % (nejvíc {max(gpu_load)} %)" if gpu_load else "")
                   + f"; obrázků do GPU {ups} ({mb:.0f} MB)"
                   + (f"; snímek: rozvržení {1000 * phase['layout'] / n_f:.0f} ms, kreslení {1000 * phase['paint'] / n_f:.0f}"
