@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.22"
+APP_VERSION = "0.31.23"
 
 import collections
 import ctypes
@@ -6603,6 +6603,9 @@ class GlassCard(Gtk.Box):
             if i:
                 snap.pop()
 
+    FLAT_MAX_PX = 8_000_000  # what's behind the glass at most this big (the screen's 4K): a big panel at the screen's
+    # scale times its magnification was 24 Mpx, 95 MB taken off the graphics card and put back each time
+
     def _flat(self, w: float, h: float, rx: float, ry: float):
         """(texture, where) of what's behind the glass, as far out as its edge squeezes in (rx, ry), at the
         screen's scale times the middle's magnification: as sharp as the layers drawn one by one."""
@@ -6618,6 +6621,7 @@ class GlassCard(Gtk.Box):
         most = self._base_mag + self.PULSE if self.pulse_tick else self.mag
         k = (surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()) * max(1.0, most)
         ew, eh = w / min(1.0, rx) + 4, h / min(1.0, ry) + 4
+        k = min(k, math.sqrt(self.FLAT_MAX_PX / (ew * eh)))
         box = Graphene.Rect().init((w - ew) / 2, (h - eh) / 2, ew, eh)
         s = Gtk.Snapshot()
         s.scale(k, k)
@@ -11150,6 +11154,42 @@ class OpenProfile:
         self.busy = True
         gpu_load: list = []
         up0 = (GPU.stats["uploads"], GPU.stats["upload_bytes"])
+        # each phase's handler here runs after GTK's own: the time since the phase before is that phase's work
+        phase = {"layout": 0.0, "paint": 0.0, "wait": 0.0, "n": 0}
+        stamp = {"at": None, "done": None}
+        clock = widget.get_frame_clock()
+
+        def begun(_c):
+            now = time.perf_counter()
+            if stamp["done"] is not None:
+                phase["wait"] += now - stamp["done"]
+
+        def updated(_c):
+            stamp["at"] = time.perf_counter()
+
+        def laid(_c):
+            now = time.perf_counter()
+            if stamp["at"] is not None:
+                phase["layout"] += now - stamp["at"]
+            stamp["at"] = now
+
+        def painted(_c):
+            now = time.perf_counter()
+            if stamp["at"] is not None:
+                phase["paint"] += now - stamp["at"]
+                phase["n"] += 1
+            stamp["done"] = now
+        hooks = [clock.connect(sig, fn) for sig, fn in (("before-paint", begun), ("update", updated), ("layout", laid),
+                                                        ("paint", painted))] if clock else []
+
+        def cpu_ticks():  # the main thread's processor time so far (clock ticks: its pid is the process's)
+            try:
+                with open(f"/proc/self/task/{os.getpid()}/stat") as fh:
+                    parts = fh.read().rsplit(")", 1)[1].split()
+                return int(parts[11]) + int(parts[12])
+            except (OSError, ValueError, IndexError):
+                return None
+        cpu0 = cpu_ticks()
         samples: collections.Counter = collections.Counter()
         frames: list = []
         tick = widget.add_tick_callback(lambda w, fc: (frames.append(fc.get_frame_time()), True)[1])
@@ -11187,6 +11227,8 @@ class OpenProfile:
                 widget.remove_tick_callback(tick)
             except Exception:
                 pass
+            for h in hooks:
+                clock.disconnect(h)
             self.busy = False
             if len(frames) < 5:  # the window not on the screen (another workspace): nothing to tell
                 return False
@@ -11199,6 +11241,10 @@ class OpenProfile:
                   + (f" (nejhorší {max(late):.0f} ms, celkem {sum(late):.0f} ms)" if late else "")
                   + (f"; GPU {sum(gpu_load) / len(gpu_load):.0f} % (nejvíc {max(gpu_load)} %)" if gpu_load else "")
                   + f"; obrázků do GPU {ups} ({mb:.0f} MB)"
+                  + (f"; snímek: rozvržení {1000 * phase['layout'] / n_f:.0f} ms, kreslení {1000 * phase['paint'] / n_f:.0f}"
+                     f" ms, čekání {1000 * phase['wait'] / n_f:.0f} ms" if (n_f := phase["n"]) else "")
+                  + (f"; CPU hlavního vlákna {100 * (cpu1 - cpu0) / (os.sysconf('SC_CLK_TCK') * self.SECONDS):.0f} %"
+                     if cpu0 is not None and (cpu1 := cpu_ticks()) is not None else "")
                   + f"; Python {100 * sum(n for k, n in samples.items() if k != 'GTK') / total:.0f} % času: "
                   + "; ".join(f"{k} {n * self.EVERY * 1000:.0f} ms" for k, n in busy), file=sys.stderr)
             self.busy = False
