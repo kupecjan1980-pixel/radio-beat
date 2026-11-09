@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.31"
+APP_VERSION = "0.31.32"
 
 import collections
 import ctypes
@@ -6203,6 +6203,10 @@ class GlassCard(Gtk.Box):
         if self.warp_content and getattr(self, "reveal", 1.0) >= 1.0 and self.get_width() > 0 and self.get_height() > 0:
             # (bent once it's open: while it flows, the content as it is, light)
             self._warped_children(snap, self.get_width(), self.get_height())
+        elif self._flow_rr:
+            snap.push_rounded_clip(self._flow_rr)
+            self._kids(snap, self.get_width(), self.get_height())
+            snap.pop()
         else:
             self._kids(snap, self.get_width(), self.get_height())
         if self.lift:
@@ -6299,8 +6303,9 @@ class GlassCard(Gtk.Box):
         if self.depth and shadow:  # it floats above the cover: a wide soft shadow and a tight one where it nearly touches
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
-        snap.push_rounded_clip(rr)
-        gpu = self._gpu_lens(w, h) if EFFECTS["gpu"] and GPU.start() else None
+        flow = self._flow_rr
+        snap.push_rounded_clip(flow or rr)  # (a panel flowing open: its drop's shape, the one clip: two would mean
+        gpu = self._gpu_lens(w, h) if EFFECTS["gpu"] and GPU.start() else None  # all of it drawn apart first)
         tex = gpu or (self._lens_texture(w, h) if self.cache_lens else None)
         if isinstance(tex, tuple):  # the picture behind changing: its two lenses, cross-faded
             snap.push_cross_fade(tex[2])
@@ -6319,11 +6324,21 @@ class GlassCard(Gtk.Box):
             if self.flash > 0:
                 snap.append_color(_rgba(255, 255, 255, 0.28 * self.flash), box)
             snap.pop()  # (the rounded clip: the picture has its corners, the motifs have faded out by the edge)
-            self._snow_through(snap, w, h, rr if getattr(self, "reveal", 1.0) >= 1.0 else None)
-            snap.append_texture(baked, box)
+            if flow:  # flowing: the motifs only down to where the drop's round front begins
+                self._snow_through(snap, w, h, None, Graphene.Rect().init(0, 0, w, self._flow_clear))
+                snap.push_rounded_clip(flow)
+                snap.append_texture(baked, box)
+                snap.pop()
+            else:
+                self._snow_through(snap, w, h, rr, box)
+                snap.append_texture(baked, box)
             return
+        if flow:
+            snap.push_rounded_clip(rr)
         self._snow_through(snap, w, h)
         self._finish(snap, w, h, box, rr, rim)
+        if flow:
+            snap.pop()
 
     def _snow_origin(self):
         """Where the window starts in its coordinates, when the falling motifs are seen through it."""
@@ -6331,11 +6346,15 @@ class GlassCard(Gtk.Box):
 
     SNOW_FAINT = 1.0  # the falling motifs behind glass as bright as beside it (the glass darker instead)
 
-    def _snow_through(self, snap, w: float, h: float, rr=None) -> None:
+    _flow_rr = None  # a panel flowing open: the shape of what's shown of it
+    _flow_clear = None  # and how far down it's straight (past that its round front)
+
+    def _snow_through(self, snap, w: float, h: float, rr=None, clip=None) -> None:
         """The falling motifs seen through it: magnified like its middle, fading out towards the edges, where
         those just beyond are mirrored in the rim; drawn every frame over the lens. `rr`: no rounded clip around
-        it (the glass's corners, for the mirrored ones here): under one each turned picture, or a whole-panel
-        group of them, is drawn apart first, and those in the middle have faded out before they reach a corner."""
+        it (the glass's corners, for the mirrored ones here), `clip` the straight box it's cut to instead: under a
+        rounded one each turned picture, or a whole-panel group of them, is drawn apart first, and those in the
+        middle have faded out before they reach a corner."""
         snow = getattr(getattr(self, "win", None), "snow", None)
         if snow is None or not snow.area:
             return
@@ -6354,15 +6373,15 @@ class GlassCard(Gtk.Box):
         def middle(fx, fy):
             px, py = w / 2 + (fx - gx - w / 2) * mag, h / 2 + (fy - gy - h / 2) * mag
             return faint * max(0.0, min(1.0, min(px, w - px, py, h - py) / f))
-        if rr is not None:
-            snap.push_clip(Graphene.Rect().init(0, 0, w, h))
+        if clip is not None:
+            snap.push_clip(clip)
         snap.save()
         snap.translate(Graphene.Point().init(w / 2, h / 2))
         snap.scale(mag, mag)
         snap.translate(Graphene.Point().init(-w / 2, -h / 2))
-        snow.draw(snap, o.x, o.y, (gx, gy, w, h), middle, group=rr is None)
+        snow.draw(snap, o.x, o.y, (gx, gy, w, h), middle, group=clip is None)
         snap.restore()
-        if rr is not None:
+        if clip is not None:
             snap.pop()
         if m < 2 or not EFFECTS.get("mirror", True) or getattr(self, "reveal", 1.0) < 1.0:
             return  # (flowing open or shut: not yet, four more drawings of them each frame)
@@ -10914,8 +10933,11 @@ class SnowFall:
             return self._cover_memo[1]
         out = []
         for v in self.viewers:
-            if getattr(v, "reveal", 0.0) >= 1.0 and v.get_mapped():
+            rv = getattr(v, "reveal", 0.0)
+            if rv > 0.0 and v.get_mapped():
                 w, h = v.get_width(), v.get_height()
+                if rv < 1.0:  # flowing: only what it covers so far
+                    h = min(h, v._flow_clear or 0.0)
                 ok, o = v._snow_origin()
                 if ok and w * h >= v.FINISH_BAKE:
                     i = v.radius * 0.3 + 2
@@ -11323,12 +11345,12 @@ class Puddle(GlassCard):
             rim = min(self.radius * self.RIM, h / 2, w / 2)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
-        if r >= 1:  # (the glass rounds itself; a second clip around it would have everything in it drawn apart)
+        if r < 1:  # (settled the glass rounds itself)
+            self._flow_rr, self._flow_clear = rr, max(1.0, vis - bottom)
+        try:
             GlassCard.do_snapshot(self, snap)
-            return
-        snap.push_rounded_clip(rr)
-        GlassCard.do_snapshot(self, snap)
-        snap.pop()
+        finally:
+            self._flow_rr = None
 
 
 class OpenProfile:
@@ -13739,7 +13761,7 @@ class Window(Adw.ApplicationWindow):
 
     def _size_glass_button(self, disc) -> None:
         px = disc.size * self._scale
-        disc.radius = px / 2
+        disc.radius = px / 2 - 0.5  # (see the discs: no cross through the middle)
         disc.set_size_request(int(px), int(px))
         if getattr(disc, "pad", False):  # it pumps 12 % bigger: half of that on each side, and a little more
             m = math.ceil(px * 0.08)
@@ -13948,7 +13970,8 @@ class Window(Adw.ApplicationWindow):
         for disc in getattr(self, "_glass_buttons", []):
             self._size_glass_button(disc)
         for disc, size in zip(self.discs, (68, 56, 46)):  # pause, stop (a little smaller), speaker (smaller still)
-            disc.radius = size * f / 2
+            disc.radius = size * f / 2 - 0.5  # (corners that just don't meet: where a circle's quarters touch on the
+            # centre lines some drivers leave hairlines, a cross through the button at full HD)
             disc.set_size_request(int(size * f), int(size * f))
             disc.queue_draw()
         self.show_card.radius = 28 * max(1.0, f)  # corners r 28, straight sides between (bigger only in full screen)
