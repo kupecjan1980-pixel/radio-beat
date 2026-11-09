@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.22** (2026-11-09) Plynulejší otevírání nabídek a oken: během otevírání se okno za sklem znovu nefotí (snímek z grafické karty a zpět stál snímek či dva), až potom; padající motivy se při rozlévání panelu nezrcadlí v jeho okraji; velikost písma okna dne se spočítá předem (první otevření okna dne, jmenin nebo skladby po startu bez čtvrtvteřinového zaseknutí); měření otevírání ukáže i vytížení GPU a nic nezapisuje, když okno není vidět
 - **0.31.21** (2026-11-09) Měsíc vlevo od ⓘ ukazuje příští fázi po osminách (nov, dorůstající srpek, první čtvrť, dorůstající měsíc, úplněk, couvající měsíc, poslední čtvrť, couvající srpek), ne jen čtvrtě
 - **0.31.20** (2026-11-08) Okno dne se při každém najetí na datum znovu neměří (velikost písma pro stejný text si pamatuje: čtvrt sekundy méně); hledání fotek slavných nositelů už nepadá na souboru bez popisu na Commons
 - **0.31.19** (2026-11-08) Vždy jen jedna nabídka: otevření ⚙, ⓘ nebo kvality zavře ostatní nabídky i okna (den, jmeniny, skladba); okna se přes otevřenou nabídku neukazují (klik na jména nabídku zavře); plynulejší otevírání: sklo panelu a oken se kreslí znovu, jen když se za ním změnil obrázek, a panel ⓘ se znovu neskládá, když se nic nezměnilo; měření trhání při otevírání do záznamu („Otevření …“)

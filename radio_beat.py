@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.21"
+APP_VERSION = "0.31.22"
 
 import collections
 import ctypes
@@ -6289,8 +6289,8 @@ class GlassCard(Gtk.Box):
         snap.translate(Graphene.Point().init(-w / 2, -h / 2))
         snow.draw(snap, o.x, o.y, (gx, gy, w, h), middle)
         snap.restore()
-        if m < 2 or not EFFECTS.get("mirror", True):
-            return
+        if m < 2 or not EFFECTS.get("mirror", True) or getattr(self, "reveal", 1.0) < 1.0:
+            return  # (flowing open or shut: not yet, four more drawings of them each frame)
         # In the rim, those just beyond each edge mirrored (like the date and time there): upside down, the
         # nearest right at the edge, fading out inwards where the middle's magnified view takes over.
         reach = m / squeeze
@@ -6442,6 +6442,14 @@ class GlassCard(Gtk.Box):
     LIVE_FPS = 15  # the window seen through it, moving (the falling motifs): pictured anew this often at most
 
     own_redraw = 0  # > 0: glass redrawing itself (a menu hangs from the clock or the pill: they'd seem changed)
+    live_hold = 0.0  # (monotonic) till then nothing's pictured anew: a menu or box is opening
+
+    @classmethod
+    def hold_live(cls, seconds: float) -> None:
+        """A menu, panel or box opening: the window behind every glass not pictured anew for `seconds` (each
+        time a picture of it rendered, taken off the graphics card and put back: 20-50 ms, a frame or two lost
+        in the middle of the opening animation); a change meanwhile is pictured once it's over."""
+        cls.live_hold = max(cls.live_hold, time.monotonic() + seconds)
 
     def _live(self) -> None:
         """What's on the window behind it seems changed: looked at (is anything it shows really different?),
@@ -6451,6 +6459,10 @@ class GlassCard(Gtk.Box):
         falling motifs (the clock or the pill a menu hangs from seeming changed with it), don't count: they
         made the motifs stutter every second or two."""
         if getattr(self, "_late", None) or GlassCard.own_redraw:
+            return
+        held = GlassCard.live_hold - time.monotonic()
+        if held > 0:
+            self._late = GLib.timeout_add(int(held * 1000) + 1, self._live_late)
             return
         gap = 1.0 / self.LIVE_FPS if EFFECTS["gpu"] and GPU.ok is not False else 1.0
         gap = max(gap, 4 * getattr(self, "_live_cost", 0.0), 0.15)  # (a quarter of a CPU core at most)
@@ -11129,10 +11141,15 @@ class OpenProfile:
         self.busy = False
         self.main = threading.main_thread().ident
 
-    def start(self, what: str, widget) -> None:
+    GPU_BUSY = next(iter(sorted(glob.glob("/sys/class/drm/card*/device/gpu_busy_percent"))), None)
+
+    def start(self, what: str, widget, hold: float = 0.8) -> None:
+        GlassCard.hold_live(hold)
         if self.busy or widget is None:
             return
         self.busy = True
+        gpu_load: list = []
+        up0 = (GPU.stats["uploads"], GPU.stats["upload_bytes"])
         samples: collections.Counter = collections.Counter()
         frames: list = []
         tick = widget.add_tick_callback(lambda w, fc: (frames.append(fc.get_frame_time()), True)[1])
@@ -11152,8 +11169,16 @@ class OpenProfile:
 
         def look():
             end = time.monotonic() + self.SECONDS
+            n = 0
             while time.monotonic() < end:
                 samples[where()] += 1
+                if self.GPU_BUSY and n % 10 == 0:
+                    try:
+                        with open(self.GPU_BUSY) as fh:
+                            gpu_load.append(int(fh.read()))
+                    except (OSError, ValueError):
+                        pass
+                n += 1
                 time.sleep(self.EVERY)
             GLib.idle_add(report)
 
@@ -11162,12 +11187,18 @@ class OpenProfile:
                 widget.remove_tick_callback(tick)
             except Exception:
                 pass
+            self.busy = False
+            if len(frames) < 5:  # the window not on the screen (another workspace): nothing to tell
+                return False
             gaps = [(b - a) / 1000 for a, b in zip(frames, frames[1:])]
+            ups, mb = GPU.stats["uploads"] - up0[0], (GPU.stats["upload_bytes"] - up0[1]) / 1e6
             late = [g for g in gaps if g > 25]
             total = sum(samples.values()) or 1
             busy = [(k, n) for k, n in samples.most_common() if k != "GTK"][:6]
             print(f"Otevření {what}: {len(frames)} snímků za {self.SECONDS:.0f} s, pozdě {len(late)}"
                   + (f" (nejhorší {max(late):.0f} ms, celkem {sum(late):.0f} ms)" if late else "")
+                  + (f"; GPU {sum(gpu_load) / len(gpu_load):.0f} % (nejvíc {max(gpu_load)} %)" if gpu_load else "")
+                  + f"; obrázků do GPU {ups} ({mb:.0f} MB)"
                   + f"; Python {100 * sum(n for k, n in samples.items() if k != 'GTK') / total:.0f} % času: "
                   + "; ".join(f"{k} {n * self.EVERY * 1000:.0f} ms" for k, n in busy), file=sys.stderr)
             self.busy = False
@@ -12013,6 +12044,19 @@ class Window(Adw.ApplicationWindow):
         pop.set_pointing_to(r)
         GLib.idle_add(lambda: (pop.get_child().queue_draw(), False)[1])
 
+    def _day_warm(self) -> bool:
+        """Every 10 minutes while no box or menu is up: the day's box's text size worked out ahead (the first
+        time, or a new day's text: 8 layouts, ~150 ms, else a stutter the moment the box or the name day's or the
+        song's box opens); the same text in the same box costs nothing (_day_fit remembers)."""
+        if self.get_visible() and not self.compact and not self._menu_open() and not any(
+                p.get_visible() for p in (self.day_pop, self.names_pop, self.song_pop)):
+            area = self._day_area()
+            if area:
+                self._day_margins(int(28 * max(1.0, self._scale)), 0, 0)  # (as _day_show sets them over the cover)
+                self._day_fill()
+                self._day_fit(round(area[2]), round(area[3]))
+        return GLib.SOURCE_CONTINUE
+
     def _warm_glass(self) -> bool:
         """Once, soon after start: a small piece of the window pictured, taken off the graphics card and bent
         by the GPU lens, so their first time (shaders built, buffers set up: ~20 ms) isn't when a glass menu
@@ -12397,7 +12441,7 @@ class Window(Adw.ApplicationWindow):
             self._day_scale(self._day_text_f)          # twelve layouts of it cost a quarter of a second)
             return
         lo, hi = 0.3, self.DAY_TEXT_MOST * max(1.0, self._scale)
-        for _ in range(12):  # (a binary search over the scale)
+        for _ in range(8):  # (a binary search over the scale: to under a hundredth)
             f = (lo + hi) / 2
             self._day_scale(f)
             if (box.measure(Gtk.Orientation.HORIZONTAL, -1)[0] <= tw  # (the headlines, on one line, fit across)
@@ -14101,6 +14145,8 @@ class App(Adw.Application):
     def show_window(self):
         if not self.win:
             self.win = Window(self)
+            GLib.timeout_add_seconds(6, lambda: (self.win._day_warm(), False)[1])
+            GLib.timeout_add_seconds(600, self.win._day_warm)
             if self.settings.get("start_full", True):
                 self.win.fullscreen()  # opens in full screen; a double click makes it a window (in the corner)
                 GLib.timeout_add_seconds(4, self._still_full)
