@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.20"
+APP_VERSION = "0.31.21"
 
 import collections
 import ctypes
@@ -10238,16 +10238,17 @@ class WeatherView(Gtk.Widget):
 
 
 def moon_next(lat: float, lon: float, t: float = None) -> tuple:
-    """(time, moon_sky at it) of the moon's next main phase (new, first quarter, full, last quarter): its
-    elongation passing the next multiple of 90°, found hour by hour, then to the minute."""
+    """(time, moon_sky at it) of the moon's next phase in eighths (new, waxing crescent, first quarter, waxing
+    gibbous, full, waning gibbous, last quarter, waning crescent): its elongation passing the next multiple of 45°,
+    found hour by hour, then to the minute."""
     t = time.time() if t is None else t
     e0 = moon_sky(lat, lon, t)["elong"]
-    goal = (math.floor(e0 / 90) + 1) * 90 % 360
+    goal = (math.floor(e0 / 45) + 1) * 45 % 360
 
     def past(tt):
         return (moon_sky(lat, lon, tt)["elong"] - goal) % 360 < 180
     hi = t
-    for _ in range(24 * 9):
+    for _ in range(24 * 6):
         hi += 3600
         if past(hi):
             break
@@ -10257,13 +10258,14 @@ def moon_next(lat: float, lon: float, t: float = None) -> tuple:
         lo, hi = (lo, mid) if past(mid) else (mid, hi)
     m = moon_sky(lat, lon, hi)
     m["k"] = (1 - math.cos(math.radians(goal))) / 2  # exactly that phase
-    m["name"] = {0: "nov", 90: "první čtvrť", 180: "úplněk", 270: "poslední čtvrť"}[goal]
+    m["name"] = {0: "nov", 45: "dorůstající srpek", 90: "první čtvrť", 135: "dorůstající měsíc", 180: "úplněk",
+                 225: "couvající měsíc", 270: "poslední čtvrť", 315: "couvající srpek"}[goal]
     return hi, m
 
 
 class MoonView(Gtk.Widget):
     """Left of the 'i' button: the moon now (as it is in the sky from the weather's place), an arrow, and its next
-    main phase (drawn north up, as one knows it: waxing lit on the right, waning on the left), with the day it
+    phase in eighths (drawn north up, as one knows it: waxing lit on the right, waning on the left), with the day it
     comes when there's room."""
 
     def __init__(self, **kw):
