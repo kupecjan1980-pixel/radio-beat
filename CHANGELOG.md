@@ -4,6 +4,7 @@
 
 ## 0.31 — Okno o skladbě
 
+- **0.31.34** (2026-11-10) Plynulejší otevírání panelů ⓘ a ⚙: zavřený panel zůstává připravený (znovu otevřený nekreslí všechen text znovu) a sklo za ním se nepřepočítává, když se za ním nic nezměnilo (první snímek ~10 ms místo ~100 ms); každá část panelu se drží jako hotový obrázek zvlášť, takže posuvník nebo záložky nenutí překreslovat i text vedle; panel ⓘ se znovu sestaví jen při změně pořadu nebo skladby, ne každou minutu
 - **0.31.33** (2026-11-09) Posuvník panelu ⚙ se ukáže až s myší v panelu: jeho zobrazování při otevírání měnilo obsah v každém snímku a panel se nemohl kreslit jako hotový obrázek
 - **0.31.32** (2026-11-09) Plynulejší rozlévání panelů (jeden zaoblený výřez místo dvou, motivy přes sklo bez samostatné vrstvy); kulatá tlačítka pauzy a stop: rohy se v přesném středu nedotýkají (proti křížku na full HD)
 - **0.31.31** (2026-11-09) Měření otevírání rozliší snímky během animace a potom; padající motivy o trochu méně práce v Pythonu

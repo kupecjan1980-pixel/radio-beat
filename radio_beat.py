@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.33"
+APP_VERSION = "0.31.34"
 
 import collections
 import ctypes
@@ -5729,17 +5729,36 @@ def widget_sig(w, out: list) -> None:
         c = c.get_next_sibling()
 
 
-def _node_leaves(node) -> list:
-    """The nodes a snapshot of a widget's children came to, without the moves GTK wraps them in: for each child that
-    didn't change these are the very same ones as last time."""
-    def bare(n):
-        while isinstance(n, Gsk.TransformNode):
-            n = n.get_child()
-        return n
-    node = bare(node)
-    if isinstance(node, Gsk.ContainerNode):
-        return [bare(node.get_child(i)) for i in range(node.get_n_children())]
-    return [node]
+def _node_parts(node) -> list:
+    """What a snapshot of a widget's children came to, one node per child; a lone child with several of its own (a
+    scrolled list: the list and its scrollbar) taken apart too."""
+    move = None
+    while isinstance(node, Gsk.TransformNode):
+        move = move.transform(node.get_transform()) if move else node.get_transform()
+        node = node.get_child()
+    if not isinstance(node, Gsk.ContainerNode):
+        return [Gsk.TransformNode.new(node, move) if move else node]
+    return [Gsk.TransformNode.new(node.get_child(i), move) if move else node.get_child(i)
+            for i in range(node.get_n_children())]
+
+
+def _node_same(a, b) -> bool:
+    """The two draw exactly the same. A widget that didn't change hands back the very same node, but what's around
+    it (the move to where it sits, the clip of a scrolled list) can be built anew each time: those are looked into."""
+    if a == b:
+        return True
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, Gsk.ContainerNode):
+        n = a.get_n_children()
+        return n == b.get_n_children() and all(_node_same(a.get_child(i), b.get_child(i)) for i in range(n))
+    if isinstance(a, Gsk.TransformNode):
+        return a.get_transform().equal(b.get_transform()) and _node_same(a.get_child(), b.get_child())
+    if isinstance(a, Gsk.ClipNode):
+        return a.get_clip().equal(b.get_clip()) and _node_same(a.get_child(), b.get_child())
+    if isinstance(a, Gsk.OpacityNode):
+        return a.get_opacity() == b.get_opacity() and _node_same(a.get_child(), b.get_child())
+    return False
 
 
 class GlassCard(Gtk.Box):
@@ -6212,42 +6231,60 @@ class GlassCard(Gtk.Box):
         if self.lift:
             snap.restore()
 
-    KIDS_STILL = 2  # frames what's inside must stay the same before it's kept as a picture
+    KIDS_STILL = 2  # frames a part inside must stay the same before it's kept as a picture
 
     def _kids(self, snap, w: int, h: int) -> None:
-        """What's inside the glass. A big glass keeps it as one picture while it doesn't change: the falling motifs
-        redraw the glass every frame, and with them every label's blurred halo (over half the frame at 4K). GTK
-        hands back the very same nodes for widgets that didn't change, so comparing those is exact: anything
-        moving (a scroll, a switch) is drawn live, and kept again once it's still."""
-        if w * h < self.FINISH_BAKE or not self.get_native():
+        """What's inside the glass. A big glass keeps each of its children as a picture while it doesn't change: the
+        falling motifs redraw the glass every frame, and with them every label's blurred halo (over half the frame at
+        4K). Each child on its own, so one that keeps changing (the tabs' small glass during a cover change) doesn't
+        make the text beside it be drawn live too. Anything moving (a scroll, a switch) is drawn live, and kept again
+        once it's still."""
+        native = self.get_native()
+        if w * h < self.FINISH_BAKE or not native:
             Gtk.Box.do_snapshot(self, snap)
             return
         s = Gtk.Snapshot()
         Gtk.Box.do_snapshot(self, s)
         node = s.to_node()
         if node is None:
+            self._kids_parts = []
             return
-        leaves = _node_leaves(node)
-        old = getattr(self, "_kids_leaves", None)
-        same = old is not None and len(old) == len(leaves) and all(a == b for a, b in zip(old, leaves))
-        self._kids_leaves = leaves  # (held: a node let go of could give its address to a new one)
-        self._kids_still = getattr(self, "_kids_still", 0) + 1 if same else 0
-        native = self.get_native()
         surf = native.get_surface()
         k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
-        baked = getattr(self, "_kids_baked", None)
-        if not same or (baked and baked[0] != (w, h, k)):
-            baked = self._kids_baked = None
-        if baked is None and self._kids_still >= self.KIDS_STILL:
-            b = Gtk.Snapshot()
-            b.scale(k, k)
-            b.append_node(node)
-            baked = self._kids_baked = ((w, h, k), native.get_renderer().render_texture(
-                b.to_node(), Graphene.Rect().init(0, 0, w * k, h * k)))
-        if baked:
-            snap.append_texture(baked[1], Graphene.Rect().init(0, 0, w, h))
-        else:
-            snap.append_node(node)
+        nodes = _node_parts(node)
+        old = getattr(self, "_kids_parts", [])
+        key = (w, h, k)
+        parts = self._kids_parts = []
+        bake = True  # (one picture a frame at most)
+        for n in nodes:
+            was = next((o for o in old if _node_same(o[0], n)), None)  # (a scrollbar coming or going: the rest kept)
+            still = was[1] + 1 if was else 0
+            pic = was[2] if was and was[2] and was[2][0] == key else None
+            if pic is None and bake and still >= self.KIDS_STILL:
+                pic, bake = self._kids_picture(n, key, native), False
+            parts.append((n, still, pic))  # (held: a node let go of could give its address to a new one)
+            if pic and pic[1]:
+                snap.append_texture(pic[1], pic[2])
+            else:
+                snap.append_node(n)
+
+    @staticmethod
+    def _kids_picture(node, key, native):
+        """(key, texture, rect) of one part inside the glass, on whole screen pixels; texture None when none of it
+        is inside the glass."""
+        w, h, k = key
+        b = node.get_bounds()
+        x0, y0 = max(0.0, math.floor(b.get_x() * k) / k), max(0.0, math.floor(b.get_y() * k) / k)
+        x1 = min(float(w), math.ceil((b.get_x() + b.get_width()) * k) / k)
+        y1 = min(float(h), math.ceil((b.get_y() + b.get_height()) * k) / k)
+        if x1 <= x0 or y1 <= y0:
+            return key, None, None
+        s = Gtk.Snapshot()
+        s.scale(k, k)
+        s.translate(Graphene.Point().init(-x0, -y0))
+        s.append_node(node)
+        tex = native.get_renderer().render_texture(s.to_node(), Graphene.Rect().init(0, 0, (x1 - x0) * k, (y1 - y0) * k))
+        return key, tex, Graphene.Rect().init(x0, y0, x1 - x0, y1 - y0)
 
     def draw_mirrored(self, snap, tile) -> None:
         """A button seen through the glass upside down, as in a mirror: `tile` (its glass) where it is, the
@@ -6664,13 +6701,33 @@ class GlassCard(Gtk.Box):
 
     def fresh_if_changed(self) -> None:
         """A menu opening: its lens drawn anew only when what's behind it changed since it was built (forgetting
-        a good one made the panel rebuild it during its own opening animation: the stutter); the mirrored strips
-        (the date, the buttons) always anew, they're cheap."""
+        a good one made the panel rebuild it during its own opening animation: the stutter; a third of a 100 ms first
+        frame). The GPU's picture knows by its key; the things it can't tell (the date, the mirrored buttons) are
+        looked at once the opening is over."""
+        if self._flat_cache[0] is not None:
+            GLib.timeout_add(self.AFTER_OPEN_MS, self._after_open)
+            self.queue_draw()
+            return
         if self._lens_cache[0] is not None and getattr(self, "_lens_what", None) == self._what_behind():
             self._mirror_tex = None
             self.queue_draw()
             return
         self.fresh()
+
+    AFTER_OPEN_MS = 950  # (past OpenProfile's hold on new pictures of the window)
+
+    def _mirrors_sig(self) -> tuple:
+        out: list = []
+        for tile in self.mirrors:
+            widget_sig(tile, out)
+        return tuple(out)
+
+    def _after_open(self) -> bool:
+        if getattr(self, "reveal", 1.0) > 0 and getattr(self, "win", None) is not None and (
+                self._mirrors_sig() != getattr(self, "_flat_mirrors", None)
+                or self._layers_sig() != getattr(self, "_live_sig", None)):
+            self._live_now()
+        return False
 
     def fresh(self) -> None:
         """Forget the lens and its mirrored strips: drawn anew from what's behind now (a menu opening)."""
@@ -6790,6 +6847,7 @@ class GlassCard(Gtk.Box):
             return None
         # kept with its alpha: opaque, GTK skips what each ring seems to cover, and on the DeskMini's 780M the
         # round buttons then showed a crosshair through the middle (hairline gaps where a circle's quarters meet)
+        self._flat_mirrors = self._mirrors_sig()
         self._flat_cache = (key, (native.get_renderer().render_texture(
             node, Graphene.Rect().init(0, 0, ew * k, eh * k)), box))
         return self._flat_cache[1]
@@ -11323,7 +11381,6 @@ class Puddle(GlassCard):
     def do_snapshot(self, snap) -> None:
         r = self.reveal
         if r <= 0:
-            self._layers = None
             return
         if self.win is not None and (self._layers is None or self._layers[0] != self._tex_version):
             self._layers = (self._tex_version, self._layers_texture())
@@ -11595,6 +11652,8 @@ class Water:
         self.place()
         for g in (self.neck, self.body):
             g.set_visible(True)
+            g.set_can_target(True)
+            g.set_can_focus(True)
         self._flow(1.0, 750, Adw.Easing.EASE_OUT_BACK)
 
     def hide(self) -> None:
@@ -11621,8 +11680,14 @@ class Water:
         def done(*_):
             anim_hold(False)
             if to == 0.0 and not self.open:
+                # stays on the window at reveal 0, drawing nothing and out of reach: taken off, GTK forgets everything
+                # drawn in it, and each opening laid it out and drew all its text again (the first frames: 100 ms)
+                focus = self.win.get_focus()
+                if focus is not None and focus.is_ancestor(self.body):
+                    self.win.set_focus(None)
                 for g in (self.neck, self.body):
-                    g.set_visible(False)
+                    g.set_can_target(False)
+                    g.set_can_focus(False)
                 if not any(w.open for w in self.win.waters):  # all closed: the full enhancing goes on
                     self.win.app.enhancer.set_quiet(False)
                     self.win.app.enhance_small_full()
@@ -13302,12 +13367,6 @@ class Window(Adw.ApplicationWindow):
         gear_body = Puddle(behind, orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.END, valign=Gtk.Align.START)
         gear_body.append(self.menu_content)
         self.gear_water = Water(self, self.gear_tile, gear_body, overlay)
-        # its scrollbar only once the mouse is in it: one fading in as it opens changes the panel every frame for a
-        # second or two, and it can't be kept as one picture (the opening at half the frames)
-        move = Gtk.EventControllerMotion()
-        move.connect("motion", lambda *_: self.menu_content.get_policy()[1] == Gtk.PolicyType.AUTOMATIC
-                     or self.menu_content.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC))
-        gear_body.add_controller(move)
 
         self.waters = [self.info_water, self.gear_water]
         # a click anywhere else draws it back into its button
@@ -13377,8 +13436,6 @@ class Window(Adw.ApplicationWindow):
             if self._puddle_tick is None:
                 self._puddle_last = None
                 self._puddle_tick = self.puddle_scroll.add_tick_callback(self._puddle_scroll_step)
-        if water is self.gear_water:
-            self.menu_content.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)  # (see the panel's making)
         self.day_pop.popdown()  # the day's box makes way
         water.body.fresh_if_changed()  # never an earlier picture's lens or mirror while it opens
         self.refresh_effects()
@@ -13622,8 +13679,11 @@ class Window(Adw.ApplicationWindow):
     def _puddle_sig(self) -> tuple:
         """What the panel's first page shows depends on: unchanged since it was filled, it isn't built again."""
         a = self.app
-        return (self.puddle_mode, a.about, a.facts, a.song, time.strftime("%H:%M"), len(a.news or []),
-                id(a.schedule), len(self.puddle_items), a.cz("x"))
+        now = time.localtime()
+        mins = now.tm_hour * 60 + now.tm_min
+        shows = a.schedule.get(now.tm_wday) or []  # (the clock matters only as far as which shows have begun)
+        return (self.puddle_mode, a.about, a.facts, a.song, now.tm_yday, sum(show["start"] <= mins for show in shows),
+                on_air(a.schedule, now)[0] is None, len(a.news or []), id(a.schedule), len(self.puddle_items), a.cz("x"))
 
     def _fill_puddle(self) -> None:
         self._puddle_filled = self._puddle_sig() if self.puddle_mode == 0 else None
@@ -13872,7 +13932,7 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(self._center_now)
 
     def _puddle_scroll_step(self, _w, clock) -> bool:
-        if not self.puddle_open and not self.puddle.get_visible():
+        if not self.puddle_open:
             self._puddle_tick = None
             return GLib.SOURCE_REMOVE
         t = clock.get_frame_time() / 1e6
