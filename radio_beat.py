@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.31.34"
+APP_VERSION = "0.32.0"
 
 import collections
 import ctypes
@@ -2942,9 +2942,9 @@ class Enhancer:
     SHARE = 0.92  # of the CPU / GPU time the enhancing may take; the rest stays free for the animations
 
     def _stopped(self) -> bool:
-        """Waiting: something animates, or a panel is open and the job is a heavy one (the cover, the logo)."""
-        light = bool(self.running and self.running[0].startswith("pic:"))
-        return self.held or (self.quiet and not light)
+        """Waiting: something animates, or a menu, panel or box is open. All of it waits, the small pictures'
+        quick steps too: on a graphics chip shared with the screen even those took frames from an open panel."""
+        return self.held or self.quiet
 
     def hold(self, on: bool) -> None:
         """Stop (or let go on) the enhancing while something animates."""
@@ -5729,36 +5729,211 @@ def widget_sig(w, out: list) -> None:
         c = c.get_next_sibling()
 
 
-def _node_parts(node) -> list:
-    """What a snapshot of a widget's children came to, one node per child; a lone child with several of its own (a
-    scrolled list: the list and its scrollbar) taken apart too."""
-    move = None
-    while isinstance(node, Gsk.TransformNode):
-        move = move.transform(node.get_transform()) if move else node.get_transform()
-        node = node.get_child()
-    if not isinstance(node, Gsk.ContainerNode):
-        return [Gsk.TransformNode.new(node, move) if move else node]
-    return [Gsk.TransformNode.new(node.get_child(i), move) if move else node.get_child(i)
-            for i in range(node.get_n_children())]
+def _node_picture(node, k: float, native, most: float = 12e6, within=None):
+    """(texture, rect) of a node, on whole screen pixels (scale k), only what's inside `within` (x0, y0, x1, y1)
+    if given; None when it's empty or too big to keep."""
+    b = node.get_bounds()
+    bx0, by0, bx1, by1 = b.get_x(), b.get_y(), b.get_x() + b.get_width(), b.get_y() + b.get_height()
+    if within:
+        bx0, by0, bx1, by1 = max(bx0, within[0]), max(by0, within[1]), min(bx1, within[2]), min(by1, within[3])
+    x0, y0 = math.floor(bx0 * k) / k, math.floor(by0 * k) / k
+    x1, y1 = math.ceil(bx1 * k) / k, math.ceil(by1 * k) / k
+    if x1 <= x0 or y1 <= y0 or (x1 - x0) * (y1 - y0) * k * k > most or max(x1 - x0, y1 - y0) * k > 16000:
+        return None
+    s = Gtk.Snapshot()
+    s.scale(k, k)
+    s.translate(Graphene.Point().init(-x0, -y0))
+    s.append_node(node)
+    tex = native.get_renderer().render_texture(s.to_node(), Graphene.Rect().init(0, 0, (x1 - x0) * k, (y1 - y0) * k))
+    return tex, Graphene.Rect().init(x0, y0, x1 - x0, y1 - y0)
 
 
-def _node_same(a, b) -> bool:
-    """The two draw exactly the same. A widget that didn't change hands back the very same node, but what's around
-    it (the move to where it sits, the clip of a scrolled list) can be built anew each time: those are looked into."""
-    if a == b:
-        return True
-    if type(a) is not type(b):
+class Keep:
+    """What a widget draws, its unchanging parts kept as pictures. The falling motifs pass behind (or through the
+    glass of) the song info, the panels and the boxes every frame, and the renderer then works out every letter's
+    blurred shadow again every frame: at 4K that, not the motifs, was most of a frame.
+
+    The drawing is looked through from the top: what only moves, cuts or fades what's inside it (a scrolled
+    list: a clip around a move) is done again each time, and the thing inside, the same as long as its own
+    contents are, is the picture. So a list scrolling under the mouse or by itself is one picture moved, not all
+    its text drawn anew (or pictured anew) at every step; it moves by whole screen pixels, the letters stay
+    sharp. A part too big for one picture is kept only as far as it shows."""
+
+    TRANSLATE = getattr(Gsk.TransformCategory, "2D_TRANSLATE")
+    SPLIT = 4  # a group of up to this many is looked into (the list and its scrollbar), a bigger one is a part
+    AGAIN = 3.0  # s in which the part at the same place is pictured anew twice at most
+
+    def __init__(self, still: int = 2):
+        self.still = still  # looks a part must stay the same for before it's kept
+        self.parts = []  # [(node, looks it's been the same, picture (texture, rect, scale, within) or False, None)]
+        self.waiting = False  # a part not kept yet (to be looked at again)
+        self._made = {}  # where a part lies -> when one there was last pictured
+
+    def draw(self, snap, node, k: float, native) -> None:
+        self._old, self.parts = self.parts, []
+        self._bake, self.waiting = True, False  # (one picture a look at most: each takes the frame's time)
+        self._emit(snap, node, k, native, None, 0)
+        self._old = None
+
+    def _emit(self, snap, n, k, native, vis, depth) -> None:
+        if depth < 8:
+            if isinstance(n, Gsk.TransformNode):
+                tr = n.get_transform()
+                snap.save()
+                if tr is None:
+                    pass
+                elif tr.get_category() == self.TRANSLATE:
+                    dx, dy = tr.to_translate()
+                    dx, dy = round(dx * k) / k, round(dy * k) / k
+                    snap.translate(Graphene.Point().init(dx, dy))
+                    if vis:
+                        vis = (vis[0] - dx, vis[1] - dy, vis[2] - dx, vis[3] - dy)
+                else:
+                    snap.transform(tr)
+                    vis = None
+                self._emit(snap, n.get_child(), k, native, vis, depth + 1)
+                snap.restore()
+                return
+            if isinstance(n, Gsk.ClipNode):
+                c = n.get_clip()
+                box = (c.get_x(), c.get_y(), c.get_x() + c.get_width(), c.get_y() + c.get_height())
+                if vis:
+                    box = (max(box[0], vis[0]), max(box[1], vis[1]), min(box[2], vis[2]), min(box[3], vis[3]))
+                snap.push_clip(c)
+                self._emit(snap, n.get_child(), k, native, box, depth + 1)
+                snap.pop()
+                return
+            if isinstance(n, Gsk.OpacityNode):
+                snap.push_opacity(n.get_opacity())
+                self._emit(snap, n.get_child(), k, native, vis, depth + 1)
+                snap.pop()
+                return
+            if isinstance(n, Gsk.MaskNode):
+                snap.push_mask(n.get_mask_mode())
+                snap.append_node(n.get_mask())
+                snap.pop()
+                self._emit(snap, n.get_source(), k, native, vis, depth + 1)
+                snap.pop()
+                return
+            if isinstance(n, Gsk.ContainerNode) and n.get_n_children() <= self.SPLIT:
+                for i in range(n.get_n_children()):
+                    self._emit(snap, n.get_child(i), k, native, vis, depth + 1)
+                return
+        old, i = self._old, len(self.parts)
+        was = old[i] if i < len(old) and old[i][0] == n else next((o for o in old if o[0] == n), None)
+        still = was[1] + 1 if was else 0
+        pic = was[2] if was else None
+        if pic and (pic[2] != k or (pic[3] and (not vis or not _box_in(vis, pic[3], n)))):
+            pic = None  # (another screen scale, or scrolled past what was kept of a big one)
+        if pic is None:
+            spot = None
+            if self._bake and still >= self.still:
+                # a part that keeps changing (the buttons' row while a panel opens over it: pictured anew seven
+                # times a second, each time a few ms of a frame) is pictured twice in AGAIN seconds at most (a row's
+                # note changing once as its panel opens: at once), drawn live between
+                b = n.get_bounds()
+                spot = (type(n), round(b.get_x()), round(b.get_y()), round(b.get_width()), round(b.get_height()))
+                if time.monotonic() - self._made.get(spot, (-1e9, 0))[0] < self.AGAIN:
+                    spot = None  # (twice already within that time)
+            if spot is not None:
+                self._bake = False
+                if len(self._made) > 300:
+                    self._made.clear()
+                self._made[spot] = (self._made.get(spot, (0, -1e9))[1], time.monotonic())  # (the one before, this)
+                made = _node_picture(n, k, native)
+                within = None
+                if made is None and vis:  # too big: what shows of it, and a screen's worth around
+                    pad_x, pad_y = (vis[2] - vis[0]) * 0.5, (vis[3] - vis[1]) * 0.5
+                    within = (vis[0] - pad_x, vis[1] - pad_y, vis[2] + pad_x, vis[3] + pad_y)
+                    made = _node_picture(n, k, native, within=within)
+                pic = (made[0], made[1], k, within) if made else False
+            else:
+                self.waiting = True
+        self.parts.append((n, still, pic))  # (held: a node let go of could give its address to a new one)
+        if pic:
+            snap.append_texture(pic[0], pic[1])
+        else:
+            snap.append_node(n)
+
+
+def _box_in(vis, within, node) -> bool:
+    """What shows (vis) of a big part lies inside what was kept of it (within, or the part's own end)."""
+    b = node.get_bounds()
+    x0, y0 = max(vis[0], b.get_x()), max(vis[1], b.get_y())
+    x1, y1 = min(vis[2], b.get_x() + b.get_width()), min(vis[3], b.get_y() + b.get_height())
+    return x1 <= x0 or y1 <= y0 or (within[0] <= x0 and within[1] <= y0 and x1 <= within[2] and y1 <= within[3])
+
+
+def _screen_scale(widget):
+    """(native, screen pixels per logical one) of a widget; (None, 1) while it isn't on a window."""
+    native = widget.get_native()
+    surf = native.get_surface() if native else None
+    if not surf:
+        return None, 1.0
+    return native, (surf.get_scale() if hasattr(surf, "get_scale") else widget.get_scale_factor())
+
+
+BAKE_AFTER_MS = 150  # a drawing the same for this long is kept as a picture
+
+
+def baked(widget, snap, key, draw, hold=None) -> None:
+    """A widget's own drawing (draw(snap): letters with a blurred shadow) kept as a picture while `key`, all it
+    depends on, stays the same. The falling motifs pass behind the letters every frame, and the renderer then
+    works out each shadow's blur again every frame: at 4K that, not the motifs, was most of a frame. The last few
+    pictures are kept (the clock's colon blinks: two of them, made once). `hold`: kept alive with the picture (a
+    key holding an object's id() stays that object's)."""
+    cache = widget.__dict__.setdefault("_baked", [])
+    for item in cache:
+        if item[0] == key:
+            snap.append_texture(item[1], item[2])
+            return
+    draw(snap)
+    widget._bake_key = key
+    if widget.__dict__.get("_bake_wait"):
+        return
+
+    def bake() -> bool:
+        widget._bake_wait = 0
+        k2 = widget._bake_key
+        native, k = _screen_scale(widget)
+        if k2 is None or not native or not widget.get_mapped():
+            return False
+        s = Gtk.Snapshot()
+        draw(s)  # (as it is now: k2 is the key of the last drawing)
+        node = s.to_node()
+        pic = _node_picture(node, k, native) if node is not None else None
+        if pic is None:
+            return False
+        cache.append((k2, pic[0], pic[1], hold, k))
+        del cache[:-4]
+        widget.queue_draw()
         return False
-    if isinstance(a, Gsk.ContainerNode):
-        n = a.get_n_children()
-        return n == b.get_n_children() and all(_node_same(a.get_child(i), b.get_child(i)) for i in range(n))
-    if isinstance(a, Gsk.TransformNode):
-        return a.get_transform().equal(b.get_transform()) and _node_same(a.get_child(), b.get_child())
-    if isinstance(a, Gsk.ClipNode):
-        return a.get_clip().equal(b.get_clip()) and _node_same(a.get_child(), b.get_child())
-    if isinstance(a, Gsk.OpacityNode):
-        return a.get_opacity() == b.get_opacity() and _node_same(a.get_child(), b.get_child())
-    return False
+    widget._bake_wait = GLib.timeout_add(BAKE_AFTER_MS, bake)
+
+
+class StillBox(Gtk.Box):
+    """A box whose parts (its child's children) are each kept as a picture while they don't change: the song
+    info's and the show's shadowed letters, the glass buttons. See baked(): the falling motifs behind them make
+    the renderer draw them again every frame. A part that changes (the slider moved, a button under the mouse) is
+    drawn live, and kept again once it's still."""
+
+    def do_snapshot(self, snap) -> None:
+        native, k = _screen_scale(self)
+        s = Gtk.Snapshot()
+        Gtk.Box.do_snapshot(self, s)
+        node = s.to_node()
+        if node is None or not native:
+            if node is not None:
+                snap.append_node(node)
+            return
+        keep = self.__dict__.get("_keep") or self.__dict__.setdefault("_keep", Keep(still=1))
+        keep.draw(snap, node, k, native)
+        if keep.waiting and not getattr(self, "_still_wait", 0):  # looked at again soon: the same then, kept
+            def again() -> bool:
+                self._still_wait = 0
+                self.queue_draw()
+                return False
+            self._still_wait = GLib.timeout_add(BAKE_AFTER_MS, again)
 
 
 class GlassCard(Gtk.Box):
@@ -6231,15 +6406,12 @@ class GlassCard(Gtk.Box):
         if self.lift:
             snap.restore()
 
-    KIDS_STILL = 2  # frames a part inside must stay the same before it's kept as a picture
-
     def _kids(self, snap, w: int, h: int) -> None:
-        """What's inside the glass. A big glass keeps each of its children as a picture while it doesn't change: the
-        falling motifs redraw the glass every frame, and with them every label's blurred halo (over half the frame at
-        4K). Each child on its own, so one that keeps changing (the tabs' small glass during a cover change) doesn't
-        make the text beside it be drawn live too. Anything moving (a scroll, a switch) is drawn live, and kept again
-        once it's still."""
-        native = self.get_native()
+        """What's inside the glass. A big glass keeps what's inside as pictures while it doesn't change (Keep): the
+        falling motifs redraw the glass every frame, and with them every label's blurred halo (over half the frame
+        at 4K). Each part on its own, so one that keeps changing (the tabs' small glass during a cover change)
+        doesn't make the text beside it be drawn live too; a list scrolling is its one picture moved."""
+        native, k = _screen_scale(self)
         if w * h < self.FINISH_BAKE or not native:
             Gtk.Box.do_snapshot(self, snap)
             return
@@ -6247,44 +6419,9 @@ class GlassCard(Gtk.Box):
         Gtk.Box.do_snapshot(self, s)
         node = s.to_node()
         if node is None:
-            self._kids_parts = []
             return
-        surf = native.get_surface()
-        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
-        nodes = _node_parts(node)
-        old = getattr(self, "_kids_parts", [])
-        key = (w, h, k)
-        parts = self._kids_parts = []
-        bake = True  # (one picture a frame at most)
-        for n in nodes:
-            was = next((o for o in old if _node_same(o[0], n)), None)  # (a scrollbar coming or going: the rest kept)
-            still = was[1] + 1 if was else 0
-            pic = was[2] if was and was[2] and was[2][0] == key else None
-            if pic is None and bake and still >= self.KIDS_STILL:
-                pic, bake = self._kids_picture(n, key, native), False
-            parts.append((n, still, pic))  # (held: a node let go of could give its address to a new one)
-            if pic and pic[1]:
-                snap.append_texture(pic[1], pic[2])
-            else:
-                snap.append_node(n)
-
-    @staticmethod
-    def _kids_picture(node, key, native):
-        """(key, texture, rect) of one part inside the glass, on whole screen pixels; texture None when none of it
-        is inside the glass."""
-        w, h, k = key
-        b = node.get_bounds()
-        x0, y0 = max(0.0, math.floor(b.get_x() * k) / k), max(0.0, math.floor(b.get_y() * k) / k)
-        x1 = min(float(w), math.ceil((b.get_x() + b.get_width()) * k) / k)
-        y1 = min(float(h), math.ceil((b.get_y() + b.get_height()) * k) / k)
-        if x1 <= x0 or y1 <= y0:
-            return key, None, None
-        s = Gtk.Snapshot()
-        s.scale(k, k)
-        s.translate(Graphene.Point().init(-x0, -y0))
-        s.append_node(node)
-        tex = native.get_renderer().render_texture(s.to_node(), Graphene.Rect().init(0, 0, (x1 - x0) * k, (y1 - y0) * k))
-        return key, tex, Graphene.Rect().init(x0, y0, x1 - x0, y1 - y0)
+        keep = self.__dict__.get("_keep") or self.__dict__.setdefault("_keep", Keep())
+        keep.draw(snap, node, k, native)
 
     def draw_mirrored(self, snap, tile) -> None:
         """A button seen through the glass upside down, as in a mirror: `tile` (its glass) where it is, the
@@ -6407,16 +6544,18 @@ class GlassCard(Gtk.Box):
         # renderer draws apart every frame: a third of the work at 60 Hz)
         f, mag, faint = max(1.0, m * 0.7), self.mag, self.SNOW_FAINT
 
-        def middle(fx, fy):
+        def middle(fx, fy, _r):
             px, py = w / 2 + (fx - gx - w / 2) * mag, h / 2 + (fy - gy - h / 2) * mag
             return faint * max(0.0, min(1.0, min(px, w - px, py, h - py) / f))
+        near = snow.near(gx - e, gy - e, gx + w + e, gy + h + e)  # (looked through five times: only those around)
         if clip is not None:
             snap.push_clip(clip)
         snap.save()
         snap.translate(Graphene.Point().init(w / 2, h / 2))
         snap.scale(mag, mag)
         snap.translate(Graphene.Point().init(-w / 2, -h / 2))
-        snow.draw(snap, o.x, o.y, (gx, gy, w, h), middle, group=clip is None)
+        snow.draw(snap, o.x, o.y, (gx, gy, w, h), middle, group=clip is None, places=near, clip=clip is None,
+                  slot=(id(self), 4))
         snap.restore()
         if clip is not None:
             snap.pop()
@@ -6425,28 +6564,37 @@ class GlassCard(Gtk.Box):
         # In the rim, those just beyond each edge mirrored (like the date and time there): upside down, the
         # nearest right at the edge, fading out inwards where the middle's magnified view takes over.
         reach = m / squeeze
-        if rr is not None:
-            snap.push_rounded_clip(rr)
+        # A big glass (rr given: nothing clips it round here): each drawn straight, fading out before the corners
+        # instead of being cut round by them. Under a rounded clip every turned picture, or a group of them per
+        # edge, is drawn apart first: four more pictures a frame, a third of a panel's frame at 4K.
+        direct = rr is not None
+        cr = self.radius * 0.7
+        native = self.get_native()
+        surf = native.get_surface() if native else None
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+        md = round(m * k) / k if direct else m  # (the edges' strips on whole screen pixels: see SnowFall.draw)
 
         def beyond(d):
             return 0.95 * faint * max(0.0, 1.0 - max(0.0, d) / reach)
-        for band, flip, view, fade in (  # (view: those beyond that edge, on the window)
-                ((0, 0, w, m), (0, 0, 1, -squeeze), (gx - e, gy - e, w + 2 * e, e + 2),
-                 lambda fx, fy: beyond(gy - fy)),  # above the top edge
-                ((0, h - m, w, m), (0, h * (1 + squeeze), 1, -squeeze), (gx - e, gy + h - 2, w + 2 * e, e + 2),
-                 lambda fx, fy: beyond(fy - gy - h)),  # below the bottom edge
-                ((0, 0, m, h), (0, 0, -squeeze, 1), (gx - e, gy - e, e + 2, h + 2 * e),
-                 lambda fx, fy: beyond(gx - fx)),  # left of the left edge
-                ((w - m, 0, m, h), (w * (1 + squeeze), 0, -squeeze, 1), (gx + w - 2, gy - e, e + 2, h + 2 * e),
-                 lambda fx, fy: beyond(fx - gx - w))):  # right of the right edge
+
+        def along(p, size, r):  # 0 by a corner .. 1 away from them (p: along the edge)
+            return max(0.0, min(1.0, (min(p, size - p) - cr - 0.45 * r) / (0.3 * r + 4))) if direct else 1.0
+        for i, (band, flip, view, fade) in enumerate((  # (view: those beyond that edge, on the window)
+                ((0, 0, w, md), (0, 0, 1, -squeeze), (gx - e, gy - e, w + 2 * e, e + 2),
+                 lambda fx, fy, r: beyond(gy - fy) * along(fx - gx, w, r)),  # above the top edge
+                ((0, h - md, w, md), (0, h * (1 + squeeze), 1, -squeeze), (gx - e, gy + h - 2, w + 2 * e, e + 2),
+                 lambda fx, fy, r: beyond(fy - gy - h) * along(fx - gx, w, r)),  # below the bottom edge
+                ((0, 0, md, h), (0, 0, -squeeze, 1), (gx - e, gy - e, e + 2, h + 2 * e),
+                 lambda fx, fy, r: beyond(gx - fx) * along(fy - gy, h, r)),  # left of the left edge
+                ((w - md, 0, md, h), (w * (1 + squeeze), 0, -squeeze, 1), (gx + w - 2, gy - e, e + 2, h + 2 * e),
+                 lambda fx, fy, r: beyond(fx - gx - w) * along(fy - gy, h, r)))):  # right of the right edge
             snap.push_clip(Graphene.Rect().init(*band))
             snap.save()
             snap.translate(Graphene.Point().init(flip[0], flip[1]))
             snap.scale(flip[2], flip[3])
-            snow.draw(snap, o.x, o.y, view, fade)
+            snow.draw(snap, o.x, o.y, view, fade, group=not direct, places=near, clip=not direct,
+                      slot=(id(self), i))
             snap.restore()
-            snap.pop()
-        if rr is not None:
             snap.pop()
 
     def _lens_key(self, w: float, h: float):
@@ -6494,7 +6642,12 @@ class GlassCard(Gtk.Box):
         if GlassCard._spent[0] != frame:
             GlassCard._spent[:] = [frame, 0.0]
         start = time.perf_counter()
-        end = start + max(0.0, self.BUILD_MS / 1000 - GlassCard._spent[1])
+        budget = self.BUILD_MS / 1000
+        if clock:  # (a faster screen: under half of one of its frames, 165 Hz: 6 ms each)
+            every = clock.get_refresh_info(0)[0]
+            if every:
+                budget = min(budget, 0.45 * every / 1e6)
+        end = start + max(0.0, budget - GlassCard._spent[1])
         if build["flat"] == "later":  # what's behind flattened: a step of its own
             if time.perf_counter() < end:
                 build["flat"] = self._flat(w, h, build["plan"]["rx"], build["plan"]["ry"])
@@ -10029,6 +10182,11 @@ class ClockView(Gtk.Widget):
     def do_snapshot(self, snap) -> None:
         if not self.lays:
             return
+        now = time.localtime()
+        baked(self, snap, (id(self.lays), self.colon, tuple(self.order), self.room, self.sx, getattr(self, "sy", 1.0),
+                           now.tm_year, now.tm_yday), self._draw, self.lays)
+
+    def _draw(self, snap) -> None:
         lays, gap = self.lays
         w = self.room[0]
         tl = lays[-1][0]
@@ -10125,15 +10283,32 @@ def _sky_sun(cr, cx, cy, r) -> None:
     cr.restore()
 
 
-def _sky_drops(cr, xs, y, length, color=(0.36, 0.72, 1.0), slant=0.35, width=None) -> None:
-    cr.set_line_cap(1)
-    for x in xs:
-        for w, c in (((width or length * 0.32) * 1.7, (0, 0, 0, 0.3)), ((width or length * 0.32), (*color, 1))):
-            cr.set_line_width(w)
-            cr.set_source_rgba(*c)
-            cr.move_to(x, y)
-            cr.line_to(x - length * slant, y + length)
-            cr.stroke()
+def _sky_drops(cr, spots, r, color=(0.30, 0.66, 1.0)) -> None:
+    """A few small raindrops, each a real drop (a round body drawn up to a point, falling a little aslant), round
+    body centred on each of `spots`, radius r: lit from above, a glint on it, a soft shadow behind. (They were
+    slanted lines: the user: a cloud with stripes, not rain.)"""
+    for x, y in spots:
+        tx, ty = x + r * 0.55, y - r * 2.5  # its tip: where it came from
+
+        def shape(dx=0.0, dy=0.0, k=1.0):
+            cr.new_path()
+            cr.move_to(tx + dx, ty + dy)
+            cr.curve_to(tx + r * 0.25 * k + dx, ty + r * 1.1 + dy, x + r * k + dx, y - r * 0.75 + dy, x + r * k + dx, y + dy)
+            cr.arc(x + dx, y + dy, r * k, 0, math.pi)
+            cr.curve_to(x - r * k + dx, y - r * 0.75 + dy, tx - r * 0.25 * k + dx, ty + r * 1.1 + dy, tx + dx, ty + dy)
+            cr.close_path()
+        shape(-r * 0.12, r * 0.22, 1.18)
+        cr.set_source_rgba(0, 0, 0, 0.32)
+        cr.fill()
+        shape()
+        g = cairo_linear(0, ty, 0, y + r)
+        g.add_color_stop_rgb(0, min(1.0, color[0] + 0.45), min(1.0, color[1] + 0.25), 1.0)
+        g.add_color_stop_rgb(1, *color)
+        cr.set_source(g)
+        cr.fill()
+        cr.arc(x - r * 0.32, y - r * 0.1, r * 0.26, 0, 2 * math.pi)  # the glint
+        cr.set_source_rgba(1, 1, 1, 0.8)
+        cr.fill()
 
 
 def _sky_flake(cr, x, y, r, color=(1, 1, 1)) -> None:
@@ -10192,12 +10367,13 @@ def draw_sky(cr, w: float, h: float, kind: str, night: bool = False) -> None:
         top, bottom = ((0.62, 0.64, 0.72), (0.38, 0.40, 0.48)) if dark else ((0.99, 0.99, 1.0), (0.70, 0.74, 0.81))
         _sky_cloud(cr, w * 0.5, h * 0.38, s * 0.86, top, bottom)
         y = h * 0.66
-        if kind == "drizzle":
-            _sky_drops(cr, (w * 0.34, w * 0.52, w * 0.70), y, s * 0.14)
+        if kind == "drizzle":  # (a few small drops under the cloud, not in a row: some lower, as they fall)
+            _sky_drops(cr, ((w * 0.33, y + s * 0.10), (w * 0.52, y + s * 0.20), (w * 0.70, y + s * 0.11)), s * 0.038)
         elif kind in ("rain", "showers"):
-            _sky_drops(cr, (w * 0.30, w * 0.46, w * 0.62, w * 0.78), y, s * 0.24)
+            _sky_drops(cr, ((w * 0.27, y + s * 0.11), (w * 0.43, y + s * 0.24), (w * 0.59, y + s * 0.12),
+                            (w * 0.75, y + s * 0.25)), s * 0.052)
         elif kind == "freezing":
-            _sky_drops(cr, (w * 0.32, w * 0.66), y, s * 0.20, (0.70, 0.88, 1.0))
+            _sky_drops(cr, ((w * 0.30, y + s * 0.12), (w * 0.68, y + s * 0.20)), s * 0.05, (0.62, 0.84, 1.0))
             _sky_flake(cr, w * 0.49, y + s * 0.12, s * 0.09, (0.86, 0.95, 1.0))
         elif kind == "snow":
             for fx, fy in ((0.30, 0.0), (0.52, 0.12), (0.72, 0.0)):
@@ -10210,7 +10386,7 @@ def draw_sky(cr, w: float, h: float, kind: str, night: bool = False) -> None:
                     cr.set_source_rgb(0.95, 0.97, 1.0)
                     cr.fill()
             else:
-                _sky_drops(cr, (w * 0.24, w * 0.74), y, s * 0.18)
+                _sky_drops(cr, ((w * 0.24, y + s * 0.14), (w * 0.76, y + s * 0.20)), s * 0.05)
 
 
 def moon_sky(lat: float, lon: float, t: float = None) -> dict:
@@ -10670,8 +10846,10 @@ class FitText(Gtk.Widget):
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
-        if not self.lay:
-            return
+        if self.lay:
+            baked(self, snap, (id(self.lay), self.room), self._draw, self.lay)
+
+    def _draw(self, snap) -> None:
         w, h = self.room
         ink = self.lay.get_pixel_extents()[1]
         shadow = Gsk.Shadow()
@@ -10870,8 +11048,9 @@ class SnowFall:
         self._last = None
         self.viewers: set = set()  # glass showing it (menus, panels): redrawn with it
         self._frame = 0  # frames moved
-        self._node = (None, [])  # (key, [(x, y, reach, node, alpha)]): as they are this frame, built once a frame
-        self._tex_nodes = (None, [])  # (sprites, a render node of each)
+        self._node = (None, [])  # (key, [(flake, x, y, reach)]): where each is this frame, worked out once a frame
+        self._ident = Gsk.Transform.new()
+        self._pt = Graphene.Point()
 
     def set_area(self, area, field=None) -> None:
         field = (field or area) if area else None
@@ -10952,6 +11131,8 @@ class SnowFall:
             "angle": rng.uniform(0, 360), "spin": rng.choice((-1, 1)) * rng.uniform(8, 40),
             "sprite": rng.randrange(max(1, len(self.sprites))), "scale": scale,
             "alpha": 0.55 + 0.4 * near, "t": rng.uniform(0, 100),
+            "own": None, "at": None, "node": None, "faded": {},  # (its picture at its size and faintness, and
+            # fainter per view; this frame's transform and node)
         }
 
     def _count(self, base: float) -> int:
@@ -11003,10 +11184,15 @@ class SnowFall:
         self._cover_memo = (self._frame, out)
         return out
 
-    def draw(self, snap, dx: float = 0.0, dy: float = 0.0, view=None, fade=None, group: bool = True) -> None:
+    def draw(self, snap, dx: float = 0.0, dy: float = 0.0, view=None, fade=None, group: bool = True,
+             places=None, clip: bool = True, slot=0) -> None:
         """Into `snap`, shifted by (dx, dy) (the drawing widget isn't where the area's coordinates start): those
         inside `view` (x, y, w, h; the area right of the cover by default; the glass: what it sees), each
-        fainter by fade(x, y) 0..1 if given (the glass's edges)."""
+        fainter by fade(x, y, reach) 0..1 if given (the glass's edges); `places`: those of near() to look through
+        instead of all; `slot`: which of a glass's views this is (its middle, each edge: a flake's faded picture is
+        kept per view); `clip` False: not cut to `view` (the caller's own clip, on whole screen pixels, does it: a
+        clip that isn't, as this one magnified or squeezed by the glass, makes the renderer draw every turned
+        picture crossing it apart first)."""
         if not EFFECTS["season"] or not self.area:
             return
         x, y, w, h = view or self.area
@@ -11024,52 +11210,81 @@ class SnowFall:
             self.flakes.append(self._sow(base, True))
         del self.flakes[want:]
         nodes = []
-        Opacity, Turn = Gsk.OpacityNode.new, Gsk.TransformNode.new
+        Opacity, Turn, placed = Gsk.OpacityNode.new, Gsk.TransformNode.new, self._placed
         covered = self._covered() if view is None else ()
-        for fx, fy, r, tex, tr, alpha in self._all():  # those inside it only: the renderer has less to do
-            if fx + r < x or fx - r > x + w or fy + r < y or fy - r > y + h:
+        x1, y1 = x + w, y + h
+        for item in (places if places is not None else self._places()):  # those inside it only
+            f, fx, fy, r = item
+            if fx + r < x or fx - r > x1 or fy + r < y or fy - r > y1:
                 continue
             if covered and any(c[0] <= fx - r and fx + r <= c[2] and c[1] <= fy - r and fy + r <= c[3] for c in covered):
                 continue
-            a = alpha * fade(fx, fy) if fade else alpha
-            if a > 0.02:  # (faded, then turned: the other way round each would be drawn apart first)
-                nodes.append(Turn(Opacity(tex, a), tr))
+            a = fade(fx, fy, r) if fade else 1.0
+            if a >= 0.995:  # as it is on the window: the very same node (made once a frame, whoever draws it)
+                nodes.append(placed(f, fx, True)[1])
+            elif f["alpha"] * a > 0.02:  # (faded, then turned: the other way round each would be drawn apart first)
+                tr = placed(f, fx, False)[0]
+                q = int(a * 32)  # (its faintness in 32 steps: the faded picture kept while it's on the same one)
+                was = f["faded"].get(slot)
+                if was is None or was[0] != q or was[2] is not f["own"][1]:
+                    was = f["faded"][slot] = (q, Opacity(f["own"][1], f["alpha"] * (q + 0.5) / 32), f["own"][1])
+                nodes.append(Turn(was[1], tr))
         if not nodes:
             return
         snap.save()
         snap.translate(Graphene.Point().init(dx, dy))
-        snap.push_clip(Graphene.Rect().init(x, y, w, h))
+        if clip:
+            snap.push_clip(Graphene.Rect().init(x, y, w, h))
         nodes_group = Gsk.ContainerNode.new(nodes)
         # as one group (drawn once, then put in place): turned pictures under the glass's round corners would
         # otherwise each be drawn apart first, the renderer can't round them off turned (3x the work)
         snap.append_node(Gsk.OpacityNode.new(nodes_group, 0.999) if fade and group else nodes_group)
-        snap.pop()
+        if clip:
+            snap.pop()
         snap.restore()
 
-    def _all(self) -> list:
-        """[(x, y, reach, picture node, transform, alpha)]: each as it is now (moved, turned, sized), worked out once a
-        frame, whoever draws them (the window, and every glass up to five times: its middle and four mirrored
-        edges), each picking those it shows: at 165 Hz too (a frame is 6 ms)."""
+    def _places(self) -> list:
+        """[(flake, x, y, reach)]: where each is now, worked out once a frame (plain arithmetic: its transform and
+        node are made only if something draws it, see _placed)."""
         key = (self._frame, len(self.flakes), id(self.sprites), self.field)
         if self._node[0] == key:
             return self._node[1]
-        sprites, n = self.sprites, len(self.sprites)
-        if self._tex_nodes[0] is not sprites:
-            self._tex_nodes = (sprites, [Gsk.TextureNode.new(t, Graphene.Rect().init(-b / 2, -b / 2, b, b))
-                                         for t, b, _ in sprites])
-        tex_nodes = self._tex_nodes[1]
-        T, sin, pt = Gsk.Transform, math.sin, Graphene.Point()  # (one point, reused: the transform copies it)
+        sprites, n, sin = self.sprites, len(self.sprites), math.sin
         out = []
         for f in self.flakes:
-            i = f["sprite"] % n
-            _, box, upright = sprites[i]
-            fx = f["x"] + f["sway"] * sin(f["t"] * f["freq"] * 6.283 + f["phase"])
-            # pictures that stand (palms, candles, pumpkins): rocking a little, the rest turning round slowly
-            turn = 18 * sin(f["t"] * f["freq"] * 4 + f["phase"]) if upright else f["angle"]
-            tr = T.new().translate(pt.init(fx, f["y"])).rotate(turn).scale(f["scale"], f["scale"])
-            out.append((fx, f["y"], box * f["scale"] * 0.75, tex_nodes[i], tr, f["alpha"]))
+            out.append((f, f["x"] + f["sway"] * sin(f["t"] * f["freq"] * 6.283 + f["phase"]), f["y"],
+                        sprites[f["sprite"] % n][1] * f["scale"] * 0.75))
         self._node = (key, out)
         return out
+
+    def near(self, x0: float, y0: float, x1: float, y1: float) -> list:
+        """Those of _places() reaching into the box: a glass looks through them five times a frame (its middle and
+        four mirrored edges), each time only at the ones around it."""
+        return [p for p in self._places() if x0 - p[3] < p[1] < x1 + p[3] and y0 - p[3] < p[2] < y1 + p[3]]
+
+    def _placed(self, f: dict, fx: float, whole: bool):
+        """(transform, node) of a flake this frame: made when first drawn and shared by all who draw it (the window,
+        every glass: its middle, its mirrored edges). Each call into GTK from Python costs 2-5 µs, and there are
+        hundreds of flakes sixty and more times a second: its picture at its size and faintness is kept for as
+        long as it falls, so a frame makes only its transform (moved, turned) and, if `whole` (drawn as it is, not
+        fainter), the node putting the two together."""
+        stamp = (self._frame, id(self.sprites))
+        if f["at"] != stamp:
+            sprites = self.sprites
+            tex, box, upright = sprites[f["sprite"] % len(sprites)]
+            own = f["own"]
+            if own is None or own[0] is not tex:
+                b = box * f["scale"]
+                sized = Gsk.TextureNode.new(tex, Graphene.Rect().init(-b / 2, -b / 2, b, b))
+                f["own"] = (tex, sized, Gsk.OpacityNode.new(sized, f["alpha"]))
+                f["faded"] = {}
+            # pictures that stand (palms, candles, pumpkins): rocking a little, the rest turning round slowly
+            turn = 18 * math.sin(f["t"] * f["freq"] * 4 + f["phase"]) if upright else f["angle"]
+            f["tr"] = self._ident.translate(self._pt.init(fx, f["y"])).rotate(turn)
+            f["at"], f["node"] = stamp, None
+        if whole and f["node"] is None:
+            f["node"] = Gsk.TransformNode.new(f["own"][2], f["tr"])
+        return f["tr"], f["node"]
 
     def bytes(self) -> int:
         return sum(tex_bytes(t) for t, _, _ in self.sprites)
@@ -11241,6 +11456,12 @@ class InfoStack(Gtk.Widget):
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
+        if self.flash > 0.01:  # (flashing: a new drawing every frame)
+            self._draw(snap)
+        else:
+            baked(self, snap, (id(self.lines), self.sy), self._draw, self.lines)
+
+    def _draw(self, snap) -> None:
         shadow = Gsk.Shadow()
         shadow.color, shadow.dx, shadow.dy, shadow.radius = _rgba(0, 0, 0, 0.8), -1, 2, 3
         shadows = [shadow]
@@ -11408,6 +11629,92 @@ class Puddle(GlassCard):
             GlassCard.do_snapshot(self, snap)
         finally:
             self._flow_rr = None
+
+
+class Pager:
+    """A box's text that doesn't fit shown a page at a time: each page still for HOLD seconds (the user: gliding
+    by, or changing sooner than 10 s, it was too quick to read), then a short slide to the next, which starts at a
+    whole row (a person's photo isn't cut in half) or a line of overlap. The next time the box opens with the
+    same contents it goes on from the page after the last one read, not from the top again; past the end, from
+    the top. Moved with the screen's frames (60, 165 a second: whatever it shows), by whole screen pixels."""
+
+    HOLD, SLIDE, READ = 12.0, 0.7, 3.0  # s a page stays; s the slide takes; s shown before a page counts as read
+
+    def __init__(self, pop, scroll):
+        self.pop, self.scroll = pop, scroll
+        self.key = None  # what the contents are: the same ones go on, others start at the top
+        self.next = 0.0  # where the next showing starts
+        self.hold_till = 0.0  # the wheel moved it: left alone till then
+        self._tick = None
+        self._at = self._since = self._slide = None
+
+    def start(self, key) -> None:
+        if key != self.key:
+            self.key, self.next = key, 0.0
+        self._at = self._since = self._slide = None
+        self.hold_till = 0.0
+        if self._tick is None:
+            self._tick = self.scroll.add_tick_callback(self._step)
+
+    def touched(self, seconds: float = 8.0) -> None:
+        self.hold_till = time.monotonic() + seconds
+        self._slide = None
+        self._since = None  # (where it's left is a page of its own, from then)
+
+    def _after(self, at: float, page: float, end: float) -> float:
+        """Where the page after the one starting at `at` starts: at the first row that doesn't wholly fit, else a
+        line short of a full page; 0 (the top) after the last."""
+        if at >= end - 1:
+            return 0.0
+        box = self.scroll.get_child()
+        box = box.get_child() if isinstance(box, Gtk.Viewport) else box
+        nxt = at + page * 0.9
+        c = box.get_first_child() if box is not None else None
+        while c is not None:
+            ok, b = c.compute_bounds(box)
+            if ok and c.get_visible() and b.get_y() + b.get_height() > at + page + 0.5:
+                if b.get_y() > at + page * 0.25:  # (a row taller than most of a page: by the page instead)
+                    nxt = b.get_y() - 4
+                break
+            c = c.get_next_sibling()
+        return min(end, max(at + 1, nxt))
+
+    def _step(self, _w, clock) -> bool:
+        if not self.pop.get_visible():
+            self._tick = None
+            return GLib.SOURCE_REMOVE
+        adj = self.scroll.get_vadjustment()
+        page = adj.get_page_size()
+        end = max(0.0, adj.get_upper() - page)
+        now = clock.get_frame_time() / 1e6
+        if page <= 1:
+            return GLib.SOURCE_CONTINUE  # not laid out yet
+        if self._at is None:  # just opened: where the last showing left off
+            self._at = self.next if self.next <= end + 1 else 0.0
+            self._at = min(self._at, end)
+            adj.set_value(self._at)
+            self._since = now
+            return GLib.SOURCE_CONTINUE
+        if time.monotonic() < self.hold_till:
+            return GLib.SOURCE_CONTINUE
+        if self._since is None:  # let go of after the wheel: read on from here
+            self._at, self._since = adj.get_value(), now
+        if not self._slide and abs(adj.get_value() - min(self._at, end)) > 0.6:
+            adj.set_value(min(self._at, end))  # (the contents filled anew under it: back where it was)
+        if self._slide:
+            t0, a, b = self._slide
+            f = min(1.0, (now - t0) / self.SLIDE)
+            e = f * f * (3 - 2 * f)  # eased at both ends
+            _native, k = _screen_scale(self.scroll)
+            adj.set_value(round((a + (b - a) * e) * k) / k)
+            if f >= 1.0:
+                self._slide, self._at, self._since = None, b, now
+            return GLib.SOURCE_CONTINUE
+        if now - self._since >= self.READ:  # read (enough of it): the next showing goes on after it
+            self.next = self._after(self._at, page, end)
+        if now - self._since >= self.HOLD and end > 1:
+            self._slide = (now, adj.get_value(), self._after(self._at, page, end))
+        return GLib.SOURCE_CONTINUE
 
 
 class OpenProfile:
@@ -11688,9 +11995,7 @@ class Water:
                 for g in (self.neck, self.body):
                     g.set_can_target(False)
                     g.set_can_focus(False)
-                if not any(w.open for w in self.win.waters):  # all closed: the full enhancing goes on
-                    self.win.app.enhancer.set_quiet(False)
-                    self.win.app.enhance_small_full()
+                self.win.quiet_sync()  # all closed: the full enhancing goes on
         anim.connect("done", done)
         anim.play()
 
@@ -11867,8 +12172,8 @@ class Window(Adw.ApplicationWindow):
         wheel.connect("scroll", self.on_wheel)
         self.add_controller(wheel)
 
-        scrim = self.scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
-                                     margin_top=0)
+        scrim = self.scrim = StillBox(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
+                                      margin_top=0)
         # under it, its shading, then the falling motifs (so they're seen over the shading, under the buttons)
         self.shade_view = Shade(scrim, valign=Gtk.Align.END)
         self.snow_view = SnowView(self)
@@ -12076,13 +12381,15 @@ class Window(Adw.ApplicationWindow):
         self.song_pop.add_css_class("glass-menu")
         self.song_pop.set_parent(self.clock)
         self.song_pop.set_can_target(False)
+        for pop in (self.day_pop, self.names_pop, self.song_pop):
+            self._quiet_pop(pop)
         over = Gtk.EventControllerMotion()
         over.connect("enter", lambda *_: self.song_pop.get_visible() or self.song_show())
         over.connect("leave", lambda *_: self.song_pop.popdown())
         self.info.add_controller(over)
         GLib.timeout_add_seconds(self.SONG_AUTO[0], self._song_auto)
-        self._names_glide = None
-        self._names_hold = 0.0
+        self.names_pager = Pager(self.names_pop, self.names_scroll)
+        self.song_pager = Pager(self.song_pop, self.song_scroll)
         hover = Gtk.EventControllerMotion()  # the mouse on the names: their box, like the day's on the date
         hover.connect("enter", lambda *_: self.names_pop.get_visible() or self.names_show())
         hover.connect("leave", lambda *_: self.names_pop.popdown())
@@ -12332,6 +12639,7 @@ class Window(Adw.ApplicationWindow):
         # when open, and the pill grew to the menu's width, squeezing the volume slider to half
         self.quality_pop.set_parent(self.quality_tab)
         self.quality_pop.connect("show", self._place_quality)
+        self._quiet_pop(self.quality_pop)
         self.quality_pop.connect("show", lambda *_: (OPEN_PROFILE.start("menu kvality", self), self._close_menus(
             keep=self.quality_pop)))
         self.quality_tab.connect("clicked", lambda *_: self.quality_pop.popup())
@@ -12481,6 +12789,8 @@ class Window(Adw.ApplicationWindow):
         if (not self.get_visible() or not self.clock.get_visible() or self._tour is not None
                 or any(w.open for w in self.waters) or self._day_on or self.quality_pop.get_visible()):
             return
+        if not day_summary():  # nothing known about the day: no empty box
+            return
         self._day_show(self.clock)
         GLib.timeout_add_seconds(self.DAY_AUTO[1], lambda: (self._day_on or self.day_pop.popdown(), False)[1])
 
@@ -12493,12 +12803,16 @@ class Window(Adw.ApplicationWindow):
             self._close_menus(keep=self.names_pop)  # (a click: asked for, so the open menu makes way)
             self.names_show()
 
-    def _names_auto(self) -> None:
+    def _names_auto(self, tries: int = 20) -> None:
         if not hasattr(self, "quality_pop") or not hasattr(self, "_tour"):
             return
         if (not self.get_visible() or not self.names.get_visible() or self._tour is not None
                 or any(w.open for w in self.waters) or self._day_on or self.quality_pop.get_visible()
                 or self.names_pop.get_visible()):
+            return
+        if not self.names_ready():  # nothing to show yet (photos on their way): a little later, not an empty box
+            if tries > 0:
+                GLib.timeout_add_seconds(30, lambda: (self._names_auto(tries - 1), False)[1])
             return
         self.names_show()
         shown = self._names_shown = object()
@@ -12530,21 +12844,26 @@ class Window(Adw.ApplicationWindow):
         if people is None:
             box.append(Gtk.Label(label=a.cz("Hledají se slavní nositelé jména…"), xalign=0, attributes=attrs))
             return
-        if not people:
-            box.append(Gtk.Label(label=a.cz("Slavné nositele toho jména se najít nepodařilo."), xalign=0,
+        # only those whose photo is here (the user: nobody without one, no drawn badge, no logo standing in while
+        # a photo's on its way: such a person joins the list when the photo arrives)
+        shown = [p for p in people if p["img"] and a.show_pics.get(p["img"]) is not None]
+        self._names_rows = [p["img"] for p in shown]
+        for p in people:
+            if p["img"]:
+                a.want_name_pic(p["img"])
+        if not shown:
+            waiting = any(p["img"] for p in people)
+            box.append(Gtk.Label(label=a.cz("Fotky slavných nositelů jména se načítají…" if waiting else
+                                            "Slavné nositele toho jména s fotkou se najít nepodařilo."), xalign=0,
                                  wrap=True, attributes=attrs))
             return
         px = round(TEXT_PT["pic"] * 1.15 * max(1.0, self._scale))
-        for p in people:
+        for p in shown:
             row = Gtk.Box(spacing=14)
             pic = SquarePic(px, 10 * max(1.0, self._scale), valign=Gtk.Align.START)  # (each the same square)
             frame = pic
-            if p["img"]:
-                a.want_name_pic(p["img"])
-                pic.set_paintable(a.show_pics.get(p["img"]) or a.logo_tex)
-                self._names_pics.append((pic, p["img"]))
-            else:  # no photo anywhere: a drawn badge (initials, what they do), never a made-up face
-                pic.set_person(p["name"], p["desc"])
+            pic.set_paintable(a.show_pics.get(p["img"]))
+            self._names_pics.append((pic, p["img"]))
             row.append(frame)
             lines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
             name = Gtk.Label(label=f"<b>{GLib.markup_escape_text(p['name'])}</b>", use_markup=True, xalign=0,
@@ -12564,6 +12883,25 @@ class Window(Adw.ApplicationWindow):
             tex = self.app.show_pics.get(url)
             if tex is not None and pic.get_paintable() is not tex:
                 pic.set_paintable(tex)
+        a = self.app
+        have = [p["img"] for p in (a.namesakes_today() or []) if p["img"] and a.show_pics.get(p["img"]) is not None]
+        if have != getattr(self, "_names_rows", None) and not getattr(self, "_names_refill", 0):
+            def refill() -> bool:  # a photo arrived: its person joins the list (several at once: filled once)
+                self._names_refill = 0
+                if self.names_pop.get_visible():
+                    self._names_fill()
+                return False
+            self._names_refill = GLib.timeout_add(400, refill)
+
+    def names_ready(self) -> bool:
+        """There's something to show in the name day's box: at least one famous namesake with the photo here
+        (asked for meanwhile, so it's ready the next time)."""
+        a = self.app
+        people = a.namesakes_today() or []
+        for p in people:
+            if p["img"]:
+                a.want_name_pic(p["img"])
+        return any(p["img"] and a.show_pics.get(p["img"]) is not None for p in people)
 
     def names_refresh(self) -> None:
         if self.names_pop.get_visible():
@@ -12607,7 +12945,7 @@ class Window(Adw.ApplicationWindow):
                 rect = Gdk.Rectangle()
                 rect.x, rect.y, rect.width, rect.height = round(b.get_x()) - 12, round(b.get_y()), 1, 1
                 self.names_pop.set_pointing_to(rect)
-        self.names_scroll.get_vadjustment().set_value(0)
+        self.names_pager.start((time.localtime().tm_yday, name_day()))
         glass.fresh_if_changed()
         if not area:
             self.names_pop.set_offset(0, 0)
@@ -12615,10 +12953,8 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
         if area:
             GLib.idle_add(self._day_true, area, self.names_pop)
-        if self._names_glide is None:
-            self._names_glide = GLib.timeout_add(40, self._names_glide_step, [time.monotonic(), 1])
 
-    SONG_AUTO = (120, 20)  # the song's box by itself every 2 minutes, for 20 s
+    SONG_AUTO = (120, 24)  # the song's box by itself every 2 minutes, for 24 s: two pages of it (Pager.HOLD)
 
     def _song_auto(self) -> bool:
         if (hasattr(self, "_tour") and self.get_visible() and self._tour is None and not any(w.open for w in self.waters)
@@ -12703,58 +13039,16 @@ class Window(Adw.ApplicationWindow):
             rect = Gdk.Rectangle()
             rect.x, rect.y, rect.width, rect.height = round(at.x), round(at.y) - 1, w, 1
             self.song_pop.set_pointing_to(rect)
-        self.song_scroll.get_vadjustment().set_value(0)
+        self.song_pager.start(tuple(self._song_parts()))
         glass.fresh_if_changed()
         self.song_pop.popup()
         GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
         GLib.idle_add(self._day_true, area, self.song_pop)
-        if getattr(self, "_song_glide", None) is None:
-            self._song_glide = GLib.timeout_add(40, self._glide_step, [time.monotonic(), 1, self.song_pop,
-                                                                       self.song_scroll, "_song_glide"])
-
-    def _glide_step(self, st) -> bool:
-        """A box's text gliding down slowly to its end, a pause, back up (the song's box)."""
-        pop, scroll, attr = st[2], st[3], st[4]
-        if not pop.get_visible():
-            setattr(self, attr, None)
-            return GLib.SOURCE_REMOVE
-        adj = scroll.get_vadjustment()
-        room = adj.get_upper() - adj.get_page_size()
-        now = time.monotonic()
-        if room <= 1 or now - st[0] < self.NAMES_PAUSE:
-            return GLib.SOURCE_CONTINUE
-        v = adj.get_value() + st[1] * self.NAMES_SPEED * max(1.0, self._scale) * 0.04
-        if v >= room or v <= 0:
-            v = min(max(v, 0), room)
-            st[0], st[1] = now, -st[1]
-        adj.set_value(v)
-        return GLib.SOURCE_CONTINUE
-
-    NAMES_SPEED = 28 / 3  # px a second (at scale 1) while a box glides through what doesn't fit (3x slower: the user)
-    NAMES_PAUSE = 4.0  # s at the top and at the bottom
-
-    def _names_glide_step(self, st) -> bool:
-        """Down slowly to the end, a pause, back up, a pause, while the box is open (a turn of the wheel holds it
-        a while)."""
-        if not self.names_pop.get_visible():
-            self._names_glide = None
-            return GLib.SOURCE_REMOVE
-        adj = self.names_scroll.get_vadjustment()
-        room = adj.get_upper() - adj.get_page_size()
-        now = time.monotonic()
-        if room <= 1 or now < self._names_hold or now - st[0] < self.NAMES_PAUSE:
-            return GLib.SOURCE_CONTINUE
-        v = adj.get_value() + st[1] * self.NAMES_SPEED * max(1.0, self._scale) * 0.04
-        if v >= room or v <= 0:
-            v = min(max(v, 0), room)
-            st[0], st[1] = now, -st[1]
-        adj.set_value(v)
-        return GLib.SOURCE_CONTINUE
 
     def _names_wheel(self, _ctl, _dx, dy) -> bool:
         adj = self.names_scroll.get_vadjustment()
         adj.set_value(adj.get_value() + dy * 60)
-        self._names_hold = time.monotonic() + 8
+        self.names_pager.touched()
         return True
 
     DAY_GAP = 18  # the day's box keeps this far inside the cover's edges and above the slider
@@ -13399,6 +13693,21 @@ class Window(Adw.ApplicationWindow):
     def puddle_open(self) -> bool:
         return self.info_water.open
 
+    def _quiet_pop(self, pop) -> None:
+        """A box or menu of its own (the day's, the names', the song's, the quality list): the enhancing waits
+        while it's open, as for the panels."""
+        pop.connect("show", lambda *_: self.app.enhancer.set_quiet(True))
+        pop.connect("closed", lambda *_: GLib.idle_add(lambda: (self.quiet_sync(), False)[1]))
+
+    def quiet_sync(self) -> None:
+        """The picture enhancing waits while any menu, panel or box is open (smooth glass), and goes on once the
+        last one is closed."""
+        pops = (getattr(self, n, None) for n in ("day_pop", "names_pop", "song_pop", "quality_pop"))
+        on = any(w.open for w in getattr(self, "waters", [])) or any(p is not None and p.get_visible() for p in pops)
+        self.app.enhancer.set_quiet(on)
+        if not on:
+            self.app.enhance_small_full()
+
     def _menu_open(self) -> bool:
         """A menu the user opened (⚙, ⓘ, quality) is open: no box pops up over it."""
         return any(w.open for w in getattr(self, "waters", [])) or (
@@ -13445,8 +13754,11 @@ class Window(Adw.ApplicationWindow):
         if water is self.gear_water:  # from the top (a control taking the focus scrolled it a row down)
             GLib.idle_add(lambda: (self.menu_content.get_vadjustment().set_value(0), False)[1])
 
-    # the tabs it goes through by itself, and for how long (s)
-    TOUR = (("DNES", 10), ("ZAJÍMAVOSTI", 10), ("AKTUALITY", 10), ("ZÍTRA", 10), ("POZÍTŘÍ", 10), ("HRÁLO", 10))
+    # By itself the panel shows TOUR_TABS of its tabs, TOUR_SECS each (the user: the six in a minute were too
+    # quick to read), and the next time the next ones: DNES and ZAJÍMAVOSTI, then AKTUALITY and ZÍTRA… A tab with
+    # nothing to show yet is left out; with nothing at all the panel stays shut.
+    TOUR = ("DNES", "ZAJÍMAVOSTI", "AKTUALITY", "ZÍTRA", "POZÍTŘÍ", "HRÁLO")
+    TOUR_TABS, TOUR_SECS = 2, 15
 
     def _watch_show(self) -> bool:
         now = time.localtime()
@@ -13455,19 +13767,44 @@ class Window(Adw.ApplicationWindow):
         seen, self._show_seen = self._show_seen, key or self._show_seen
         half = (now.tm_yday, now.tm_hour, now.tm_min // 30)  # at :00 and :30
         half_seen, self._half_seen = self._half_seen, half
-        if (key and seen is not None and key != seen) or (half_seen is not None and half != half_seen):
+        if key and seen is not None and key != seen:
+            self._start_tour(first="DNES")  # a new show on air: who it is, first
+        elif half_seen is not None and half != half_seen:
             self._start_tour()
         return GLib.SOURCE_CONTINUE
 
-    def _start_tour(self) -> None:
-        """Opens the panel and shows its tabs one after another (TOUR), then closes it; not when the window's
+    def _tab_has(self, name: str) -> bool:
+        """The tab has something to show now (not just "loading…")."""
+        a = self.app
+        if name == "ZAJÍMAVOSTI":
+            if not a.about and not self.puddle_items and (item := a.next_curiosity()):
+                self.puddle_items.append(item)
+            return bool(a.about or self.puddle_items)
+        if name == "AKTUALITY":
+            return bool(a.news)
+        if name == "HRÁLO":
+            return bool(a.db.page(time.time() + 1, 1))
+        day = (time.localtime().tm_wday + ("DNES", "ZÍTRA", "POZÍTŘÍ").index(name)) % 7
+        return bool(a.schedule.get(day))
+
+    def _start_tour(self, first: str = None) -> None:
+        """Opens the panel on the tabs whose turn it is, one after another, then closes it; not when the window's
         hidden or a panel's already open, and it stops (leaving the panel open) once it's touched."""
         if not self.get_visible() or any(w.open for w in self.waters) or self._tour is not None:
             return
+        n = len(self.TOUR)
+        at = getattr(self, "_tour_next", 0)
+        turn = [self.TOUR[(at + i) % n] for i in range(n)]
+        if first:
+            turn = [first] + [t for t in turn if t != first]
+        tabs = [t for t in turn if self._tab_has(t)][:self.TOUR_TABS]
+        if not tabs:
+            return  # nothing to show yet: the next half hour
+        if not first or len(tabs) > 1:  # the next time: from the tab after the last one shown
+            self._tour_next = (self.TOUR.index(tabs[-1]) + 1) % n
         self.toggle_water(self.info_water)
-        self.app.enhancer.set_quiet(False)  # nobody's scrolling it: the enhancing goes on (paused once touched)
         self._tour = object()
-        self._tour_step(self._tour, 0)
+        self._tour_step(self._tour, tabs, 0)
 
     def _tour_page(self, token, name: str, tries: int) -> bool:
         """The tour shows each view a page further than the last tour did (back at the top past its end), not
@@ -13489,24 +13826,23 @@ class Window(Adw.ApplicationWindow):
         self._tour_pages[name] = (at + page * 0.9, at)  # (a line of overlap with the last time)
         return False
 
-    def _tour_step(self, token, i: int) -> bool:
+    def _tour_step(self, token, tabs: list, i: int) -> bool:
         if self._tour is not token:
             return False
         if not self.info_water.open or (i and self._puddle_touched != self._tour_touched):
             self._tour = None  # closed or touched meanwhile: left as it is
-            if self.info_water.open:
-                self.app.enhancer.set_quiet(True)  # someone's using it: fluid, as when opened by hand
             return False
-        if i == len(self.TOUR):
+        if i == len(tabs):
             self._tour = None
             self.info_water.hide()
             return False
-        name, secs = self.TOUR[i]
-        if i:
+        name = tabs[i]
+        if self.PUDDLE_MODES[self.puddle_mode] != name:
             self._puddle_go(self.PUDDLE_MODES.index(name))
+        if name != "DNES":  # (DNES stays at the show on air)
             GLib.timeout_add(60, self._tour_page, token, name, 20)
         self._tour_touched = self._puddle_touched
-        GLib.timeout_add_seconds(secs, self._tour_step, token, i + 1)
+        GLib.timeout_add_seconds(self.TOUR_SECS, self._tour_step, token, tabs, i + 1)
         return False
 
     def toggle_puddle(self) -> None:
@@ -13566,9 +13902,8 @@ class Window(Adw.ApplicationWindow):
 
     def _puddle_touch(self) -> None:
         self._puddle_touched = time.monotonic()
-        if self._tour is not None:  # the tour ends here: the panel is someone's now, fluid
+        if self._tour is not None:  # the tour ends here: the panel is someone's now
             self._tour = None
-            self.app.enhancer.set_quiet(True)
 
     def _puddle_next(self) -> None:
         self._puddle_go((self.puddle_mode + 1) % len(self.PUDDLE_MODES))

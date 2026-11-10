@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.32 — Plynulé sklo a čtení po stránkách
+
+- **0.32.0** (2026-11-10) Plynulost (cíl: aspoň 60 snímků za sekundu, až do 165 Hz obrazovky): padající motivy se v každém snímku skládají jen jednou a okno i sklo sdílejí tentýž obrázek (dřív každý motiv až šestkrát); motivy zrcadlené v okrajích panelů se kreslí přímo, ne přes čtyři pomocné obrázky v každém snímku (panel ⚙ z ~14 ms na ~9 ms na snímek, ⓘ z ~15 na ~10,5 ms, samotné okno z 6,7 na 4,4 ms při 4K); texty se stínem (skladba, datum a čas, jmeniny, stav) se drží jako hotové obrázky, takže je motivy za nimi nenutí rozmazávat stín v každém snímku; posouvaný obsah oken a panelů je jeden obrázek, který se jen posune (po celých bodech obrazovky, písmo zůstává ostré); vylepšování obrázků (AI) čeká po celou dobu, kdy je otevřená jakákoli nabídka, panel nebo okno (grafická karta byla při otevřeném okně vytížená z 97 %). Okna jmenin a skladby už text neposouvají plynule: ukážou stránku na 12 s, pak krátce přejedou na další (začíná celým řádkem) a při příštím otevření pokračují tam, kde skončily. Jmeniny: jen slavní nositelé s fotkou (bez fotky nikdo); samo se okno otevře, až když je co ukázat (jinak to zkusí o chvíli později), okno dne také. Panel ⓘ sám od sebe ukáže dvě záložky po 15 s (dřív všech šest po 10 s) a příště další dvě; záložka bez obsahu se vynechá. Počasí: déšť je mrak s několika malými kapkami, ne se šikmými čarami
+
 ## 0.31 — Okno o skladbě
 
 - **0.31.34** (2026-11-10) Plynulejší otevírání panelů ⓘ a ⚙: zavřený panel zůstává připravený (znovu otevřený nekreslí všechen text znovu) a sklo za ním se nepřepočítává, když se za ním nic nezměnilo (první snímek ~10 ms místo ~100 ms); každá část panelu se drží jako hotový obrázek zvlášť, takže posuvník nebo záložky nenutí překreslovat i text vedle; panel ⓘ se znovu sestaví jen při změně pořadu nebo skladby, ne každou minutu
