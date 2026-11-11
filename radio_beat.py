@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.32.1"
+APP_VERSION = "0.32.2"
 
 import collections
 import ctypes
@@ -5577,14 +5577,21 @@ void main() {
             pass
         return cls.ok
 
-    @classmethod
-    def upload(cls, tex, old: int = 0) -> int:
-        """A GdkTexture (what's behind) into a GL texture with mipmaps (the rim squeezes it): its id."""
-        gl = cls._gl
-        cls.ctx.make_current()
+    @staticmethod
+    def download(tex) -> tuple:
+        """A GdkTexture's pixels taken off the graphics card: the first half of upload(), apart for a box that
+        opens a step a frame (GlassCard.staged)."""
         d = Gdk.TextureDownloader.new(tex)
         d.set_format(Gdk.MemoryFormat.R8G8B8A8_PREMULTIPLIED)
-        data, stride = d.download_bytes()
+        return d.download_bytes()
+
+    @classmethod
+    def upload(cls, tex, old: int = 0, pixels: tuple = None) -> int:
+        """A GdkTexture (what's behind) into a GL texture with mipmaps (the rim squeezes it): its id. `pixels`:
+        its download(), done before."""
+        gl = cls._gl
+        data, stride = pixels or cls.download(tex)
+        cls.ctx.make_current()
         w, h = tex.get_width(), tex.get_height()
         buf = data.get_data()
         tid = ctypes.c_uint(old)
@@ -6766,8 +6773,14 @@ class GlassCard(Gtk.Box):
             most = lens * (self.reach if not self.band else 0.9)
             rx, ry = 1 / (1 + 2 * most / w), 1 / (1 + 2 * most / h)
             self._edge_reach, self._edge_reach_x = most, w / 2 * (1 / rx - 1)
+            # a box opening (staged): one of the costly steps a frame, None till they're all done
+            st = self._staging
             self._flat_mirror = self.edge_mirror
             try:
+                if st is not None and self._flat_cache[0] != self._flat_key(w, h, rx, ry):
+                    if st["used"]:
+                        return None
+                    st["used"] = True
                 flat = self._flat(w, h, rx, ry)
             finally:
                 self._flat_mirror = False
@@ -6776,13 +6789,26 @@ class GlassCard(Gtk.Box):
             ftex, box = flat
             g = self._gpu
             if g.get("flat") is not ftex:
+                pixels = None
+                if st is not None:
+                    if st["used"]:
+                        return None
+                    st["used"] = True
+                    if st.get("pixels_of") is not ftex:  # off the graphics card in one frame, back in the next
+                        st["pixels_of"], st["pixels"] = ftex, GPU.download(ftex)
+                        return None
+                    pixels = st.pop("pixels")
+                    st["pixels_of"] = None
                 t0 = time.perf_counter()
                 old = g.get("src", 0)
                 if old and g.get("size") != (ftex.get_width(), ftex.get_height()):
                     GPU.forget(old)
                     old = 0
-                g.update(src=GPU.upload(ftex, old), flat=ftex, size=(ftex.get_width(), ftex.get_height()), out=None)
+                g.update(src=GPU.upload(ftex, old, pixels), flat=ftex, size=(ftex.get_width(), ftex.get_height()),
+                         out=None)
                 took = time.perf_counter() - t0  # (the live window's pictures: how often they can be afforded)
+                if st is not None:
+                    return None  # (bent, and the box drawn, in the next frame)
                 self._live_cost = took if not getattr(self, "_live_cost", 0) else 0.7 * self._live_cost + 0.3 * took
             key = (w, h, k, self.radius, round(self.mag, 4), rx, ry, self.curve, lens, box.get_x(), box.get_y())
             if g.get("key") != key or g.get("out") is None:
@@ -6798,6 +6824,8 @@ class GlassCard(Gtk.Box):
             GPU.failures.append(GPU.failed_at)
             print(f"Rádio Beat: GPU sklo vypnuto na {GPU.RETRY_AFTER} s:", e, file=sys.stderr)
             return None
+
+    _staging = None  # a box opening a step a frame: {"used": a costly step done in this frame, "frames": so far}
 
     LIVE_FPS = 15  # the window seen through it, moving (the falling motifs): pictured anew this often at most
 
@@ -7238,6 +7266,7 @@ class MenuGlass(GlassCard):
         self._tex_version = 0  # the window's content changed this many times (a new picture of it then)
         self._tex_key = None
         self.connect("unmap", lambda *_: setattr(self, "_tex", None))  # (closed: its picture let go)
+        self.connect("unmap", lambda *_: setattr(self, "_staging", None))
         # the falling motifs seen through it, moving: redrawn with them while it's open
         self.connect("map", lambda *_: getattr(win, "snow", None) and win.snow.viewers.add(self))
         self.connect("unmap", lambda *_: getattr(win, "snow", None) and win.snow.viewers.discard(self))
@@ -7434,9 +7463,42 @@ class MenuGlass(GlassCard):
         ok, p = self._where(content) if content else (False, None)
         key = (self._tex_version, content.get_width() if content else 0, content.get_height() if content else 0,
                (round(p.x), round(p.y), self.get_width(), self.get_height()) if ok else None)
+        st = self._staging
+        if st is not None:
+            st["used"] = False
+            st["frames"] += 1
         if self._tex is None or self._tex_key != key:  # the window as it is now (only when it changed)
             self._tex, self._tex_key = self._window_texture(), key
+            if st is not None:
+                st["used"] = True
+        if st is not None:
+            if not self._staged_ready(st):  # nothing shown yet: the next step in the next frame
+                # (a speck too faint to see: a box with nothing at all drawn isn't put on the screen, and gets
+                # no frames of its own to take the next steps in)
+                snap.append_color(_rgba(0, 0, 0, 0.01), Graphene.Rect().init(0, 0, 1, 1))
+                self.add_tick_callback(lambda *_: (self.queue_draw(), False)[1])
+                return
+            self._staging = None
         GlassCard.do_snapshot(self, snap)
+
+    STAGE_FRAMES = 12  # (a box shown at the latest after this many frames, ready or not)
+
+    def staged(self) -> None:
+        """A box about to open: what its glass shows made ready a step a frame (the window behind pictured, that
+        laid out flat, taken off the graphics card, sent to the lens' one, bent), the box seen only once it all is:
+        four or five frames later. All in its first frame, as before, the falling motifs stood still for 80-150
+        ms each time a box came up."""
+        if not self.get_mapped():
+            self._staging = {"used": False, "frames": 0}
+
+    def _staged_ready(self, st: dict) -> bool:
+        w, h = self.get_width(), self.get_height()
+        if (w <= 0 or h <= 0 or st["frames"] > self.STAGE_FRAMES or not EFFECTS["gpu"] or not GPU.start()
+                or self._morph_t() is not None):
+            return True  # (no GPU lens, or the cover changing behind it: as it always opened)
+        if st["used"]:
+            return False
+        return self._gpu_lens_one(w, h) is not None or GPU.ok is False
 
 
 # The clock's lines in the month's colors (autumn ones in October and November, frost in winter, blossom in
@@ -12733,7 +12795,8 @@ class Window(Adw.ApplicationWindow):
         self._quiet_pop(self.quality_pop)
         self.quality_pop.connect("show", lambda *_: (OPEN_PROFILE.start("menu kvality", self), self._close_menus(
             keep=self.quality_pop)))
-        self.quality_tab.connect("clicked", lambda *_: self.quality_pop.popup())
+        self.quality_tab.connect("clicked", lambda *_: (self.quality_pop.get_child().staged(),
+                                                        self.quality_pop.popup()))
         self.fill_quality()
         return pill
 
@@ -12882,6 +12945,8 @@ class Window(Adw.ApplicationWindow):
             return
         if not day_summary():  # nothing known about the day: no empty box
             return
+        if not self._settled(self._day_auto):
+            return
         self._day_show(self.clock)
         GLib.timeout_add_seconds(self.DAY_AUTO[1], lambda: (self._day_on or self.day_pop.popdown(), False)[1])
 
@@ -12904,6 +12969,8 @@ class Window(Adw.ApplicationWindow):
         if not self.names_ready():  # nothing to show yet (photos on their way): a little later, not an empty box
             if tries > 0:
                 GLib.timeout_add_seconds(30, lambda: (self._names_auto(tries - 1), False)[1])
+            return
+        if not self._settled(lambda: self._names_auto(tries)):
             return
         self.names_show()
         shown = self._names_shown = object()
@@ -13037,6 +13104,7 @@ class Window(Adw.ApplicationWindow):
                 rect.x, rect.y, rect.width, rect.height = round(b.get_x()) - 12, round(b.get_y()), 1, 1
                 self.names_pop.set_pointing_to(rect)
         self.names_pager.start((time.localtime().tm_yday, name_day()))
+        glass.staged()
         glass.fresh_if_changed()
         if not area:
             self.names_pop.set_offset(0, 0)
@@ -13047,10 +13115,19 @@ class Window(Adw.ApplicationWindow):
 
     SONG_AUTO = (120, 24)  # the song's box by itself every 2 minutes, for 24 s: two pages of it (Pager.HOLD)
 
+    def _settled(self, again) -> bool:
+        """A box that comes up by itself waits till the cover has finished changing: every glass makes its lens
+        anew for the old picture and the new one then (nine pictures sent to the graphics card, 290 MB), and in
+        the middle of a box's opening that was a third of a second of stutter. Not settled: `again` in 5 s."""
+        if self.song_pop.get_child()._morph_t() is None:
+            return True
+        GLib.timeout_add_seconds(5, lambda: (again(), False)[1])
+        return False
+
     def _song_auto(self) -> bool:
         if (hasattr(self, "_tour") and self.get_visible() and self._tour is None and not any(w.open for w in self.waters)
                 and not self._day_on and not self.quality_pop.get_visible() and not self.names_pop.get_visible()
-                and not self.song_pop.get_visible() and self._song_parts()):
+                and not self.song_pop.get_visible() and self._song_parts() and self._settled(self._song_auto)):
             self.song_show()
             shown = self._song_shown = object()
             GLib.timeout_add_seconds(self.SONG_AUTO[1], lambda: (self._song_shown is shown and self.song_pop.popdown(),
@@ -13131,6 +13208,7 @@ class Window(Adw.ApplicationWindow):
             rect.x, rect.y, rect.width, rect.height = round(at.x), round(at.y) - 1, w, 1
             self.song_pop.set_pointing_to(rect)
         self.song_pager.start(tuple(self._song_parts()))
+        glass.staged()
         glass.fresh_if_changed()
         self.song_pop.popup()
         GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
@@ -13171,9 +13249,12 @@ class Window(Adw.ApplicationWindow):
         tw = w - box.get_margin_start() - box.get_margin_end() - 2 * r - 4
         th = h - box.get_margin_top() - box.get_margin_bottom() - 2 * r
         key = (tw, th, self._scale, tuple(lab.get_label() for lab in self._day_labels))
-        if getattr(self, "_day_fit_key", None) == key:  # (the same text in the same box: the size found before;
-            self._day_scale(self._day_text_f)          # twelve layouts of it cost a quarter of a second)
+        known = self.__dict__.setdefault("_day_fits", {})
+        if key in known:  # (the same text in a box of a size seen before: the size found then; eight layouts
+            self._day_text_f = known[key]  # of it cost a fifth of a second. Several sizes remembered: with only
+            self._day_scale(self._day_text_f)  # the last one, a box 9 s after another worked it out again)
             return
+        print(f"Rádio Beat: velikost textu dne se počítá ({tw}x{th}, {len(known)} známých)", file=sys.stderr)
         lo, hi = 0.3, self.DAY_TEXT_MOST * max(1.0, self._scale)
         for _ in range(8):  # (a binary search over the scale: to under a hundredth)
             f = (lo + hi) / 2
@@ -13185,7 +13266,9 @@ class Window(Adw.ApplicationWindow):
                 hi = f
         self._day_scale(lo)
         self._day_text_f = lo  # (the name day's box uses the same size)
-        self._day_fit_key = key
+        if len(known) > 12:
+            known.clear()
+        known[key] = lo
 
     def _day_scale(self, f) -> None:
         """All the day's labels at `f` times their size (None: as they are); the gaps before headlines too."""
@@ -13271,6 +13354,7 @@ class Window(Adw.ApplicationWindow):
                 r = Gdk.Rectangle()
                 r.x, r.y, r.width, r.height = round(b.get_x()) - 12, round(b.get_y()), 1, max(1, round(b.get_height()))
                 self.day_pop.set_pointing_to(r)
+        self.day_pop.get_child().staged()
         self.day_pop.get_child().fresh_if_changed()  # never an earlier picture behind it
         if not area:
             self.day_pop.set_offset(0, 0)
