@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.32.0"
+APP_VERSION = "0.32.1"
 
 import collections
 import ctypes
@@ -5612,7 +5612,9 @@ void main() {
 
     @classmethod
     def lens(cls, src: int, pw: int, ph: int, u: dict):
-        """The lens (uniforms `u`) drawn from texture `src` into a pw x ph texture, as a GdkTexture."""
+        """The lens (uniforms `u`) drawn from texture `src` into a pw x ph texture, as a GdkTexture. (Handing it
+        to GTK's Vulkan renderer as the memory it lies in, a dmabuf, was tried: no copy when it's made, but every
+        frame drawn from it then cost twice the processor's time.)"""
         gl = cls._gl
         t = time.perf_counter()
         cls.ctx.make_current()
@@ -5761,13 +5763,16 @@ class Keep:
 
     TRANSLATE = getattr(Gsk.TransformCategory, "2D_TRANSLATE")
     SPLIT = 4  # a group of up to this many is looked into (the list and its scrollbar), a bigger one is a part
-    AGAIN = 3.0  # s in which the part at the same place is pictured anew twice at most
+    AGAIN = 10.0  # s a picture should last: one replaced sooner counts against its place (see _emit)
+    eager = False  # a panel being made ready before it opens: every part pictured now, in this one look
+    STILL_S = 0.25  # s a part must have been the same before it's pictured (looks come every frame while the
+    # motifs fall: by looks alone a button's row was pictured after each step of its press, 4-100 ms a time)
 
     def __init__(self, still: int = 2):
         self.still = still  # looks a part must stay the same for before it's kept
         self.parts = []  # [(node, looks it's been the same, picture (texture, rect, scale, within) or False, None)]
         self.waiting = False  # a part not kept yet (to be looked at again)
-        self._made = {}  # where a part lies -> when one there was last pictured
+        self._made = {}  # where a part lies -> (when one there was last pictured, times in a row it didn't last)
 
     def draw(self, snap, node, k: float, native) -> None:
         self._old, self.parts = self.parts, []
@@ -5823,23 +5828,31 @@ class Keep:
         was = old[i] if i < len(old) and old[i][0] == n else next((o for o in old if o[0] == n), None)
         still = was[1] + 1 if was else 0
         pic = was[2] if was else None
+        since = was[3] if was else time.monotonic()
         if pic and (pic[2] != k or (pic[3] and (not vis or not _box_in(vis, pic[3], n)))):
             pic = None  # (another screen scale, or scrolled past what was kept of a big one)
         if pic is None:
             spot = None
-            if self._bake and still >= self.still:
-                # a part that keeps changing (the buttons' row while a panel opens over it: pictured anew seven
-                # times a second, each time a few ms of a frame) is pictured twice in AGAIN seconds at most (a row's
-                # note changing once as its panel opens: at once), drawn live between
+            if Keep.eager:
+                spot = 0
+            elif self._bake and still >= self.still:
+                # Not while a menu or panel opens (the button pressed changes a few times then, its row pictured
+                # each time in the middle of the opening; what the panel shows was pictured before it began). And
+                # a part that keeps changing (the top row: something in it pulses every second or two, and it was
+                # pictured anew twice every 3 s for good, 3-80 ms a time) must stay still four times longer each
+                # time its picture didn't last AGAIN seconds: soon it's simply drawn live.
                 b = n.get_bounds()
                 spot = (type(n), round(b.get_x()), round(b.get_y()), round(b.get_width()), round(b.get_height()))
-                if time.monotonic() - self._made.get(spot, (-1e9, 0))[0] < self.AGAIN:
-                    spot = None  # (twice already within that time)
+                last, strikes = self._made.get(spot, (-1e9, 0))
+                now = time.monotonic()
+                if now < max(GlassCard.live_hold, since + min(30.0, self.STILL_S * 4 ** strikes)):
+                    spot = None
             if spot is not None:
-                self._bake = False
-                if len(self._made) > 300:
-                    self._made.clear()
-                self._made[spot] = (self._made.get(spot, (0, -1e9))[1], time.monotonic())  # (the one before, this)
+                if spot:
+                    self._bake = False
+                    if len(self._made) > 300:
+                        self._made.clear()
+                    self._made[spot] = (now, min(4, strikes + 1) if now - last < self.AGAIN else 0)
                 made = _node_picture(n, k, native)
                 within = None
                 if made is None and vis:  # too big: what shows of it, and a screen's worth around
@@ -5849,7 +5862,7 @@ class Keep:
                 pic = (made[0], made[1], k, within) if made else False
             else:
                 self.waiting = True
-        self.parts.append((n, still, pic))  # (held: a node let go of could give its address to a new one)
+        self.parts.append((n, still, pic, since))  # (held: a node let go of could give its address to a new one)
         if pic:
             snap.append_texture(pic[0], pic[1])
         else:
@@ -5933,7 +5946,7 @@ class StillBox(Gtk.Box):
                 self._still_wait = 0
                 self.queue_draw()
                 return False
-            self._still_wait = GLib.timeout_add(BAKE_AFTER_MS, again)
+            self._still_wait = GLib.timeout_add(int(Keep.STILL_S * 1000) + 20, again)
 
 
 class GlassCard(Gtk.Box):
@@ -6974,28 +6987,38 @@ class GlassCard(Gtk.Box):
     FLAT_MAX_PX = 8_000_000  # what's behind the glass at most this big (the screen's 4K): a big panel at the screen's
     # scale times its magnification was 24 Mpx, 95 MB taken off the graphics card and put back each time
 
-    def _flat(self, w: float, h: float, rx: float, ry: float):
-        """(texture, where) of what's behind the glass, as far out as its edge squeezes in (rx, ry), at the
-        screen's scale times the middle's magnification: as sharp as the layers drawn one by one."""
+    def _flat_key(self, w: float, h: float, rx: float, ry: float) -> tuple:
         lk = self._lens_key(w, h)
-        key = (lk[:3] + lk[4:], rx, ry, bool(self.pulse_tick), self._flat_mirror,
-               getattr(self, "_tex_version", None))  # not the magnification: it breathes
-        if self._flat_cache[0] == key:
-            return self._flat_cache[1]
-        native = self.get_native()
-        if not native:
-            return None
+        return (lk[:3] + lk[4:], rx, ry, bool(self.pulse_tick), self._flat_mirror,
+                getattr(self, "_tex_version", None))  # not the magnification: it breathes
+
+    def _flat_place(self, w: float, h: float, rx: float, ry: float, native) -> tuple:
+        """(width, height, scale, where it lies) of the picture of what's behind."""
         surf = native.get_surface()
         most = self._base_mag + self.PULSE if self.pulse_tick else self.mag
         k = (surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()) * max(1.0, most)
         ew, eh = w / min(1.0, rx) + 4, h / min(1.0, ry) + 4
         k = min(k, math.sqrt(self.FLAT_MAX_PX / (ew * eh)))
-        box = Graphene.Rect().init((w - ew) / 2, (h - eh) / 2, ew, eh)
+        return ew, eh, k, Graphene.Rect().init((w - ew) / 2, (h - eh) / 2, ew, eh)
+
+    def _flat_node(self, w: float, h: float, k: float, box):
         s = Gtk.Snapshot()
         s.scale(k, k)
         s.translate(Graphene.Point().init(-box.get_x(), -box.get_y()))
         self._behind(s, w, h, 1.0, 1.0)
-        node = s.to_node()
+        return s.to_node()
+
+    def _flat(self, w: float, h: float, rx: float, ry: float):
+        """(texture, where) of what's behind the glass, as far out as its edge squeezes in (rx, ry), at the
+        screen's scale times the middle's magnification: as sharp as the layers drawn one by one."""
+        key = self._flat_key(w, h, rx, ry)
+        if self._flat_cache[0] == key:
+            return self._flat_cache[1]
+        native = self.get_native()
+        if not native:
+            return None
+        ew, eh, k, box = self._flat_place(w, h, rx, ry, native)
+        node = self._flat_node(w, h, k, box)
         if node is None:
             return None
         # kept with its alpha: opaque, GTK skips what each ring seems to cover, and on the DeskMini's 780M the
@@ -10994,7 +11017,10 @@ class SquarePic(Gtk.Widget):
         rr = Gsk.RoundedRect()
         rr.init_from_rect(Graphene.Rect().init(0, 0, px, px), self.radius)
         snap.push_rounded_clip(rr)
-        snap.append_texture(self.tex, Graphene.Rect().init((px - w * k) / 2, (px - h * k) / 2, w * k, h * k))
+        # a tall picture (a standing figure, a painted full-length portrait) keeps its top, where the face is, and
+        # loses the legs: the taller, the nearer the top (a third taller than wide and on: right from the top)
+        up = max(0.0, 0.5 - (h / max(1, w) - 1.0) * 1.5)
+        snap.append_texture(self.tex, Graphene.Rect().init((px - w * k) / 2, (px - h * k) * up, w * k, h * k))
         snap.pop()
 
 
@@ -11599,12 +11625,37 @@ class Puddle(GlassCard):
         pb.close()
         return pb.to_path()
 
+    ready = None  # Water.show(): called once all it shows has been made (its opening starts then)
+
+    def _prepare(self) -> None:
+        """Everything the open panel shows made now, shown nowhere: the picture of what's behind sent to the
+        graphics card and bent, the shading, each part inside pictured. All that used to happen in the first frames
+        of the flowing open (50-200 ms of them: the flow began, froze and jumped on); now the panel starts a moment
+        later and flows without a break."""
+        keep, self.reveal = self.reveal, 1.0
+        Keep.eager = True
+        try:
+            s = Gtk.Snapshot()
+            GlassCard.do_snapshot(self, s)
+            s.to_node()
+        except Exception as e:  # (it opens anyway, as before)
+            print(f"Rádio Beat: příprava panelu: {e}", file=sys.stderr)
+        finally:
+            Keep.eager = False
+            self.reveal = keep
+
     def do_snapshot(self, snap) -> None:
         r = self.reveal
+        if self.win is not None and (r > 0 or self.ready) and (
+                self._layers is None or self._layers[0] != self._tex_version):
+            self._layers = (self._tex_version, self._layers_texture())
+        if self.ready:
+            ready, self.ready = self.ready, None
+            if self.get_width() > 0 and self.get_height() > 0:
+                self._prepare()
+            GLib.idle_add(lambda: (ready(), False)[1])
         if r <= 0:
             return
-        if self.win is not None and (self._layers is None or self._layers[0] != self._tex_version):
-            self._layers = (self._tex_version, self._layers_texture())
         w, h = self.get_width(), self.get_height()
         if self.neck:
             snap.push_clip(Graphene.Rect().init(0, 0, w, max(1.0, h * r)))
@@ -11624,7 +11675,10 @@ class Puddle(GlassCard):
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.55), 0, rim * 0.3, 0, rim * 0.9)
             snap.append_outset_shadow(rr, _rgba(0, 0, 0, 0.35), 0, 2, 0, 4)
         if r < 1:  # (settled the glass rounds itself)
-            self._flow_rr, self._flow_clear = rr, max(1.0, vis - bottom)
+            # (the straight part's end on a whole screen pixel: the falling motifs are cut there, and cut between
+            # pixels each turned one crossing the cut is drawn apart first; that was most of a flowing frame)
+            k = _screen_scale(self)[1]
+            self._flow_rr, self._flow_clear = rr, max(1.0, math.floor((vis - bottom) * k) / k)
         try:
             GlassCard.do_snapshot(self, snap)
         finally:
@@ -11955,23 +12009,44 @@ class Water:
     def show(self) -> None:
         self.open = True
         self.win.app.enhancer.set_quiet(True)
+        GlassCard.hold_live(1.0)  # (made ready, then 750 ms of flowing: nothing else pictured anew meanwhile)
         self.tile.remove_css_class("pumping")
         self.place()
         for g in (self.neck, self.body):
             g.set_visible(True)
             g.set_can_target(True)
             g.set_can_focus(True)
-        self._flow(1.0, 750, Adw.Easing.EASE_OUT_BACK)
+        if self.v > 0 or self.anim:  # (still flowing shut: straight back open)
+            self._flow(1.0, 750, Adw.Easing.EASE_OUT_BACK)
+            return
+        # made ready first (in its next drawing, once it has its size), then it flows
+        token = self._showing = object()
+
+        def go() -> None:
+            if self._showing is token:
+                self._showing, self.body.ready = None, None
+                if self.open:
+                    self._flow(1.0, 750, Adw.Easing.EASE_OUT_BACK)
+        self.body.ready = go
+        self.body.queue_draw()
+        GLib.timeout_add(400, lambda: (go(), False)[1])  # (not drawn, the window out of sight: it opens anyway)
+
+    _showing = None
 
     def hide(self) -> None:
         if self.open:
             self.open = False
+            self._showing, self.body.ready = None, None
             self._flow(0.0, 420, Adw.Easing.EASE_IN_CUBIC)
 
     def _flow(self, to: float, ms: int, easing) -> None:
-        """The water flowing down (neck first, then the body) or drawn back up."""
+        """The water flowing down (neck first, then the body) or drawn back up. Moved by the screen's frames (60
+        or 165 a second, whatever it shows), and a frame that came late moves it no further than a frame and a
+        half would: by the clock, each late frame was a jump ahead in the flow."""
         if self.anim:
-            self.anim.pause()
+            self.body.remove_tick_callback(self.anim)
+            self.anim = None
+            anim_hold(False)
 
         def set_v(v):
             self.v = v
@@ -11980,8 +12055,25 @@ class Water:
             self.neck.queue_draw()
             self.body.queue_draw()
 
-        anim = self.anim = Adw.TimedAnimation.new(self.body, self.v, to, ms, Adw.CallbackAnimationTarget.new(set_v))
-        anim.set_easing(easing)
+        start, state = self.v, {"t": 0.0, "last": None}
+        gtk = Gtk.Settings.get_default()
+        if start == to or ms <= 0 or (gtk is not None and not gtk.props.gtk_enable_animations):
+            state["t"] = 1.0
+
+        def step(_w, clock) -> bool:
+            now = clock.get_frame_time() / 1000  # ms
+            every = (clock.get_refresh_info(0)[0] or 16667) / 1000
+            if state["last"] is not None:
+                state["t"] += min(now - state["last"], 1.5 * every) / ms
+            state["last"] = now
+            t = min(1.0, state["t"])
+            set_v(start + (to - start) * Adw.Easing.ease(easing, t))
+            if t < 1.0:
+                return GLib.SOURCE_CONTINUE
+            self.anim = None
+            set_v(to)
+            done()
+            return GLib.SOURCE_REMOVE
         anim_hold(True)
 
         def done(*_):
@@ -11996,8 +12088,7 @@ class Water:
                     g.set_can_target(False)
                     g.set_can_focus(False)
                 self.win.quiet_sync()  # all closed: the full enhancing goes on
-        anim.connect("done", done)
-        anim.play()
+        self.anim = self.body.add_tick_callback(step)
 
 
 def _rgba(r: int, g: int, b: int, a: float) -> Gdk.RGBA:
