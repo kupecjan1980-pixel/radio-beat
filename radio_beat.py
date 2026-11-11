@@ -16,10 +16,11 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.32.3"
+APP_VERSION = "0.33.0"
 
 import collections
 import ctypes
+import datetime
 import glob
 import html
 import itertools
@@ -7487,6 +7488,20 @@ class MenuGlass(GlassCard):
                 snap.append_color(_rgba(0, 0, 0, 0.01), Graphene.Rect().init(0, 0, 1, 1))
                 self.add_tick_callback(lambda *_: (self.queue_draw(), False)[1])
                 return
+            if not st.get("kids"):
+                # One more step, a frame of its own: what's written in the box pictured now (Keep), before it's
+                # seen. Left to its first frames on the screen, a box full of text (the Moon and Sun's twenty
+                # lines, each letter with its three blurred shadows) was drawn anew every frame for the quarter
+                # second and more before Keep pictured it: 20 ms a frame, every other frame late.
+                st["kids"] = True
+                Keep.eager = True
+                try:
+                    self._kids(Gtk.Snapshot(), self.get_width(), self.get_height())
+                finally:
+                    Keep.eager = False
+                snap.append_color(_rgba(0, 0, 0, 0.01), Graphene.Rect().init(0, 0, 1, 1))
+                self.add_tick_callback(lambda *_: (self.queue_draw(), False)[1])
+                return
             self._staging = None
         GlassCard.do_snapshot(self, snap)
 
@@ -10808,6 +10823,568 @@ def moon_next(lat: float, lon: float, t: float = None) -> tuple:
     return hi, m
 
 
+# ---- the sky: the Sun and the Moon worked out here (Meeus, Astronomical Algorithms; no network) ----
+_ML = (  # the Moon's longitude and distance: (D, M, M', F, 1e-6 deg, 1e-3 km), the main periodic terms
+    (0, 0, 1, 0, 6288774, -20905355), (2, 0, -1, 0, 1274027, -3699111), (2, 0, 0, 0, 658314, -2955968),
+    (0, 0, 2, 0, 213618, -569925), (0, 1, 0, 0, -185116, 48888), (0, 0, 0, 2, -114332, -3149),
+    (2, 0, -2, 0, 58793, 246158), (2, -1, -1, 0, 57066, -152138), (2, 0, 1, 0, 53322, -170733),
+    (2, -1, 0, 0, 45758, -204586), (0, 1, -1, 0, -40923, -129620), (1, 0, 0, 0, -34720, 108743),
+    (0, 1, 1, 0, -30383, 104755), (2, 0, 0, -2, 15327, 10321), (0, 0, 1, 2, -12528, 0),
+    (0, 0, 1, -2, 10980, 79661), (4, 0, -1, 0, 10675, -34782), (0, 0, 3, 0, 10034, -23210),
+    (4, 0, -2, 0, 8548, -21636), (2, 1, -1, 0, -7888, 24208), (2, 1, 0, 0, -6766, 30824),
+    (1, 0, -1, 0, -5163, -8379), (1, 1, 0, 0, 4987, -16675), (2, -1, 1, 0, 4036, -12831),
+    (2, 0, 2, 0, 3994, -10445), (4, 0, 0, 0, 3861, -11650), (2, 0, -3, 0, 3665, 14403),
+    (0, 1, -2, 0, -2689, -7003), (2, 0, -1, 2, -2602, 0), (2, -1, -2, 0, 2390, 10056),
+    (1, 0, 1, 0, -2348, 6322), (2, -2, 0, 0, 2236, -9884))
+_MB = (  # its latitude: (D, M, M', F, 1e-6 deg)
+    (0, 0, 0, 1, 5128122), (0, 0, 1, 1, 280602), (0, 0, 1, -1, 277693), (2, 0, 0, -1, 173237),
+    (2, 0, -1, 1, 55413), (2, 0, -1, -1, 46271), (2, 0, 0, 1, 32573), (0, 0, 2, 1, 17198),
+    (2, 0, 1, -1, 9266), (0, 0, 2, -1, 8822), (2, -1, 0, -1, 8216), (2, 0, -2, -1, 4324),
+    (2, 0, 1, 1, 4200), (2, 1, 0, -1, -3359), (2, -1, -1, 1, 2463), (2, -1, 0, 1, 2211),
+    (2, -1, -1, -1, 2065), (0, 1, -1, -1, -1870), (4, 0, -1, -1, 1828), (0, 1, 0, 1, -1794),
+    (0, 0, 0, 3, -1749), (0, 1, -1, 1, -1565), (1, 0, 0, 1, -1491), (0, 1, 1, 1, -1475),
+    (0, 1, 1, -1, -1410), (0, 1, 0, -1, -1344), (1, 0, 0, -1, -1335), (0, 0, 3, 1, 1107),
+    (4, 0, 0, -1, 1021), (4, 0, -1, 1, 833))
+
+
+def _sky_T(t: float) -> float:
+    """Julian centuries (of Terrestrial Time) since J2000.0 at Unix time t (TT - UT: 69 s these years)."""
+    return (t / 86400.0 + 2440587.5 + 69.2 / 86400.0 - 2451545.0) / 36525.0
+
+
+def sun_pos(t: float) -> tuple:
+    """The Sun at Unix time t: (apparent ecliptic longitude °, distance AU, obliquity of the ecliptic °)."""
+    T = _sky_T(t)
+    rad = math.radians
+    L0 = 280.46646 + 36000.76983 * T + 0.0003032 * T * T
+    M = rad(357.52911 + 35999.05029 * T - 0.0001537 * T * T)
+    e = 0.016708634 - 0.000042037 * T
+    C = ((1.914602 - 0.004817 * T - 0.000014 * T * T) * math.sin(M) + (0.019993 - 0.000101 * T) * math.sin(2 * M)
+         + 0.000289 * math.sin(3 * M))
+    R = 1.000001018 * (1 - e * e) / (1 + e * math.cos(M + rad(C)))
+    om = rad(125.04 - 1934.136 * T)
+    lon = (L0 + C - 0.00569 - 0.00478 * math.sin(om)) % 360
+    return lon, R, 23.439291 - 0.0130042 * T + 0.00256 * math.cos(om)
+
+
+def moon_pos(t: float) -> tuple:
+    """The Moon at Unix time t, from the Earth's centre: (apparent ecliptic longitude °, latitude °, distance
+    km). Good to a few thousandths of a degree (its disc is half a degree)."""
+    T = _sky_T(t)
+    rad = math.radians
+    Lp = 218.3164477 + 481267.88123421 * T - 0.0015786 * T * T
+    D = rad(297.8501921 + 445267.1114034 * T - 0.0018819 * T * T)
+    M = rad(357.5291092 + 35999.0502909 * T - 0.0001536 * T * T)
+    Mp = rad(134.9633964 + 477198.8675055 * T + 0.0087414 * T * T)
+    F = rad(93.2720950 + 483202.0175233 * T - 0.0036539 * T * T)
+    E = 1 - 0.002516 * T - 0.0000074 * T * T
+    A1, A2, A3 = rad(119.75 + 131.849 * T), rad(53.09 + 479264.290 * T), rad(313.45 + 481266.484 * T)
+    sl = sr = 0.0
+    for d, m, mp, f, cl, cr in _ML:
+        arg = d * D + m * M + mp * Mp + f * F
+        k = E ** abs(m)
+        sl += cl * k * math.sin(arg)
+        sr += cr * k * math.cos(arg)
+    sb = 0.0
+    for d, m, mp, f, cb in _MB:
+        sb += cb * E ** abs(m) * math.sin(d * D + m * M + mp * Mp + f * F)
+    lpr = rad(Lp)
+    sl += 3958 * math.sin(A1) + 1962 * math.sin(lpr - F) + 318 * math.sin(A2)
+    sb += (-2235 * math.sin(lpr) + 382 * math.sin(A3) + 175 * math.sin(A1 - F) + 175 * math.sin(A1 + F)
+           + 127 * math.sin(lpr - Mp) - 115 * math.sin(lpr + Mp))
+    om = rad(125.04 - 1934.136 * T)
+    nut = -0.004778 * math.sin(om) - 0.000367 * math.sin(2 * rad(280.4665 + 36000.7698 * T))  # (nutation)
+    return (Lp + sl / 1e6 + nut) % 360, sb / 1e6, 385000.56 + sr / 1000.0
+
+
+def _sky_equ(lon: float, lat: float, eps: float) -> tuple:
+    """Right ascension and declination (radians) of ecliptic longitude and latitude (°)."""
+    lo, la, e = math.radians(lon), math.radians(lat), math.radians(eps)
+    ra = math.atan2(math.sin(lo) * math.cos(e) - math.tan(la) * math.sin(e), math.cos(lo))
+    return ra, math.asin(math.sin(la) * math.cos(e) + math.cos(la) * math.sin(e) * math.sin(lo))
+
+
+def _sky_lst(t: float, lon_e: float) -> float:
+    """Local sidereal time (radians) at Unix time t, east longitude lon_e (°)."""
+    d = t / 86400.0 + 2440587.5 - 2451545.0
+    return math.radians((280.46061837 + 360.98564736629 * d + lon_e) % 360)
+
+
+def _sky_seen(t: float, lat: float, lon: float, moon: bool) -> tuple:
+    """The Sun or the Moon as seen from a place on the Earth's surface (the Moon is near: half a degree to a
+    degree off from where the Earth's centre sees it): (right ascension, declination, height above the horizon,
+    its disc's radius; all radians) and for the Moon its parallax."""
+    ls, R, eps = sun_pos(t)
+    if moon:
+        lm, bm, dist = moon_pos(t)
+        ra, dec = _sky_equ(lm, bm, eps)
+        par = math.asin(6378.14 / dist)
+    else:
+        ra, dec = _sky_equ(ls, 0.0, eps)
+        par = math.radians(8.794 / 3600) / R
+    phi = math.radians(lat)
+    u = math.atan(0.99664719 * math.tan(phi))
+    rs, rc = 0.99664719 * math.sin(u), math.cos(u)  # (the place on the flattened Earth)
+    H = _sky_lst(t, lon) - ra
+    dra = math.atan2(-rc * math.sin(par) * math.sin(H), math.cos(dec) - rc * math.sin(par) * math.cos(H))
+    dec2 = math.atan2((math.sin(dec) - rs * math.sin(par)) * math.cos(dra),
+                      math.cos(dec) - rc * math.sin(par) * math.cos(H))
+    ra2, H2 = ra + dra, H - dra
+    alt = math.asin(math.sin(phi) * math.sin(dec2) + math.cos(phi) * math.cos(dec2) * math.cos(H2))
+    if moon:
+        semi = math.asin(0.272481 * math.sin(par)) * (1 + math.sin(alt) * math.sin(par))
+    else:
+        semi = math.radians(959.63 / 3600) / R
+    return ra2, dec2, alt, semi, par
+
+
+def _sky_sep(a: tuple, b: tuple) -> float:
+    """The angle between two points of the sky (right ascension, declination; radians)."""
+    return math.acos(max(-1.0, min(1.0, math.sin(a[1]) * math.sin(b[1])
+                                   + math.cos(a[1]) * math.cos(b[1]) * math.cos(a[0] - b[0]))))
+
+
+def _sky_root(fn, lo: float, hi: float, tol: float = 20.0) -> float:
+    """When fn changes sign between lo and hi (it does): to tol seconds."""
+    flo = fn(lo)
+    while hi - lo > tol:
+        mid = (lo + hi) / 2
+        if (fn(mid) > 0) == (flo > 0):
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def _sky_min(fn, lo: float, hi: float, tol: float = 20.0) -> float:
+    """When fn is least between lo and hi (one dip there)."""
+    g = 0.381966
+    a, b = lo + g * (hi - lo), hi - g * (hi - lo)
+    fa, fb = fn(a), fn(b)
+    while hi - lo > tol:
+        if fa < fb:
+            hi, b, fb = b, a, fa
+            a = lo + g * (hi - lo)
+            fa = fn(a)
+        else:
+            lo, a, fa = a, b, fb
+            b = hi - g * (hi - lo)
+            fb = fn(b)
+    return (lo + hi) / 2
+
+
+def sky_height(t: float, lat: float, lon: float, moon: bool) -> float:
+    """Height above the horizon (°) of the Sun's or the Moon's centre seen from the place, no refraction."""
+    return math.degrees(_sky_seen(t, lat, lon, moon)[2])
+
+
+def sky_crossings(t0: float, t1: float, lat: float, lon: float, moon: bool, h0: float = None) -> list:
+    """[(time, rising?)] between t0 and t1: the Sun's or the Moon's upper edge on the horizon (refraction 34'),
+    or its centre at height h0 (°: twilights)."""
+    def over(t):
+        _ra, _dec, alt, semi, _par = _sky_seen(t, lat, lon, moon)
+        return math.degrees(alt) - (h0 if h0 is not None else -0.5667 - math.degrees(semi))
+    out, step = [], 600.0
+    t, f = t0, over(t0)
+    while t < t1:
+        t2 = min(t1, t + step)
+        f2 = over(t2)
+        if (f > 0) != (f2 > 0):
+            out.append((_sky_root(over, t, t2, 10.0), f2 > 0))
+        t, f = t2, f2
+    return out
+
+
+def moon_elong(t: float) -> float:
+    """The Moon's angle from the Sun along the ecliptic (°): 0 new, 90 first quarter, 180 full, 270 last."""
+    return (moon_pos(t)[0] - sun_pos(t)[0]) % 360
+
+
+def _sky_reach(fn, goal: float, t: float, step: float, most: float) -> float:
+    """When the angle fn(t) (°, growing) next reaches goal after t; looked for in steps, at most `most` s ahead."""
+    def before(tt):
+        return (fn(tt) - goal) % 360 - 180  # > 0: still before it (within half a turn)
+    lo = t
+    while lo < t + most:
+        hi = lo + step
+        if before(lo) > 0 >= before(hi) and (fn(hi) - fn(lo)) % 360 < 180:
+            return _sky_root(before, lo, hi, 15.0)
+        lo = hi
+    return 0.0
+
+
+def moon_phases(t: float, n: int = 4) -> list:
+    """The next n main phases after t: [(time, 0 new | 1 first quarter | 2 full | 3 last quarter, distance km)]."""
+    out = []
+    q = int(moon_elong(t) // 90)
+    for i in range(1, n + 1):
+        t = _sky_reach(moon_elong, ((q + i) % 4) * 90.0, t, 6 * 3600.0, 12 * 86400.0)
+        if not t:
+            break
+        out.append((t, (q + i) % 4, moon_pos(t)[2]))
+        t += 3600
+    return out
+
+
+ZODIAC = (("Beran", "Berana"), ("Býk", "Býka"), ("Blíženci", "Blíženců"), ("Rak", "Raka"), ("Lev", "Lva"),
+          ("Panna", "Panny"), ("Váhy", "Vah"), ("Štír", "Štíra"), ("Střelec", "Střelce"), ("Kozoroh", "Kozoroha"),
+          ("Vodnář", "Vodnáře"), ("Ryby", "Ryb"))
+# where the Sun's path enters each constellation of the sky (ecliptic longitude °; thirteen with Ophiuchus): the
+# signs keep the places these had two thousand years ago, the constellations have moved on a sign since
+SUN_STARS = ((28.7, "Berana"), (53.4, "Býka"), (90.1, "Blíženců"), (118.0, "Raka"), (138.0, "Lva"), (173.9, "Panny"),
+             (217.8, "Vah"), (241.1, "Štíra"), (247.6, "Hadonoše"), (266.2, "Střelce"), (299.7, "Kozoroha"),
+             (327.5, "Vodnáře"), (351.7, "Ryb"))
+
+
+def zodiac_of(lon: float) -> int:
+    return int(lon % 360 // 30)
+
+
+def sun_stars(lon: float) -> str:
+    """The constellation (genitive) the Sun stands in front of at ecliptic longitude lon."""
+    name = SUN_STARS[-1][1]
+    for start, n in SUN_STARS:
+        if lon % 360 >= start:
+            name = n
+    return name
+
+
+def sign_change(t: float, moon: bool) -> tuple:
+    """(time, sign) of the Sun's or the Moon's next entry into a sign after t."""
+    fn = (lambda tt: moon_pos(tt)[0]) if moon else (lambda tt: sun_pos(tt)[0])
+    nxt = (zodiac_of(fn(t)) + 1) % 12
+    when = _sky_reach(fn, nxt * 30.0, t, 3 * 3600.0 if moon else 86400.0, (3.2 if moon else 33) * 86400.0)
+    return when, nxt
+
+
+def _lunar_eclipse(full: float, lat: float, lon: float):
+    """The eclipse of the Moon at the full moon `full`, or None: the Moon passing through the Earth's shadow."""
+    def state(t):
+        ls, R, eps = sun_pos(t)
+        lm, bm, dist = moon_pos(t)
+        par = math.asin(6378.14 / dist)
+        ss, ps = math.radians(959.63 / 3600) / R, math.radians(8.794 / 3600) / R
+        sm = math.asin(0.2725 * math.sin(par))
+        dl = math.radians((lm - ls - 180 + 180) % 360 - 180) * math.cos(math.radians(bm))
+        sep = math.hypot(dl, math.radians(bm))
+        return sep, 1.02 * (0.99834 * par - ss + ps), 1.02 * (0.99834 * par + ss + ps), sm
+    if abs(moon_pos(full)[1]) > 1.7:
+        return None
+    mid = _sky_min(lambda t: state(t)[0], full - 3 * 3600, full + 3 * 3600, 10.0)
+    sep, ru, rp, sm = state(mid)
+    umbral, pen = (ru + sm - sep) / (2 * sm), (rp + sm - sep) / (2 * sm)
+    if pen <= 0:
+        return None
+    kind = "total" if umbral >= 1 else "partial" if umbral > 0 else "penumbral"
+
+    def span(edge):  # when the Moon's edge is at that distance from the shadow's middle: (before, after) the middle
+        def f(t):
+            s = state(t)
+            return s[0] - edge(s)
+        if f(mid) >= 0:
+            return None
+        return _sky_root(f, mid - 3.5 * 3600, mid, 10.0), _sky_root(f, mid, mid + 3.5 * 3600, 10.0)
+    ev = {"what": "moon", "kind": kind, "max": mid, "mag": umbral if umbral > 0 else pen,
+          "pen": span(lambda s: s[2] + s[3]), "part": span(lambda s: s[1] + s[3]),
+          "total": span(lambda s: s[1] - s[3]) if kind == "total" else None}
+    first, last = (ev["part"] or ev["pen"])
+    ev["up"] = tuple(sky_height(x, lat, lon, True) > 0 for x in (first, mid, last))
+    ev["when"] = mid
+    return ev
+
+
+def _overlap(rs: float, rm: float, sep: float) -> float:
+    """The share of the Sun's disc (radius rs) the Moon's (rm) covers, their centres sep apart."""
+    if sep >= rs + rm:
+        return 0.0
+    if sep <= abs(rs - rm):
+        return 1.0 if rm >= rs else (rm / rs) ** 2
+    a = math.acos((sep * sep + rs * rs - rm * rm) / (2 * sep * rs))
+    b = math.acos((sep * sep + rm * rm - rs * rs) / (2 * sep * rm))
+    area = rs * rs * (a - math.sin(2 * a) / 2) + rm * rm * (b - math.sin(2 * b) / 2)
+    return area / (math.pi * rs * rs)
+
+
+def _solar_eclipse(new: float, lat: float, lon: float):
+    """The eclipse of the Sun at the new moon `new`, or None: what it is on the Earth (total, annular, partial)
+    and what the place sees of it."""
+    lm, bm, dist = moon_pos(new)
+    if abs(bm) > 1.6:
+        return None
+
+    def centre(t):  # the Moon's distance from the Sun's middle seen from the Earth's centre, and its parallax
+        ls, R, _e = sun_pos(t)
+        l2, b2, d2 = moon_pos(t)
+        dl = math.radians((l2 - ls + 180) % 360 - 180) * math.cos(math.radians(b2))
+        return math.hypot(dl, math.radians(b2)), math.asin(6378.14 / d2) - math.radians(8.794 / 3600) / R
+    mid = _sky_min(lambda t: centre(t)[0], new - 3 * 3600, new + 3 * 3600, 10.0)
+    sep, par = centre(mid)
+    gamma = math.sin(sep) / math.sin(par)
+    T = _sky_T(mid)
+    M = math.radians(357.5291092 + 35999.0502909 * T)
+    Mp = math.radians(134.9633964 + 477198.8675055 * T)
+    u = (0.0059 + 0.0046 * (1 - 0.002516 * T) * math.cos(M) - 0.0182 * math.cos(Mp) + 0.0004 * math.cos(2 * Mp)
+         - 0.0005 * math.cos(M + Mp))
+    if gamma > 1.5433 + u:
+        return None
+    if gamma < 0.9972:
+        kind = "total" if u < 0 else "annular" if u > 0.0047 or u > 0.00464 * math.sqrt(1 - gamma * gamma) else "hybrid"
+    else:
+        kind = "partial"
+
+    def here(t):
+        s = _sky_seen(t, lat, lon, False)
+        m = _sky_seen(t, lat, lon, True)
+        return _sky_sep(s, m), s[3], m[3], s[2]
+    best = _sky_min(lambda t: here(t)[0], mid - 3.5 * 3600, mid + 3.5 * 3600, 10.0)
+    d, rs, rm, alt = here(best)
+    ev = {"what": "sun", "kind": kind, "max": mid, "when": mid, "here": None}
+    if d < rs + rm:
+        def f(t):
+            h = here(t)
+            return h[0] - h[1] - h[2]
+        first, last = _sky_root(f, best - 3 * 3600, best, 10.0), _sky_root(f, best, best + 3 * 3600, 10.0)
+        ups = [here(x)[3] > math.radians(-0.8) for x in (first, best, last)]
+        if any(ups):
+            see = best
+            if not ups[1]:  # its middle below the horizon: the most of it seen is at sunrise or sunset
+                edge = sky_crossings(first, last, lat, lon, False)
+                see = edge[0][0] if edge else best
+            d2, rs2, rm2, _a = here(see)
+            ev["here"] = {"first": first, "max": best, "last": last, "up": tuple(ups), "seen": see,
+                          "mag": (rs2 + rm2 - d2) / (2 * rs2), "cover": _overlap(rs2, rm2, d2),
+                          "kind": ("total" if rm >= rs else "annular") if d <= abs(rs - rm) and ups[1] else "partial"}
+            ev["when"] = see
+    return ev
+
+
+def sky_eclipses(t0: float, t1: float, lat: float, lon: float) -> list:
+    """Eclipses of the Sun and the Moon between t0 and t1, in order."""
+    out, t = [], t0 - 16 * 86400
+    while t < t1:
+        ph = moon_phases(t, 2)
+        if not ph:
+            break
+        for when, which, _d in ph:
+            if which in (0, 2) and t0 - 86400 < when < t1:
+                ev = _solar_eclipse(when, lat, lon) if which == 0 else _lunar_eclipse(when, lat, lon)
+                if ev and ev["when"] > t0 - 4 * 3600 and not any(abs(o["max"] - ev["max"]) < 86400 for o in out):
+                    out.append(ev)
+        t = ph[-1][0] + 5 * 86400
+    return sorted(out, key=lambda e: e["when"])
+
+
+# the year's meteor showers worth going out for: (name, the Sun's longitude at their peak °, meteors an hour at
+# best under a dark sky)
+METEORS = (("Kvadrantidy", 283.15, 110), ("Lyridy", 32.3, 18), ("Eta Akvaridy", 45.5, 50), ("Perseidy", 140.0, 100),
+           ("Orionidy", 208.0, 20), ("Leonidy", 235.3, 15), ("Geminidy", 262.2, 150), ("Ursidy", 270.7, 10))
+SKY_SEASONS = ((0, "Jarní rovnodennost", "začíná astronomické jaro, den a noc jsou stejně dlouhé"),
+           (90, "Letní slunovrat", "začíná astronomické léto, nejdelší den roku"),
+           (180, "Podzimní rovnodennost", "začíná astronomický podzim, den a noc jsou stejně dlouhé"),
+           (270, "Zimní slunovrat", "začíná astronomická zima, nejkratší den roku"))
+
+
+def _sky_hm(t: float) -> str:
+    return time.strftime("%-H:%M", time.localtime(t))
+
+
+def _sky_at(t: float) -> str:
+    """'v 15:54', 've 4:12': the time of day with its preposition."""
+    lt = time.localtime(t)
+    return ("ve " if lt.tm_hour in (2, 3, 4, 12, 13, 14, 20, 21, 22, 23) else "v ") + _sky_hm(t)
+
+
+def _sky_date(t: float, now: float, short: bool = False) -> str:
+    """'dnes', 'zítra', else 'úterý 24. listopadu' (with the year when it's another one; short: no weekday)."""
+    lt, ln = time.localtime(t), time.localtime(now)
+    days = (datetime.date(lt.tm_year, lt.tm_mon, lt.tm_mday) - datetime.date(ln.tm_year, ln.tm_mon, ln.tm_mday)).days
+    if days == 0:
+        return "dnes"
+    if days == 1:
+        return "zítra"
+    return (("" if short else DAYS[lt.tm_wday] + " ") + f"{lt.tm_mday}. {MONTHS[lt.tm_mon - 1]}"
+            + (f" {lt.tm_year}" if lt.tm_year != ln.tm_year else ""))
+
+
+def _sky_km(km: float) -> str:
+    return f"{round(km / 100) * 100:,}".replace(",", " ") + " km"
+
+
+def _sky_num(x: float, places: int = 1) -> str:
+    return f"{x:.{places}f}".replace(".", ",")
+
+
+def _sky_span(sec: float) -> str:
+    sec = abs(round(sec))
+    if sec >= 3600:
+        return f"{sec // 3600} h {sec % 3600 // 60} min"
+    return f"{sec // 60} min {sec % 60} s" if sec >= 60 else f"{sec} s"
+
+
+MOON_MAIN = ("Nov", "První čtvrť", "Úplněk", "Poslední čtvrť")
+
+
+def _eclipse_text(e: dict, now: float, lat: float, lon: float) -> str:
+    day = _sky_date(e["when"], now)
+    if e["what"] == "moon":
+        first, last = e["part"] or e["pen"]
+        eve = " (večer předtím)" if time.localtime(first).tm_mday != time.localtime(e["when"]).tm_mday else ""
+        if e["kind"] == "total":
+            text = (f"<b>Úplné zatmění Měsíce (krvavý Měsíc), {day}.</b> Do stínu Země vstupuje {_sky_at(first)}{eve}, celý "
+                    f"je v něm od {_sky_hm(e['total'][0])} do {_sky_hm(e['total'][1])} a zrudne; nejhlouběji "
+                    f"{_sky_at(e['max'])}, ze stínu vyjde {_sky_at(last)}.")
+        elif e["kind"] == "partial":
+            text = (f"<b>Částečné zatmění Měsíce, {day}.</b> Ve stínu Země od {_sky_hm(first)}{eve} do {_sky_hm(last)}, "
+                    f"nejvíc {_sky_at(e['max'])}: {round(e['mag'] * 100)} % průměru.")
+        else:
+            text = (f"<b>Polostínové zatmění Měsíce, {day}.</b> Od {_sky_hm(first)}{eve} do {_sky_hm(last)}, nejvíc "
+                    f"{_sky_at(e['max'])}; Měsíc jen lehce zešedne.")
+        up = e["up"]
+        if all(up):
+            text += " U nás bude vidět celé."
+        elif not any(up):
+            text += " U nás vidět nebude, Měsíc bude pod obzorem."
+        else:
+            edge = sky_crossings(first, last, lat, lon, True)
+            when = f" ({_sky_hm(edge[0][0])})" if edge else ""
+            text += (f" U nás Měsíc vyjde už zatmělý{when}." if not up[0]
+                     else f" U nás Měsíc během zatmění zapadne{when}.")
+        return text
+    kind = {"total": "Úplné", "annular": "Prstencové", "hybrid": "Hybridní", "partial": "Částečné"}[e["kind"]]
+    text = f"<b>{kind} zatmění Slunce, {day}.</b>"
+    h = e["here"]
+    if not h:
+        return text + f" Nejvíc {_sky_at(e['max'])} našeho času; u nás vidět nebude."
+    cover = round(h["cover"] * 100)
+    if h["kind"] != "partial":
+        text += (f" U nás {'úplné' if h['kind'] == 'total' else 'prstencové'}: začne {_sky_at(h['first'])}, vrchol "
+                 f"{_sky_at(h['max'])}, skončí {_sky_at(h['last'])}.")
+    elif all(h["up"]):
+        text += (f" U nás{' jen' if e['kind'] != 'partial' else ''} částečné: od {_sky_hm(h['first'])} do "
+                 f"{_sky_hm(h['last'])}, nejvíc {_sky_at(h['max'])}, kdy Měsíc zakryje asi {cover} % Slunce.")
+    elif h["up"][0]:
+        text += (f" U nás{' jen' if e['kind'] != 'partial' else ''} částečné: začne {_sky_at(h['first'])}"
+                 + (f", nejvíc {_sky_at(h['max'])} (asi {cover} % Slunce)" if h["up"][1]
+                    else f" a Slunce zapadne {_sky_at(h['seen'])} zakryté asi z {cover} %") + "; konec už pod obzorem.")
+    else:
+        text += (f" U nás{' jen' if e['kind'] != 'partial' else ''} částečné: Slunce vyjde {_sky_at(h['seen'])} už "
+                 f"zakryté asi z {cover} %, skončí {_sky_at(h['last'])}.")
+    return text + " Dívat se jen přes zatmívací brýle."
+
+
+def sky_events(now: float, lat: float, lon: float) -> list:
+    """What's coming in the sky, as paragraphs (Pango markup): this month's, or when that's few, the next ones
+    of the year ahead, eclipses always among them."""
+    end = now + 366 * 86400
+    ev = []
+    for e in sky_eclipses(now, end, lat, lon):
+        if e["what"] == "moon" and e["kind"] == "penumbral" and e["mag"] < 0.6:
+            continue  # (too faint to notice)
+        ev.append((e["when"], True, _eclipse_text(e, now, lat, lon)))
+    T0 = _sky_T(now)
+
+    def lon_2000(t):  # (the showers keep their places among the stars, not from the drifting spring point)
+        return (sun_pos(t)[0] - 1.3969 * _sky_T(t) + 0.0057) % 360
+    for name, where, most in METEORS:
+        when = _sky_reach(lon_2000, where, now - 2 * 86400, 86400.0, 368 * 86400.0)
+        if when and when > now - 86400:
+            lit = (1 - math.cos(math.radians(moon_elong(when)))) / 2
+            moon = ("Měsíc skoro neruší" if lit < 0.3 else "Měsíc trochu ruší" if lit < 0.65 else "ruší jasný Měsíc")
+            ev.append((when, False, f"<b>Meteorický roj {name}, {_sky_date(when, now)}.</b> V noci kolem maxima "
+                                    f"za tmavé oblohy až {most} meteorů za hodinu; {moon} (osvětlen z "
+                                    f"{round(lit * 100)} %)."))
+    for goal, name, what in SKY_SEASONS:
+        when = _sky_reach(lambda t: sun_pos(t)[0], float(goal), now, 86400.0, 368 * 86400.0)
+        if when:
+            ev.append((when, False, f"<b>{name}, {_sky_date(when, now)} {_sky_at(when)}.</b> "
+                                    f"{what[0].upper()}{what[1:]}."))
+    for when, which, dist in moon_phases(now, 52):
+        if which == 2 and dist < 361000:
+            ev.append((when, False, f"<b>Superúplněk, {_sky_date(when, now)} {_sky_at(when)}.</b> Měsíc v úplňku "
+                                    f"blízko Země ({_sky_km(dist)}): o něco větší a jasnější než obvykle."))
+    ev.sort(key=lambda x: x[0])
+    ln = time.localtime(now)
+    month = [x for x in ev if (time.localtime(x[0]).tm_year, time.localtime(x[0]).tm_mon) == (ln.tm_year, ln.tm_mon)]
+    if len(month) >= 4:
+        return [x[2] for x in month[:8]]
+    pick = ev[:6]
+    pick += [x for x in ev[6:] if x[1]]  # (every eclipse of the year ahead: there are few)
+    return [x[2] for x in sorted(pick[:10], key=lambda x: x[0])]
+
+
+def sky_parts(lat: float, lon: float, place: str, now: float = None, events: list = None) -> dict:
+    """The Moon and Sun box's contents for the place: {'place', 'strip': the Moon on the coming evenings
+    [(day's short name, moon as drawn, lit %)], 'parts': [(headline, [paragraphs of Pango markup])]}."""
+    now = time.time() if now is None else now
+    ln = time.localtime(now)
+    day0 = time.mktime((ln.tm_year, ln.tm_mon, ln.tm_mday, 0, 0, 0, 0, 0, -1))
+    day1 = time.mktime((ln.tm_year, ln.tm_mon, ln.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+    # --- the Moon today
+    lm, bm, dist = moon_pos(now)
+    elong = moon_elong(now)
+    lit = (1 - math.cos(math.radians(elong))) / 2
+    last_new = max((w for w, which, _d in moon_phases(now - 31 * 86400, 5) if which == 0 and w <= now), default=0)
+    age = (now - last_new) / 86400 if last_new else elong / 360 * 29.53
+    name = moon_sky(lat, lon, now)["name"]
+    moon = [f"<b>{name[0].upper()}{name[1:]}</b>, osvětleno {round(lit * 100)} %, {_sky_num(age)} dne od novu. "
+            f"Od Země je {_sky_km(dist)}."]
+    cross = sky_crossings(day0, day1, lat, lon, True)
+    words = [f"{'vychází' if up else 'zapadá'} {_sky_at(t)}" for t, up in cross]
+    height = sky_height(now, lat, lon, True)
+    here = (f"teď je {round(height)}° nad obzorem" if height > 0 else "teď je pod obzorem")
+    if words:
+        moon.append(f"Dnes {' a '.join(words)}; {here}.")
+    else:
+        moon.append(f"Dnes nevychází ani nezapadá; {here}.")
+    sign = zodiac_of(lm)
+    when, nxt = sign_change(now, True)
+    moon.append(f"Je ve znamení <b>{ZODIAC[sign][1]}</b>" + (f"; do znamení {ZODIAC[nxt][1]} přejde "
+                f"{_sky_date(when, now, True)} {_sky_at(when)}." if when else "."))
+    # --- its phases ahead
+    phases = []
+    for when, which, d in moon_phases(now, 4):
+        phases.append(f"<b>{MOON_MAIN[which]}</b>: {_sky_date(when, now)} {_sky_at(when)}"
+                      + (f" (superúplněk, {_sky_km(d)} od Země)" if which == 2 and d < 361000 else ""))
+    strip = []
+    for i in range(7):
+        t = time.mktime((ln.tm_year, ln.tm_mon, ln.tm_mday + i, 21, 0, 0, 0, 0, -1))
+        m = dict(moon_sky(lat, lon, t), q=0.0)  # (north up, as one knows it)
+        strip.append(("dnes" if i == 0 else DAYS[time.localtime(t).tm_wday][:2], m, round(m["k"] * 100)))
+    # --- the Sun today
+    ls, R, _eps = sun_pos(now)
+    sun = []
+    rises = sky_crossings(day0, day1, lat, lon, False)
+    up = next((t for t, r in rises if r), None)
+    down = next((t for t, r in rises if not r), None)
+    if up and down and down > up:
+        y = sky_crossings(day0 - 86400, day0, lat, lon, False)
+        yu, yd = next((t for t, r in y if r), None), next((t for t, r in y if not r), None)
+        length = down - up
+        change = ""
+        if yu and yd:
+            diff = length - (yd - yu)
+            change = f", o {_sky_span(diff)} {'delší' if diff > 0 else 'kratší'} než včera" if abs(diff) >= 1 else ""
+        sun.append(f"Vychází <b>{_sky_at(up)}</b> a zapadá <b>{_sky_at(down)}</b>; den trvá {_sky_span(length)}{change}.")
+        dusk = sky_crossings(day0, day1, lat, lon, False, -6.0)
+        d_up, d_down = next((t for t, r in dusk if r), None), next((t for t, r in dusk if not r), None)
+        if d_up and d_down:
+            sun.append(f"Rozednívá se {_sky_at(d_up)} a tma přichází {_sky_at(d_down)} (občanský soumrak).")
+        noon = _sky_min(lambda t: -sky_height(t, lat, lon, False), up, down, 20.0)
+        sun.append(f"Nejvýš je {_sky_at(noon)}: {_sky_num(sky_height(noon, lat, lon, False))}° nad obzorem.")
+    else:
+        sun.append("Dnes nevychází nebo nezapadá.")
+    sign = zodiac_of(ls)
+    when, nxt = sign_change(now, False)
+    sun.append(f"Je ve znamení <b>{ZODIAC[sign][1]}</b> (na obloze před souhvězdím {sun_stars(ls)})"
+               + (f"; do znamení {ZODIAC[nxt][1]} vstoupí {_sky_date(when, now, True)} {_sky_at(when)}." if when else "."))
+    sun.append(f"Od Země je {_sky_num(R * 149.5978707)} milionu km.")
+    parts = [("Měsíc dnes", moon), ("Fáze Měsíce", phases), ("Slunce dnes", sun)]
+    events = sky_events(now, lat, lon) if events is None else events
+    if events:
+        parts.append(("Úkazy na obloze", events))
+    return {"place": place, "strip": strip, "parts": parts, "events": events}
+
+
 class MoonView(Gtk.Widget):
     """Left of the 'i' button: the moon now (as it is in the sky from the weather's place), an arrow, and its next
     phase in eighths (drawn north up, as one knows it: waxing lit on the right, waning on the left), with the day it
@@ -10909,6 +11486,78 @@ class MoonView(Gtk.Widget):
             snap.append_layout(lay, _rgba(255, 255, 255, 0.95))
             snap.restore()
             snap.pop()
+
+
+class MoonStrip(Gtk.Widget):
+    """In the Moon and Sun box: the Moon on the coming evenings in a row, each drawn as it will be lit, the day
+    and how much of it is lit below. Kept as a picture (its moons are drawn on the processor)."""
+
+    def __init__(self, days: list, f: float, **kw):
+        super().__init__(hexpand=True, **kw)
+        self.days, self.f = days, f
+
+    def do_get_request_mode(self):
+        return Gtk.SizeRequestMode.HEIGHT_FOR_WIDTH
+
+    def do_measure(self, orientation, for_size):
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            return 60, 60, -1, -1
+        cell = (for_size if for_size > 0 else 480) / max(1, len(self.days))
+        n = round(min(cell * 1.45, 170 * self.f))  # (each moon as wide as its share of the row lets it be)
+        return n, n, -1, -1
+
+    _pics: dict = {}  # (the days' list, width, height, scale) -> (the list, texture): the last ones made
+
+    def do_snapshot(self, snap) -> None:
+        # A picture made here on the processor, once, and the same from the first frame on. (Drawn as the Moon
+        # beside the button is, live first and kept as a picture a moment later, it changed the box's contents
+        # just after it opened: all the box's text was then drawn anew every frame until it had been pictured
+        # again, 20 ms a frame for a second or more.)
+        w, h = self.get_width(), self.get_height()
+        _native, k = _screen_scale(self)
+        if w < 20 or h < 20 or not self.days:
+            return
+        key = (id(self.days), w, h, k)
+        hit = MoonStrip._pics.get(key)
+        if hit is None or hit[0] is not self.days:
+            if len(MoonStrip._pics) > 3:
+                MoonStrip._pics.clear()
+            hit = MoonStrip._pics[key] = (self.days, self._picture(w, h, k))
+        snap.append_texture(hit[1], Graphene.Rect().init(0, 0, w, h))
+
+    def _picture(self, w: int, h: int, k: float):
+        import cairo
+        gi.require_version("PangoCairo", "1.0")
+        from gi.repository import PangoCairo
+        W, H = max(1, round(w * k)), max(1, round(h * k))
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
+        cr = cairo.Context(surf)
+        cr.scale(k, k)
+        cell = w / len(self.days)
+        rad = min(cell * 0.40, h * 0.28)
+        desc = Pango.FontDescription.from_string("Oswald Bold")
+        desc.set_absolute_size(max(8.0, h * 0.175) * Pango.SCALE)
+        for i, (name, m, lit) in enumerate(self.days):
+            cr.save()
+            cr.translate(cell * (i + 0.5), rad + 2)
+            draw_moon(cr, rad, m)
+            cr.restore()
+            y = h * 0.60
+            for text, alpha in ((name, 0.95), (f"{lit} %", 0.8)):
+                lay = PangoCairo.create_layout(cr)
+                lay.set_font_description(desc)
+                lay.set_text(text, -1)
+                ink = lay.get_pixel_extents()[1]
+                x = cell * (i + 0.5) - ink.width / 2 - ink.x
+                for dx, dy, col in ((-1, 2, (0, 0, 0, 0.55)), (-1, 1, (0, 0, 0, 0.8)), (1, 1, (0, 0, 0, 0.5)),
+                                    (0, 0, (1, 1, 1, alpha))):  # (a dark edge left and below, like the labels')
+                    cr.move_to(x + dx, y - ink.y + dy)
+                    cr.set_source_rgba(*col)
+                    PangoCairo.show_layout(cr, lay)
+                y += h * 0.20
+        surf.flush()
+        return Gdk.MemoryTexture.new(W, H, Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
+                                     GLib.Bytes.new(bytes(surf.get_data())), surf.get_stride())
 
 
 class FitText(Gtk.Widget):
@@ -11995,9 +12644,11 @@ class OpenProfile:
             s = Gtk.Snapshot()
             s.scale(k, k)
             Gtk.WidgetPaintable.new(content).snapshot(s, content.get_width(), content.get_height())
-            s.to_node().write_to_file(flag + ".node")
-            print("Otevření: uloženo", flag + ".node", file=sys.stderr)
-            for name in ("day_pop", "names_pop", "song_pop", "quality_pop"):  # a box open just now: what it draws
+            node = s.to_node()
+            if node is not None:  # (nothing while the window's changing: the boxes below still are)
+                node.write_to_file(flag + ".node")
+                print("Otevření: uloženo", flag + ".node", file=sys.stderr)
+            for name in ("day_pop", "names_pop", "song_pop", "sky_pop", "quality_pop"):  # a box open just now: what it draws
                 pop = getattr(widget, name, None)
                 kid = pop.get_child() if pop is not None and pop.get_mapped() else None
                 if kid is not None:
@@ -12577,7 +13228,27 @@ class Window(Adw.ApplicationWindow):
         self.song_pop.add_css_class("glass-menu")
         self.song_pop.set_parent(self.clock)
         self.song_pop.set_can_target(False)
-        for pop in (self.day_pop, self.names_pop, self.song_pop):
+        # the Moon and Sun box: the Moon today and its phases ahead, the Sun's day, what's coming in the sky
+        # (the mouse on the Moon beside the 'i' button, and by itself once an hour)
+        self.sky_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=6, margin_bottom=6)
+        kglass = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
+        kglass.radius = 16.0
+        kglass.curve, kglass.wall, kglass.reach, kglass.shine = 3.0, 2.8, 0.9, True
+        kglass.edge_mirror = True
+        self.sky_scroll = Gtk.ScrolledWindow(child=self.sky_list, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                             vscrollbar_policy=Gtk.PolicyType.EXTERNAL, hexpand=True, vexpand=True)
+        kglass.append(self.sky_scroll)
+        self.sky_pop = Gtk.Popover(child=kglass, has_arrow=False, position=Gtk.PositionType.BOTTOM, autohide=False,
+                                   can_focus=False)
+        self.sky_pop.add_css_class("glass-menu")
+        self.sky_pop.set_parent(self.clock)
+        self.sky_pop.set_can_target(False)
+        self.sky_pager = Pager(self.sky_pop, self.sky_scroll)
+        self.sky_pager.HOLD = float(self.SKY_AUTO[2])
+        self._sky_on = False  # the mouse is on the Moon
+        self.sky_pop.connect("closed", lambda *_: setattr(self, "_sky_on", False))  # (put away by something
+        # else, a menu opening: the mouse moving on the Moon again brings it back)
+        for pop in (self.day_pop, self.names_pop, self.song_pop, self.sky_pop):
             self._quiet_pop(pop)
         over = Gtk.EventControllerMotion()
         over.connect("enter", lambda *_: self.song_pop.get_visible() or self.song_show())
@@ -12726,6 +13397,15 @@ class Window(Adw.ApplicationWindow):
         self.moon_row.set_active(self.app.settings.get("moon", True))
         self.moon_row.connect("notify::active", lambda r, _: self.app.set_weather(moon=r.get_active()))
         group.add(self.moon_row)
+        sky_box = Adw.SwitchRow(title="Okno o Měsíci a Slunci", subtitle_lines=0,
+                                subtitle="Najetím myší na Měsíc, a samo každou hodinu v :10 na půl minuty (delší "
+                                         "po 10 s na stránku): Měsíc dnes a v příštích dnech, jeho fáze, východ, "
+                                         "západ a znamení, totéž o Slunci, a co se chystá na obloze (zatmění, "
+                                         "meteorické roje, slunovraty) pro vybrané místo")
+        sky_box.set_active(self.app.settings.get("sky_box", True))
+        sky_box.connect("notify::active", lambda r, _: (self.app.set_look(sky_box=r.get_active()),
+                                                        r.get_active() or self.sky_pop.popdown()))
+        group.add(sky_box)
         auto_up = Adw.SwitchRow(title="Automatické aktualizace",
                                 subtitle="Každých 5 minut zkontroluje novou verzi, nainstaluje ji a spustí se znovu",
                                 subtitle_lines=0)
@@ -13007,7 +13687,7 @@ class Window(Adw.ApplicationWindow):
             return
         if (not self.get_visible() or not self.names.get_visible() or self._tour is not None
                 or any(w.open for w in self.waters) or self._day_on or self.quality_pop.get_visible()
-                or self.names_pop.get_visible()):
+                or self.names_pop.get_visible() or self.sky_pop.get_visible()):
             return
         if not self.names_ready():  # nothing to show yet (photos on their way): a little later, not an empty box
             if tries > 0:
@@ -13116,6 +13796,7 @@ class Window(Adw.ApplicationWindow):
         OPEN_PROFILE.start("okna jmenin", self)
         self.day_pop.popdown()
         self.song_pop.popdown()
+        self.sky_pop.popdown()
         area = self._day_area()
         if area and getattr(self, "_day_text_f", None) is None:  # (the day's box's text size, worked out once)
             self._day_fill()
@@ -13170,7 +13851,7 @@ class Window(Adw.ApplicationWindow):
     def _song_auto(self) -> bool:
         if (hasattr(self, "_tour") and self.get_visible() and self._tour is None and not any(w.open for w in self.waters)
                 and not self._day_on and not self.quality_pop.get_visible() and not self.names_pop.get_visible()
-                and not self.song_pop.get_visible() and self._song_parts() and self._settled(self._song_auto)):
+                and not self.sky_pop.get_visible() and not self.song_pop.get_visible() and self._song_parts() and self._settled(self._song_auto)):
             self.song_show()
             shown = self._song_shown = object()
             GLib.timeout_add_seconds(self.SONG_AUTO[1], lambda: (self._song_shown is shown and self.song_pop.popdown(),
@@ -13232,6 +13913,7 @@ class Window(Adw.ApplicationWindow):
         OPEN_PROFILE.start("okna o skladbě", self)
         self.day_pop.popdown()
         self.names_pop.popdown()
+        self.sky_pop.popdown()
         if getattr(self, "_day_text_f", None) is None:
             self._day_fill()
             self._day_fit(round(area[2]), round(area[3]))
@@ -13256,6 +13938,109 @@ class Window(Adw.ApplicationWindow):
         self.song_pop.popup()
         GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
         GLib.idle_add(self._day_true, area, self.song_pop)
+
+    SKY_AUTO = (10, 30, 10)  # the Moon and Sun box by itself once an hour: at :10 (away from :00, :20, :30 and
+    # :45), for 30 s or, when it has more pages than three, 10 s a page
+
+    def sky_refresh(self) -> None:
+        if self.sky_pop.get_visible():
+            self._sky_fill()
+
+    def _sky_fill(self) -> None:
+        a = self.app
+        data = a.sky or {}
+        box = self.sky_list
+        f = getattr(self, "_day_text_f", None) or 0.7
+        filled = (id(data), f, self._scale)
+        if data and box.get_first_child() is not None and getattr(self, "_sky_filled", None) == (filled, data):
+            return  # (as it is: nothing laid out or drawn anew)
+        self._sky_filled = (filled, data)
+        while (c := box.get_first_child()) is not None:
+            box.remove(c)
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_scale_new(f))
+        head = Gtk.Label(label=GLib.markup_escape_text("Měsíc a Slunce · " + data.get("place", "")), use_markup=True,
+                         halign=Gtk.Align.START, attributes=attrs)
+        head.add_css_class("day-head")
+        box.append(head)
+        if not data:
+            box.append(Gtk.Label(label="Počítá se…", xalign=0, attributes=attrs))
+            return
+        for i, (name, paras) in enumerate(data["parts"]):
+            h = Gtk.Label(label=GLib.markup_escape_text(name), use_markup=True, halign=Gtk.Align.START,
+                          attributes=attrs, margin_top=6)
+            h.add_css_class("day-head")
+            box.append(h)
+            if i == 0 and data.get("strip"):
+                box.append(MoonStrip(data["strip"], f * max(1.0, self._scale)))
+            for text in paras:  # (already markup: only <b>, the rest plain words and numbers)
+                box.append(Gtk.Label(label=text, use_markup=True, xalign=0, wrap=True, attributes=attrs))
+
+    def sky_show(self) -> None:
+        """Over the cover like the day's box; not over an open menu, and not when it's switched off."""
+        if self.compact or self._menu_open() or not self.app.settings.get("sky_box", True):
+            return
+        area = self._day_area()
+        if not area:
+            return
+        OPEN_PROFILE.start("okna Měsíce a Slunce", self)
+        for pop in (self.day_pop, self.names_pop, self.song_pop):
+            pop.popdown()
+        self.app.sky_tick()
+        if getattr(self, "_day_text_f", None) is None:
+            self._day_fill()
+            self._day_fit(round(area[2]), round(area[3]))
+        self._sky_fill()
+        glass = self.sky_pop.get_child()
+        x, y, w, h = (round(v) for v in area)
+        glass.set_size_request(w, h)
+        glass.radius = 28 * max(1.0, self._scale)
+        r = int(glass.radius)
+        for setm in (self.sky_scroll.set_margin_top, self.sky_scroll.set_margin_bottom,
+                     self.sky_scroll.set_margin_start, self.sky_scroll.set_margin_end):
+            setm(r)
+        self.sky_scroll.set_size_request(w - 2 * r, h - 2 * r)
+        ok, at = self.compute_point(self.clock, Graphene.Point().init(x, y))
+        if ok:
+            rect = Gdk.Rectangle()
+            rect.x, rect.y, rect.width, rect.height = round(at.x), round(at.y) - 1, w, 1
+            self.sky_pop.set_pointing_to(rect)
+        data = self.app.sky or {}
+        self.sky_pager.start((data.get("place"), tuple(n for n, _p in data.get("parts", ()))))
+        glass.staged()
+        glass.fresh_if_changed()
+        self.sky_pop.popup()
+        GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
+        GLib.idle_add(self._day_true, area, self.sky_pop)
+
+    def _sky_auto(self) -> None:
+        """Once an hour by itself: for 30 s, or 10 s for each of its pages when that's longer; not over a menu,
+        a panel's tour or another box, and not while there's nothing worked out to show."""
+        if not hasattr(self, "quality_pop") or not hasattr(self, "_tour"):
+            return
+        if (not self.get_visible() or self._tour is not None or self._menu_open() or self._day_on or self._sky_on
+                or any(p.get_visible() for p in (self.day_pop, self.names_pop, self.song_pop, self.sky_pop))
+                or not self.app.settings.get("sky_box", True) or not self.app.sky):
+            return
+        if not self._settled(self._sky_auto):
+            return
+        self.sky_show()
+        if not self.sky_pop.get_visible():
+            return
+        shown = self._sky_shown = object()
+
+        def close() -> bool:
+            if self._sky_shown is shown and not self._sky_on:
+                self.sky_pop.popdown()
+            return False
+
+        def timed() -> bool:  # (laid out by now: how many pages it has)
+            adj = self.sky_scroll.get_vadjustment()
+            page = max(1.0, adj.get_page_size())
+            pages = 1 + math.ceil(max(0.0, adj.get_upper() - page) / (page * 0.9))
+            GLib.timeout_add_seconds(max(self.SKY_AUTO[1], pages * self.SKY_AUTO[2]) - 2, close)
+            return False
+        GLib.timeout_add_seconds(2, timed)
 
     def _names_wheel(self, _ctl, _dx, dy) -> bool:
         adj = self.names_scroll.get_vadjustment()
@@ -13360,6 +14145,7 @@ class Window(Adw.ApplicationWindow):
             OPEN_PROFILE.start("okna dne", self)
         self.names_pop.popdown()
         self.song_pop.popdown()
+        self.sky_pop.popdown()
         self._day_fill()
         area = self._day_area()
         glass = self.day_pop.get_child()
@@ -13467,6 +14253,9 @@ class Window(Adw.ApplicationWindow):
         if now.tm_min == self.DAY_AUTO[0] and getattr(self, "_day_auto_hour", None) != hour:
             self._day_auto_hour = hour
             self._day_auto()
+        if now.tm_min == self.SKY_AUTO[0] and getattr(self, "_sky_auto_hour", None) != hour:
+            self._sky_auto_hour = hour
+            self._sky_auto()
         if now.tm_min == self.NAMES_AUTO[0] and getattr(self, "_names_auto_hour", None) != hour:
             self._names_auto_hour = hour
             self._names_auto()
@@ -13484,7 +14273,7 @@ class Window(Adw.ApplicationWindow):
         if c:
             for w in self.waters:
                 w.hide()
-            for pop in (self.day_pop, self.names_pop, self.song_pop):
+            for pop in (self.day_pop, self.names_pop, self.song_pop, self.sky_pop):
                 pop.popdown()
             for v in (self.clock, self.names, self.weather_view, self.weather_drop, self.moon_view, self.status_view):
                 v.set_visible(False)
@@ -13920,7 +14709,7 @@ class Window(Adw.ApplicationWindow):
     def quiet_sync(self) -> None:
         """The picture enhancing waits while any menu, panel or box is open (smooth glass), and goes on once the
         last one is closed."""
-        pops = (getattr(self, n, None) for n in ("day_pop", "names_pop", "song_pop", "quality_pop"))
+        pops = (getattr(self, n, None) for n in ("day_pop", "names_pop", "song_pop", "sky_pop", "quality_pop"))
         on = any(w.open for w in getattr(self, "waters", [])) or any(p is not None and p.get_visible() for p in pops)
         self.app.enhancer.set_quiet(on)
         if not on:
@@ -13936,7 +14725,7 @@ class Window(Adw.ApplicationWindow):
         for w in getattr(self, "waters", []):
             if w is not keep:
                 w.hide()
-        for pop in (getattr(self, "quality_pop", None), self.day_pop, self.names_pop, self.song_pop):
+        for pop in (getattr(self, "quality_pop", None), self.day_pop, self.names_pop, self.song_pop, self.sky_pop):
             if pop is not None and pop is not keep:
                 pop.popdown()
 
@@ -14103,6 +14892,13 @@ class Window(Adw.ApplicationWindow):
         at = self._sky_at(x, y)
         self.weather_view.set_state(hover=at is self.weather_view)
         self.moon_view.set_state(hover=at is self.moon_view)
+        on = at is self.moon_view and not self.moon_view.off  # the mouse on the Moon: its box, gone when it leaves
+        if on != self._sky_on:
+            self._sky_on = on
+            if on:
+                self.sky_pop.get_visible() or self.sky_show()
+            else:
+                self.sky_pop.popdown()
         if (at is not None) != getattr(self, "_sky_pointing", False):
             self._sky_pointing = at is not None
             self.set_cursor_from_name("pointer" if at is not None else None)
@@ -14954,6 +15750,7 @@ class App(Adw.Application):
         for name, pop, show in (("box-song", "song_pop", lambda w: w.song_show()),
                                 ("box-day", "day_pop", lambda w: w._day_show(w.clock)),
                                 ("box-names", "names_pop", lambda w: w.names_show()),
+                                ("box-sky", "sky_pop", lambda w: w.sky_show()),
                                 ("box-quality", "quality_pop", lambda w: w.quality_pop.popup())):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", lambda *_, pop=pop, show=show: self.win and (
@@ -15121,10 +15918,42 @@ class App(Adw.Application):
         save_settings(self.settings)
         self.weather_tick()
 
+    sky = None  # the Moon and Sun box's contents (sky_parts), worked out for the weather's place
+
+    def sky_tick(self) -> None:
+        """The Moon and Sun box's contents worked out anew (in a thread) every ten minutes and for another place;
+        what's coming in the sky (the slow part: the year's eclipses) once a day."""
+        spot = weather_spot(self.settings.get("weather_place", "oprechtice"))
+        key = (spot[0], int(time.time() // 600))
+        if not self.settings.get("sky_box", True) or key == getattr(self, "_sky_key", None) or getattr(
+                self, "_sky_busy", False):
+            return
+        self._sky_busy = True
+        day = (spot[0], time.strftime("%Y%m%d"))
+        events = self._sky_events[1] if getattr(self, "_sky_events", (None,))[0] == day else None
+
+        def work():
+            data = None
+            try:
+                data = sky_parts(spot[2], spot[3], spot[1], events=events)
+            except Exception as e:  # (never the app's trouble: the box says nothing then)
+                print("Rádio Beat: obloha:", repr(e), file=sys.stderr)
+            GLib.idle_add(done, data)
+
+        def done(data):
+            self._sky_busy = False
+            if data:
+                self.sky, self._sky_key, self._sky_events = data, key, (day, data["events"])
+                if self.win:
+                    self.win.sky_refresh()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
     def weather_tick(self) -> None:
         """The weather fetched anew (in a thread), then shown beside the logo; the moon (now, and its next phase)
         worked out for the same place."""
         spot = weather_spot(self.settings.get("weather_place", "oprechtice"))
+        self.sky_tick()
         if self.win:  # (off too: its faint picture under the mouse, and on again at once)
             when, nxt = moon_next(spot[2], spot[3])
             self.win.show_moon(moon_sky(spot[2], spot[3]), nxt, when)
