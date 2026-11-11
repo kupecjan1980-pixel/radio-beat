@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.33.0"
+APP_VERSION = "0.33.1"
 
 import collections
 import ctypes
@@ -11222,6 +11222,22 @@ def _sky_span(sec: float) -> str:
 
 
 MOON_MAIN = ("Nov", "První čtvrť", "Úplněk", "Poslední čtvrť")
+# a photo for each kind of thing in the sky (Wikimedia Commons, by file name; shown and AI-enhanced like the others)
+SKY_PICS = {"sun_annular": 'Annular eclipse "ring of fire".jpg', "sun_total": "Solar eclipse 1999 4.jpg",
+            "sun_hybrid": "Solar eclipse 1999 4.jpg",
+            "sun_partial": "Partial Solar Eclipse from Prishtina - 25 October 2022.jpg",
+            "moon_total": "Lunar eclipse 04-15-2014 by R Jay GaBany.jpg",
+            "moon_partial": "Lunar eclipse of 2017 August 7 Kuwait.jpg",
+            "moon_penumbral": "Lunar eclipse of 2017 August 7 Kuwait.jpg",
+            "meteors": "2016 Meteor.jpg", "summer": "Stonehenge, sunrise June 21 2019.jpg",
+            "winter": "Milwaukee December 2025 04 (sunrise on winter solstice).jpg"}
+
+
+def sky_pic(kind: str) -> str:
+    """Where the photo for a kind of sky event is ('' when there's none)."""
+    name = SKY_PICS.get(kind)
+    return ("https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote(name) + "?width=1200"
+            if name else "")
 
 
 def _eclipse_text(e: dict, now: float, lat: float, lon: float) -> str:
@@ -11273,14 +11289,14 @@ def _eclipse_text(e: dict, now: float, lat: float, lon: float) -> str:
 
 
 def sky_events(now: float, lat: float, lon: float) -> list:
-    """What's coming in the sky, as paragraphs (Pango markup): this month's, or when that's few, the next ones
-    of the year ahead, eclipses always among them."""
+    """What's coming in the sky: [(paragraph of Pango markup, kind for its photo: SKY_PICS)], this month's, or
+    when that's few, the next ones of the year ahead, eclipses always among them."""
     end = now + 366 * 86400
     ev = []
     for e in sky_eclipses(now, end, lat, lon):
         if e["what"] == "moon" and e["kind"] == "penumbral" and e["mag"] < 0.6:
             continue  # (too faint to notice)
-        ev.append((e["when"], True, _eclipse_text(e, now, lat, lon)))
+        ev.append((e["when"], True, _eclipse_text(e, now, lat, lon), f"{e['what']}_{e['kind']}"))
     T0 = _sky_T(now)
 
     def lon_2000(t):  # (the showers keep their places among the stars, not from the drifting spring point)
@@ -11292,24 +11308,24 @@ def sky_events(now: float, lat: float, lon: float) -> list:
             moon = ("Měsíc skoro neruší" if lit < 0.3 else "Měsíc trochu ruší" if lit < 0.65 else "ruší jasný Měsíc")
             ev.append((when, False, f"<b>Meteorický roj {name}, {_sky_date(when, now)}.</b> V noci kolem maxima "
                                     f"za tmavé oblohy až {most} meteorů za hodinu; {moon} (osvětlen z "
-                                    f"{round(lit * 100)} %)."))
+                                    f"{round(lit * 100)} %).", "meteors"))
     for goal, name, what in SKY_SEASONS:
         when = _sky_reach(lambda t: sun_pos(t)[0], float(goal), now, 86400.0, 368 * 86400.0)
         if when:
             ev.append((when, False, f"<b>{name}, {_sky_date(when, now)} {_sky_at(when)}.</b> "
-                                    f"{what[0].upper()}{what[1:]}."))
+                                    f"{what[0].upper()}{what[1:]}.", {90: "summer", 270: "winter"}.get(goal, "")))
     for when, which, dist in moon_phases(now, 52):
         if which == 2 and dist < 361000:
             ev.append((when, False, f"<b>Superúplněk, {_sky_date(when, now)} {_sky_at(when)}.</b> Měsíc v úplňku "
-                                    f"blízko Země ({_sky_km(dist)}): o něco větší a jasnější než obvykle."))
+                                    f"blízko Země ({_sky_km(dist)}): o něco větší a jasnější než obvykle.", ""))
     ev.sort(key=lambda x: x[0])
     ln = time.localtime(now)
     month = [x for x in ev if (time.localtime(x[0]).tm_year, time.localtime(x[0]).tm_mon) == (ln.tm_year, ln.tm_mon)]
     if len(month) >= 4:
-        return [x[2] for x in month[:8]]
+        return [x[2:] for x in month[:8]]
     pick = ev[:6]
     pick += [x for x in ev[6:] if x[1]]  # (every eclipse of the year ahead: there are few)
-    return [x[2] for x in sorted(pick[:10], key=lambda x: x[0])]
+    return [x[2:] for x in sorted(pick[:10], key=lambda x: x[0])]
 
 
 def sky_parts(lat: float, lon: float, place: str, now: float = None, events: list = None) -> dict:
@@ -12658,6 +12674,14 @@ class OpenProfile:
                     node = s.to_node()
                     if node is not None:
                         node.write_to_file(f"{flag}-{name}.node")
+                    rows = getattr(widget, name.replace("_pop", "_list"), None)
+                    if rows is not None:  # (all that's written in it, past what shows too)
+                        s = Gtk.Snapshot()
+                        s.scale(k, k)
+                        Gtk.Box.do_snapshot(rows, s)
+                        node = s.to_node()
+                        if node is not None:
+                            node.write_to_file(f"{flag}-{name}-list.node")
                         print("Otevření: uloženo", f"{flag}-{name}.node", kid.get_width(), kid.get_height(),
                               "stejné hodiny snímků" if pop.get_frame_clock() is widget.get_frame_clock() else
                               "vlastní hodiny snímků", file=sys.stderr)
@@ -13398,10 +13422,10 @@ class Window(Adw.ApplicationWindow):
         self.moon_row.connect("notify::active", lambda r, _: self.app.set_weather(moon=r.get_active()))
         group.add(self.moon_row)
         sky_box = Adw.SwitchRow(title="Okno o Měsíci a Slunci", subtitle_lines=0,
-                                subtitle="Najetím myší na Měsíc, a samo každou hodinu v :10 na půl minuty (delší "
-                                         "po 10 s na stránku): Měsíc dnes a v příštích dnech, jeho fáze, východ, "
+                                subtitle="Najetím myší na Měsíc, a samo každou hodinu v :10, každá stránka na "
+                                         "20 s: Měsíc dnes a v příštích dnech, jeho fáze, východ, "
                                          "západ a znamení, totéž o Slunci, a co se chystá na obloze (zatmění, "
-                                         "meteorické roje, slunovraty) pro vybrané místo")
+                                         "meteorické roje, slunovraty; s fotkami) pro vybrané místo")
         sky_box.set_active(self.app.settings.get("sky_box", True))
         sky_box.connect("notify::active", lambda r, _: (self.app.set_look(sky_box=r.get_active()),
                                                         r.get_active() or self.sky_pop.popdown()))
@@ -13939,8 +13963,8 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
         GLib.idle_add(self._day_true, area, self.song_pop)
 
-    SKY_AUTO = (10, 30, 10)  # the Moon and Sun box by itself once an hour: at :10 (away from :00, :20, :30 and
-    # :45), for 30 s or, when it has more pages than three, 10 s a page
+    SKY_AUTO = (10, 30, 20)  # the Moon and Sun box by itself once an hour: at :10 (away from :00, :20, :30 and
+    # :45), each page for 20 s (the user: 10 s was too short to read one), 30 s at least
 
     def sky_refresh(self) -> None:
         if self.sky_pop.get_visible():
@@ -13957,6 +13981,8 @@ class Window(Adw.ApplicationWindow):
         self._sky_filled = (filled, data)
         while (c := box.get_first_child()) is not None:
             box.remove(c)
+        self._sky_pics = []  # (picture widget, its photo's address)
+        px = round(TEXT_PT["pic"] * 1.5 * max(1.0, self._scale))
         attrs = Pango.AttrList()
         attrs.insert(Pango.attr_scale_new(f))
         head = Gtk.Label(label=GLib.markup_escape_text("Měsíc a Slunce · " + data.get("place", "")), use_markup=True,
@@ -13973,8 +13999,31 @@ class Window(Adw.ApplicationWindow):
             box.append(h)
             if i == 0 and data.get("strip"):
                 box.append(MoonStrip(data["strip"], f * max(1.0, self._scale)))
-            for text in paras:  # (already markup: only <b>, the rest plain words and numbers)
-                box.append(Gtk.Label(label=text, use_markup=True, xalign=0, wrap=True, attributes=attrs))
+            for para in paras:  # (already markup: only <b>, the rest plain words and numbers)
+                text, kind = para if isinstance(para, tuple) else (para, "")
+                lab = Gtk.Label(label=text, use_markup=True, xalign=0, wrap=True, attributes=attrs)
+                url = sky_pic(kind)
+                if not url:
+                    box.append(lab)
+                    continue
+                # an eclipse, a shower, a solstice: its photo beside it (AI-enhanced like the others' photos)
+                a.want_name_pic(url)
+                row = Gtk.Box(spacing=14)
+                pic = SquarePic(px, 10 * max(1.0, self._scale), valign=Gtk.Align.START)
+                pic.set_paintable(a.show_pics.get(url))
+                self._sky_pics.append((pic, url))
+                row.append(pic)
+                lab.set_hexpand(True)
+                lab.set_valign(Gtk.Align.CENTER)
+                row.append(lab)
+                box.append(row)
+
+    def sky_pics(self) -> None:
+        """The photos as they come (and come back AI-enhanced)."""
+        for pic, url in getattr(self, "_sky_pics", ()):
+            tex = self.app.show_pics.get(url)
+            if tex is not None and pic.get_paintable() is not tex:
+                pic.set_paintable(tex)
 
     def sky_show(self) -> None:
         """Over the cover like the day's box; not over an open menu, and not when it's switched off."""
@@ -13991,6 +14040,7 @@ class Window(Adw.ApplicationWindow):
             self._day_fill()
             self._day_fit(round(area[2]), round(area[3]))
         self._sky_fill()
+        self.sky_pics()
         glass = self.sky_pop.get_child()
         x, y, w, h = (round(v) for v in area)
         glass.set_size_request(w, h)
@@ -14014,7 +14064,7 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(self._day_true, area, self.sky_pop)
 
     def _sky_auto(self) -> None:
-        """Once an hour by itself: for 30 s, or 10 s for each of its pages when that's longer; not over a menu,
+        """Once an hour by itself: 20 s for each of its pages, 30 s at least; not over a menu,
         a panel's tour or another box, and not while there's nothing worked out to show."""
         if not hasattr(self, "quality_pop") or not hasattr(self, "_tour"):
             return
@@ -15944,6 +15994,8 @@ class App(Adw.Application):
             self._sky_busy = False
             if data:
                 self.sky, self._sky_key, self._sky_events = data, key, (day, data["events"])
+                for _text, kind in data["events"]:  # (their photos ready, and enhanced, before the box opens)
+                    self.want_name_pic(sky_pic(kind))
                 if self.win:
                     self.win.sky_refresh()
             return False
@@ -16814,6 +16866,8 @@ class App(Adw.Application):
             self.win.puddle_pics()
         if self.win and self.win.names_pop.get_visible():
             self.win.names_pics()
+        if self.win and self.win.sky_pop.get_visible():
+            self.win.sky_pics()
         return False
 
     def _enhance_small(self, url: str, data: bytes) -> None:
@@ -16843,6 +16897,8 @@ class App(Adw.Application):
                 self.win.puddle_pics()
             if self.win and self.win.names_pop.get_visible():  # (the name day's famous people too)
                 self.win.names_pics()
+            if self.win and self.win.sky_pop.get_visible():
+                self.win.sky_pics()
         self.enhancer.request(f"pic:{url}", url, data, (w, h), size, done, screen=px, first=True)
 
     def enhance_small_full(self) -> None:
