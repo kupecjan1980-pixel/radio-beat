@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.32.2"
+APP_VERSION = "0.32.3"
 
 import collections
 import ctypes
@@ -5706,14 +5706,17 @@ def draw_layers(s, layers, ref, skip=()) -> None:
         draw(w, paint)
 
 
+SIG_STATS = [0, 0.0, 0, 0.0]  # looks for changes: how many, s in all, things looked at, the longest lately (s)
+
+
 def widget_sig(w, out: list) -> None:
     """What `w` and what's in it show, into `out`: compared before the glass pictures the window anew (a
     picture of it is ~12 ms; asked for whenever anything seems changed, even when nothing visible did). Its
     place, size, state, text and value; this app's own widgets' public state too (the clock's colon, blinking,
     left out: SIG_SKIP)."""
-    if not w.get_visible():
-        out.append(None)
-        return
+    if not w.get_visible() or getattr(w, "reveal", 1.0) <= 0:
+        out.append(None)  # (a closed panel stays on the window, flowed shut: nothing of it shows; its hundreds of
+        return  # rows made each look 23 ms, a frame and a half, three times a second under an open box)
     par = w.get_parent()
     ok, b = w.compute_bounds(par) if par is not None else (False, None)
     out += [type(w), w.get_mapped(), w.get_opacity(), int(w.get_state_flags()), tuple(w.get_css_classes()),
@@ -6884,8 +6887,14 @@ class GlassCard(Gtk.Box):
     def _layers_sig(self) -> tuple:
         win = getattr(self, "win", None)
         out = [win.get_width(), win.get_height()] if win is not None else []
+        t0 = time.perf_counter()
         for wdg in self._live_layers():
             widget_sig(wdg, out)
+        took = time.perf_counter() - t0
+        SIG_STATS[0] += 1
+        SIG_STATS[1] += took
+        SIG_STATS[2] += len(out)
+        SIG_STATS[3] = max(SIG_STATS[3] * 0.9, took)
         return tuple(out)
 
     def _what_behind(self) -> tuple:
@@ -10721,6 +10730,15 @@ class WeatherView(Gtk.Widget):
         self.queue_draw()
 
     def do_snapshot(self, snap) -> None:
+        # Kept as a picture while nothing of it changes: its small drawings (the sky, the moon) are made on the
+        # processor, and the renderer made them again for every frame of the falling motifs: with the Moon's
+        # phases beside the button 3 of the 4 ms the whole window took a frame.
+        info = getattr(self, "info", None) or {}
+        key = (self.room, self.off, self.hover, id(self.parts), getattr(self, "sy", 1.0),
+               repr(info.get("sky")), repr(info.get("moon")))
+        baked(self, snap, key, self._draw, hold=self.parts)
+
+    def _draw(self, snap) -> None:
         w, h = self.room
         if self.off:
             if self.hover and h >= 12:
@@ -10834,6 +10852,11 @@ class MoonView(Gtk.Widget):
         return h * (0.88 * 2 + 0.75 + 0.2)
 
     def do_snapshot(self, snap) -> None:
+        # (a picture while it's the same: see WeatherView)
+        baked(self, snap, (self.room, self.off, self.hover, repr(self.now), repr(self.next),
+                           time.strftime("%-d. %-m.", time.localtime(self.when))), self._draw)
+
+    def _draw(self, snap) -> None:
         w, h = self.room
         if not (self.now and self.next) or w < 20 or h < 10:
             return
@@ -11853,8 +11876,9 @@ class OpenProfile:
         gpu_load: list = []
         up0 = (GPU.stats["uploads"], GPU.stats["upload_bytes"])
         # each phase's handler here runs after GTK's own: the time since the phase before is that phase's work
-        phase = {"layout": 0.0, "paint": 0.0, "wait": 0.0, "n": 0}
-        stamp = {"at": None, "done": None}
+        phase = {"layout": 0.0, "paint": 0.0, "wait": 0.0, "n": 0, "paint_cpu": 0.0}
+        stamp = {"at": None, "done": None, "cpu": None}
+        sig0 = (SIG_STATS[0], SIG_STATS[1], SIG_STATS[2])
         clock = widget.get_frame_clock()
 
         def begun(_c):
@@ -11864,6 +11888,7 @@ class OpenProfile:
 
         def updated(_c):
             stamp["at"] = time.perf_counter()
+            stamp["cpu"] = time.thread_time()
 
         def laid(_c):
             now = time.perf_counter()
@@ -11876,6 +11901,8 @@ class OpenProfile:
             if stamp["at"] is not None:
                 phase["paint"] += now - stamp["at"]
                 phase["n"] += 1
+                if stamp["cpu"] is not None:
+                    phase["paint_cpu"] += time.thread_time() - stamp["cpu"]
             stamp["done"] = now
         hooks = [clock.connect(sig, fn) for sig, fn in (("before-paint", begun), ("update", updated), ("layout", laid),
                                                         ("paint", painted))] if clock else []
@@ -11943,7 +11970,10 @@ class OpenProfile:
                   + (f"; GPU {sum(gpu_load) / len(gpu_load):.0f} % (nejvíc {max(gpu_load)} %)" if gpu_load else "")
                   + f"; obrázků do GPU {ups} ({mb:.0f} MB)"
                   + (f"; snímek: rozvržení {1000 * phase['layout'] / n_f:.0f} ms, kreslení {1000 * phase['paint'] / n_f:.0f}"
-                     f" ms, čekání {1000 * phase['wait'] / n_f:.0f} ms" if (n_f := phase["n"]) else "")
+                     f" (z toho procesor {1000 * phase['paint_cpu'] / n_f:.0f}) ms, čekání {1000 * phase['wait'] / n_f:.0f} ms"
+                     if (n_f := phase["n"]) else "")
+                  + f"; hlídání změn {SIG_STATS[0] - sig0[0]}× {1000 * (SIG_STATS[1] - sig0[1]):.0f} ms"
+                    f" (nejdelší {1000 * SIG_STATS[3]:.0f} ms, {SIG_STATS[2] - sig0[2]} prvků)"
                   + (f"; CPU hlavního vlákna {100 * (cpu1 - cpu0) / (os.sysconf('SC_CLK_TCK') * self.SECONDS):.0f} %"
                      if cpu0 is not None and (cpu1 := cpu_ticks()) is not None else "")
                   + f"; Python {100 * sum(n for k, n in samples.items() if k != 'GTK') / total:.0f} % času: "
@@ -11967,6 +11997,19 @@ class OpenProfile:
             Gtk.WidgetPaintable.new(content).snapshot(s, content.get_width(), content.get_height())
             s.to_node().write_to_file(flag + ".node")
             print("Otevření: uloženo", flag + ".node", file=sys.stderr)
+            for name in ("day_pop", "names_pop", "song_pop", "quality_pop"):  # a box open just now: what it draws
+                pop = getattr(widget, name, None)
+                kid = pop.get_child() if pop is not None and pop.get_mapped() else None
+                if kid is not None:
+                    s = Gtk.Snapshot()
+                    s.scale(k, k)
+                    type(kid).do_snapshot(kid, s)
+                    node = s.to_node()
+                    if node is not None:
+                        node.write_to_file(f"{flag}-{name}.node")
+                        print("Otevření: uloženo", f"{flag}-{name}.node", kid.get_width(), kid.get_height(),
+                              "stejné hodiny snímků" if pop.get_frame_clock() is widget.get_frame_clock() else
+                              "vlastní hodiny snímků", file=sys.stderr)
         return False
 
 
@@ -14905,6 +14948,16 @@ class App(Adw.Application):
         for name, which in (("info", "info_water"), ("settings", "gear_water")):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", lambda *_, which=which: self.win and self.win.toggle_water(getattr(self.win, which)))
+            self.add_action(act)
+        # for measuring how smoothly they open without a mouse on them (gdbus … Activate box-song): shown, and
+        # put away by the same call
+        for name, pop, show in (("box-song", "song_pop", lambda w: w.song_show()),
+                                ("box-day", "day_pop", lambda w: w._day_show(w.clock)),
+                                ("box-names", "names_pop", lambda w: w.names_show()),
+                                ("box-quality", "quality_pop", lambda w: w.quality_pop.popup())):
+            act = Gio.SimpleAction.new(name, None)
+            act.connect("activate", lambda *_, pop=pop, show=show: self.win and (
+                getattr(self.win, pop).popdown() if getattr(self.win, pop).get_visible() else show(self.win)))
             self.add_action(act)
         self.set_accels_for_action("app.info", ["i"])
         self.set_accels_for_action("app.settings", ["g"])
