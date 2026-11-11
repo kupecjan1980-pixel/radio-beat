@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.33.1"
+APP_VERSION = "0.33.2"
 
 import collections
 import ctypes
@@ -11228,14 +11228,29 @@ SKY_PICS = {"sun_annular": 'Annular eclipse "ring of fire".jpg', "sun_total": "S
             "sun_partial": "Partial Solar Eclipse from Prishtina - 25 October 2022.jpg",
             "moon_total": "Lunar eclipse 04-15-2014 by R Jay GaBany.jpg",
             "moon_partial": "Lunar eclipse of 2017 August 7 Kuwait.jpg",
-            "moon_penumbral": "Lunar eclipse of 2017 August 7 Kuwait.jpg",
-            "meteors": "2016 Meteor.jpg", "summer": "Stonehenge, sunrise June 21 2019.jpg",
+            "moon_penumbral": "Penumbral lunar eclipse (Strawberry Moon) on June 6, 2020.jpg",
+            # each shower its own photo (the user: not the same one every time)
+            "meteors": "2016 Meteor.jpg",
+            "meteors:Kvadrantidy": "QUADRANTID meteor on January 3 2009.jpg",
+            "meteors:Lyridy": "02-Lyrid Meteor Shower 2022-nX-1.jpg",
+            "meteors:Eta Akvaridy": "Eta Aquarid Meteor at Dawn - Flickr - ikewinski.jpg",
+            "meteors:Perseidy": "In the photo there is one Perseid, Milky Way and Andromega galaxy and light "
+                                "pollution on the horizon - Luhasoo bog in Estonia.jpg",
+            "meteors:Orionidy": "Two orionids and milky way.jpg",
+            "meteors:Leonidy": "Leonids Shishizaryuuseigun2 2001 11 19.jpg",
+            "meteors:Geminidy": "Geminid meteor shower.jpg",
+            "meteors:Ursidy": "Ursids meteor shower over a saguaro in Arizona, US.jpg",
+            # (the Moon beside office towers: they're there to show its size, the user)
+            "supermoon": "Super moon over City of London from Tate Modern 2018-01-31 6.jpg",
+            "spring": "Equinox at Angkor 21st March 2012.JPG", "autumn": "Chichen-Itza-Serpent-Effect.jpg",
+            "summer": "Stonehenge, sunrise June 21 2019.jpg",
             "winter": "Milwaukee December 2025 04 (sunrise on winter solstice).jpg"}
+SKY_PIC_SIDE = {"supermoon": 0.0}  # which part of a wide photo its square shows: 0 the left (the Moon), 0.5 the middle
 
 
 def sky_pic(kind: str) -> str:
     """Where the photo for a kind of sky event is ('' when there's none)."""
-    name = SKY_PICS.get(kind)
+    name = SKY_PICS.get(kind) or SKY_PICS.get(kind.split(":")[0])
     return ("https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote(name) + "?width=1200"
             if name else "")
 
@@ -11308,16 +11323,16 @@ def sky_events(now: float, lat: float, lon: float) -> list:
             moon = ("Měsíc skoro neruší" if lit < 0.3 else "Měsíc trochu ruší" if lit < 0.65 else "ruší jasný Měsíc")
             ev.append((when, False, f"<b>Meteorický roj {name}, {_sky_date(when, now)}.</b> V noci kolem maxima "
                                     f"za tmavé oblohy až {most} meteorů za hodinu; {moon} (osvětlen z "
-                                    f"{round(lit * 100)} %).", "meteors"))
+                                    f"{round(lit * 100)} %).", f"meteors:{name}"))
     for goal, name, what in SKY_SEASONS:
         when = _sky_reach(lambda t: sun_pos(t)[0], float(goal), now, 86400.0, 368 * 86400.0)
         if when:
             ev.append((when, False, f"<b>{name}, {_sky_date(when, now)} {_sky_at(when)}.</b> "
-                                    f"{what[0].upper()}{what[1:]}.", {90: "summer", 270: "winter"}.get(goal, "")))
+                                    f"{what[0].upper()}{what[1:]}.", {0: "spring", 90: "summer", 180: "autumn", 270: "winter"}[goal]))
     for when, which, dist in moon_phases(now, 52):
         if which == 2 and dist < 361000:
             ev.append((when, False, f"<b>Superúplněk, {_sky_date(when, now)} {_sky_at(when)}.</b> Měsíc v úplňku "
-                                    f"blízko Země ({_sky_km(dist)}): o něco větší a jasnější než obvykle.", ""))
+                                    f"blízko Země ({_sky_km(dist)}): o něco větší a jasnější než obvykle.", "supermoon"))
     ev.sort(key=lambda x: x[0])
     ln = time.localtime(now)
     month = [x for x in ev if (time.localtime(x[0]).tm_year, time.localtime(x[0]).tm_mon) == (ln.tm_year, ln.tm_mon)]
@@ -11640,6 +11655,7 @@ class SquarePic(Gtk.Widget):
     def __init__(self, px: int, radius: float = 10.0, **kw):
         super().__init__(**kw)
         self.px, self.radius, self.tex = px, radius, None
+        self.side = 0.5  # which part of a wide photo shows: 0 its left, 0.5 its middle, 1 its right
 
     def set_paintable(self, tex) -> None:
         if tex is not self.tex:
@@ -11770,7 +11786,7 @@ class SquarePic(Gtk.Widget):
         # a tall picture (a standing figure, a painted full-length portrait) keeps its top, where the face is, and
         # loses the legs: the taller, the nearer the top (a third taller than wide and on: right from the top)
         up = max(0.0, 0.5 - (h / max(1, w) - 1.0) * 1.5)
-        snap.append_texture(self.tex, Graphene.Rect().init((px - w * k) / 2, (px - h * k) * up, w * k, h * k))
+        snap.append_texture(self.tex, Graphene.Rect().init((px - w * k) * self.side, (px - h * k) * up, w * k, h * k))
         snap.pop()
 
 
@@ -13985,16 +14001,12 @@ class Window(Adw.ApplicationWindow):
         px = round(TEXT_PT["pic"] * 1.5 * max(1.0, self._scale))
         attrs = Pango.AttrList()
         attrs.insert(Pango.attr_scale_new(f))
-        head = Gtk.Label(label=GLib.markup_escape_text("Měsíc a Slunce · " + data.get("place", "")), use_markup=True,
-                         halign=Gtk.Align.START, attributes=attrs)
-        head.add_css_class("day-head")
-        box.append(head)
         if not data:
             box.append(Gtk.Label(label="Počítá se…", xalign=0, attributes=attrs))
             return
-        for i, (name, paras) in enumerate(data["parts"]):
+        for i, (name, paras) in enumerate(data["parts"]):  # (no headline of the box's own: the user took it out)
             h = Gtk.Label(label=GLib.markup_escape_text(name), use_markup=True, halign=Gtk.Align.START,
-                          attributes=attrs, margin_top=6)
+                          attributes=attrs, margin_top=6 if i else 0)
             h.add_css_class("day-head")
             box.append(h)
             if i == 0 and data.get("strip"):
@@ -14010,6 +14022,7 @@ class Window(Adw.ApplicationWindow):
                 a.want_name_pic(url)
                 row = Gtk.Box(spacing=14)
                 pic = SquarePic(px, 10 * max(1.0, self._scale), valign=Gtk.Align.START)
+                pic.side = SKY_PIC_SIDE.get(kind, 0.5)
                 pic.set_paintable(a.show_pics.get(url))
                 self._sky_pics.append((pic, url))
                 row.append(pic)
