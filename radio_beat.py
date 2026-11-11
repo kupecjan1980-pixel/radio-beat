@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.33.3"
+APP_VERSION = "0.33.4"
 
 import collections
 import ctypes
@@ -11241,8 +11241,13 @@ SKY_PICS = {"sun_annular": 'Annular eclipse "ring of fire".jpg', "sun_total": "2
             "meteors:Leonidy": "Leonid meteor (50627764111).jpg",
             "meteors:Geminidy": "Geminid meteor shower.jpg",
             "meteors:Ursidy": "Ursids meteor shower over a saguaro in Arizona, US.jpg",
-            # (a big Moon over a city's skyline, the user: the buildings show its size)
-            "supermoon": "DC Skyline in Full Moon.jpg",
+            # A big Moon over a city's skyline at night (the user: as in the TV show Moonlighting; the buildings
+            # show its size), another one each time: by the month's count, so two in a row differ.
+            "supermoon": ("DC Skyline in Full Moon.jpg", "Cleveland Supermoon (22793801378).jpg",
+                          "Moon Over Met Life Tower (51684206383).jpg", "Cleveland Supermoon (30671014010).jpg",
+                          "Full Moon Over Union Square (32003444404).jpg",
+                          "Melbourne skyline with full moon rising (24010510461).jpg",
+                          "Cleveland Supermoon (30884281051).jpg"),
             "sun_day": "Malapascua Island, Ethereal sunset over Visayan Sea, Philippines.jpg",  # (the Sun's day)
             "spring": "Equinox at Angkor 21st March 2012.JPG", "autumn": "Chichen-Itza-Serpent-Effect.jpg",
             "summer": "Stonehenge, sunrise June 21 2019.jpg",
@@ -11253,6 +11258,9 @@ SKY_PIC_SIDE: dict = {}  # which part of a wide photo its square shows: 0 the le
 def sky_pic(kind: str) -> str:
     """Where the photo for a kind of sky event is ('' when there's none)."""
     name = SKY_PICS.get(kind) or SKY_PICS.get(kind.split(":")[0])
+    if isinstance(name, tuple):  # several to take turns: "kind:number"
+        n = kind.split(":")[1] if ":" in kind else "0"
+        name = name[int(n) % len(name)] if n.isdigit() else name[0]
     return ("https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote(name) + "?width=1200"
             if name else "")
 
@@ -11334,7 +11342,8 @@ def sky_events(now: float, lat: float, lon: float) -> list:
     for when, which, dist in moon_phases(now, 52):
         if which == 2 and dist < 361000:
             ev.append((when, False, f"<b>Superúplněk, {_sky_date(when, now)} {_sky_at(when)}.</b> Měsíc v úplňku "
-                                    f"blízko Země ({_sky_km(dist)}): o něco větší a jasnější než obvykle.", "supermoon"))
+                                    f"blízko Země ({_sky_km(dist)}): o něco větší a jasnější než obvykle.",
+                       f"supermoon:{round(when / (29.530589 * 86400))}"))
     ev.sort(key=lambda x: x[0])
     ln = time.localtime(now)
     month = [x for x in ev if (time.localtime(x[0]).tm_year, time.localtime(x[0]).tm_mon) == (ln.tm_year, ln.tm_mon)]

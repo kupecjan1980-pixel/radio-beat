@@ -4,6 +4,7 @@
 
 ## 0.33 — Měsíc a Slunce
 
+- **0.33.4** (2026-11-11) Okno o Měsíci a Slunci: superúplněk má pokaždé jinou fotku Měsíce nad nočním městem (sedm fotek se střídá: Washington, Cleveland, New York, Melbourne), dva po sobě jdoucí nikdy stejnou
 - **0.33.3** (2026-11-11) Okno o Měsíci a Slunci: část „Slunce dnes“ má fotku západu slunce; superúplněk velký Měsíc nad panoramatem města (Washington); všechny fotky jsou obyčejné fotografie úkazu, žádné koláže ani snímky z přístrojů (vyměněno částečné a úplné zatmění Slunce, polostínové zatmění Měsíce, Leonidy)
 - **0.33.2** (2026-11-11) Okno o Měsíci a Slunci: bez nadpisu „Měsíc a Slunce · místo“; každý meteorický roj má svou fotku (Kvadrantidy, Lyridy, Eta Akvaridy, Perseidy, Orionidy, Leonidy, Geminidy, Ursidy), superúplněk fotku Měsíce vedle výškových budov (pro srovnání velikosti), polostínové zatmění vlastní fotku a rovnodennosti také (Angkor, Chichén Itzá): fotku má každý úkaz
 - **0.33.1** (2026-11-11) Okno o Měsíci a Slunci: každá stránka zůstane 20 s (bylo 10 s; samo se ukáže na tolik, kolik má stránek, nejméně 30 s); úkazy mají vedle sebe fotku (prstencové, úplné a částečné zatmění Slunce, úplné a částečné zatmění Měsíce, meteorický roj, letní a zimní slunovrat; z Wikimedia Commons), staženou předem, uloženou na disk a vylepšenou AI jako ostatní fotky
