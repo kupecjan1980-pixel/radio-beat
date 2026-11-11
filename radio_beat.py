@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.33.2"
+APP_VERSION = "0.33.3"
 
 import collections
 import ctypes
@@ -11222,13 +11222,14 @@ def _sky_span(sec: float) -> str:
 
 
 MOON_MAIN = ("Nov", "První čtvrť", "Úplněk", "Poslední čtvrť")
-# a photo for each kind of thing in the sky (Wikimedia Commons, by file name; shown and AI-enhanced like the others)
-SKY_PICS = {"sun_annular": 'Annular eclipse "ring of fire".jpg', "sun_total": "Solar eclipse 1999 4.jpg",
-            "sun_hybrid": "Solar eclipse 1999 4.jpg",
-            "sun_partial": "Partial Solar Eclipse from Prishtina - 25 October 2022.jpg",
+# a photo for each kind of thing in the sky (Wikimedia Commons, by file name; shown and AI-enhanced like the others).
+# Always a plain photograph of it (the user): no collage of several shots, no annotated or instrument picture.
+SKY_PICS = {"sun_annular": 'Annular eclipse "ring of fire".jpg', "sun_total": "2024 Total Solar Eclipse Corona.jpg",
+            "sun_hybrid": "2024 Total Solar Eclipse Corona.jpg",
+            "sun_partial": "Partial solar eclipse through clouds in Tuntorp 10.jpg",
             "moon_total": "Lunar eclipse 04-15-2014 by R Jay GaBany.jpg",
             "moon_partial": "Lunar eclipse of 2017 August 7 Kuwait.jpg",
-            "moon_penumbral": "Penumbral lunar eclipse (Strawberry Moon) on June 6, 2020.jpg",
+            "moon_penumbral": "2019-01-20-Penumbral lunar eclipse.jpg",
             # each shower its own photo (the user: not the same one every time)
             "meteors": "2016 Meteor.jpg",
             "meteors:Kvadrantidy": "QUADRANTID meteor on January 3 2009.jpg",
@@ -11237,15 +11238,16 @@ SKY_PICS = {"sun_annular": 'Annular eclipse "ring of fire".jpg', "sun_total": "S
             "meteors:Perseidy": "In the photo there is one Perseid, Milky Way and Andromega galaxy and light "
                                 "pollution on the horizon - Luhasoo bog in Estonia.jpg",
             "meteors:Orionidy": "Two orionids and milky way.jpg",
-            "meteors:Leonidy": "Leonids Shishizaryuuseigun2 2001 11 19.jpg",
+            "meteors:Leonidy": "Leonid meteor (50627764111).jpg",
             "meteors:Geminidy": "Geminid meteor shower.jpg",
             "meteors:Ursidy": "Ursids meteor shower over a saguaro in Arizona, US.jpg",
-            # (the Moon beside office towers: they're there to show its size, the user)
-            "supermoon": "Super moon over City of London from Tate Modern 2018-01-31 6.jpg",
+            # (a big Moon over a city's skyline, the user: the buildings show its size)
+            "supermoon": "DC Skyline in Full Moon.jpg",
+            "sun_day": "Malapascua Island, Ethereal sunset over Visayan Sea, Philippines.jpg",  # (the Sun's day)
             "spring": "Equinox at Angkor 21st March 2012.JPG", "autumn": "Chichen-Itza-Serpent-Effect.jpg",
             "summer": "Stonehenge, sunrise June 21 2019.jpg",
             "winter": "Milwaukee December 2025 04 (sunrise on winter solstice).jpg"}
-SKY_PIC_SIDE = {"supermoon": 0.0}  # which part of a wide photo its square shows: 0 the left (the Moon), 0.5 the middle
+SKY_PIC_SIDE: dict = {}  # which part of a wide photo its square shows: 0 the left (the Moon), 0.5 the middle
 
 
 def sky_pic(kind: str) -> str:
@@ -14011,6 +14013,20 @@ class Window(Adw.ApplicationWindow):
             box.append(h)
             if i == 0 and data.get("strip"):
                 box.append(MoonStrip(data["strip"], f * max(1.0, self._scale)))
+            if name == "Slunce dnes" and sky_pic("sun_day"):  # the Sun's day beside a sunset's photo
+                url = sky_pic("sun_day")
+                a.want_name_pic(url)
+                row = Gtk.Box(spacing=14)
+                pic = SquarePic(px, 10 * max(1.0, self._scale), valign=Gtk.Align.START)
+                pic.set_paintable(a.show_pics.get(url))
+                self._sky_pics.append((pic, url))
+                row.append(pic)
+                lines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, hexpand=True)
+                for text in paras:
+                    lines.append(Gtk.Label(label=text, use_markup=True, xalign=0, wrap=True, attributes=attrs))
+                row.append(lines)
+                box.append(row)
+                continue
             for para in paras:  # (already markup: only <b>, the rest plain words and numbers)
                 text, kind = para if isinstance(para, tuple) else (para, "")
                 lab = Gtk.Label(label=text, use_markup=True, xalign=0, wrap=True, attributes=attrs)
@@ -16007,8 +16023,8 @@ class App(Adw.Application):
             self._sky_busy = False
             if data:
                 self.sky, self._sky_key, self._sky_events = data, key, (day, data["events"])
-                for _text, kind in data["events"]:  # (their photos ready, and enhanced, before the box opens)
-                    self.want_name_pic(sky_pic(kind))
+                for kind in ["sun_day"] + [k for _text, k in data["events"]]:  # (their photos ready, and
+                    self.want_name_pic(sky_pic(kind))  # enhanced, before the box opens)
                 if self.win:
                     self.win.sky_refresh()
             return False
