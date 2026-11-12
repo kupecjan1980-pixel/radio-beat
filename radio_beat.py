@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.34.0"
+APP_VERSION = "0.34.1"
 
 import collections
 import ctypes
@@ -7788,6 +7788,12 @@ try:
         DAYS_CZ = json.load(_f)
 except (OSError, ValueError):
     DAYS_CZ = {}
+# who a day's maker is when it's a company or a body of producers (what it does, who founded it, whose it is now,
+# its sales): maker as written in the calendar -> a sentence
+DAY_MAKERS = DAYS_CZ.pop("_makers", {})
+# (a day's "declared by" that tells what it goes back to, not who declared it: said as it is)
+DAY_REASON = re.compile(r"(na |z |ze |podle |prý |tradice|svátek|Svátek|výročí|narozeniny|irská|japonský státní|"
+                        r"vznikl|věnováno|vyhlášen|spontánně|fanoušci)")
 
 
 # How much a special day matters here, for which one the date shows (it shows one) and which give way to a
@@ -8434,11 +8440,16 @@ def day_summary() -> list:
         rows = []
         moved = d.get("moved")
         for name, by, since in days:
-            more = ", ".join(p for p in (f"vyhlásil(a) {by}" if by else "", f"od {since}" if since else "",
+            # who made it, always (the user): when nobody is known to have, that's said too
+            who = ((by if DAY_REASON.match(by) else f"vyhlásil(a) {by}") if by
+                   else "kdo ho vyhlásil, se nepodařilo dohledat" if day_weight([name, by, since]) < 5 else "")
+            more = ", ".join(p for p in (who, f"od {since}" if since else "",
                                          f"patří k {int(moved[0][3:])}. {int(moved[0][:2])}., ten den jich bylo víc"
                                          if moved else "") if p)
             rows.append("• " + (f"<b>{soon[name].capitalize()}:</b> " if name in soon else "") + esc(name)
                         + (f" <span alpha='70%'>({esc(more)})</span>" if more else ""))
+            if by in DAY_MAKERS:  # a company's day: what the company is
+                rows.append(f"   <span alpha='70%'><i>{esc(DAY_MAKERS[by][0].upper() + DAY_MAKERS[by][1:])}.</i></span>")
         out.append(("text", "\n".join(rows)))
     if EFFECTS.get("season"):  # (the season's fall every day, a special day's with them)
         season = season_today()[0]
