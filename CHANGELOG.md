@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.34 — Zvláštní dny se střídají, roky umělců
+
+- **0.34.0** (2026-11-12) Víc zvláštních dnů v jednom dni se na hodinách střídá po celou hodinu, každý stejný díl (čtyři dny: čtvrt hodiny každý), celý den; když dnes žádný není, hodiny i okno dne řeknou „Zítra bude …“ a „Pozítří bude …“. V okně o skladbě a v seznamu HRÁLO je u jména interpreta nebo kapely rok narození (založení), úmrtí (rozpadu) a věk, s křížkem u zemřelých, jako u jmenin (z Wikidat, hledá se postupně a ukládá). Všechno, co se ukazuje samo, drží stránku 20 s (okna skladby, dne, jmenin, panel ⓘ); samo ukázané okno pokračuje další stránkou tam, kde minule skončilo, otevřené myší (najetím nebo klikem) začíná odshora. Neostré fotky (malý výřez ze skupinové fotky, zvětšený: Benedikt Pintér) jdou do AI ze třetinové velikosti, kde je to, co opravdu ukazují, ostré: výsledek je čistý místo vyhlazené mlhy; pozná se to samo (fotka, která se zmenšením na třetinu a zvětšením zpět skoro nezmění)
+
 ## 0.33 — Měsíc a Slunce
 
 - **0.33.4** (2026-11-11) Okno o Měsíci a Slunci: superúplněk má pokaždé jinou fotku Měsíce nad nočním městem (sedm fotek se střídá: Washington, Cleveland, New York, Melbourne), dva po sobě jdoucí nikdy stejnou

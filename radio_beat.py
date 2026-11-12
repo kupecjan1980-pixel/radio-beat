@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.33.4"
+APP_VERSION = "0.34.0"
 
 import collections
 import ctypes
@@ -3372,6 +3372,48 @@ class Enhancer:
         if r and r[0] == kind and self.proc:
             self.proc.kill()
 
+    SOFT_PSNR = 38.5  # dB: a picture this alike to itself shrunk to a third and blown up again holds no finer
+    # detail (of 120 name-day photos three were; the median is 29)
+    _soft_known = None
+
+    def _soft(self, key: str, data: bytes) -> int:
+        """3 when the picture is soft all over (see _enhance), else 1; worked out once per picture (kept in
+        soft.json beside the enhanced ones)."""
+        path = os.path.join(UPSCALED_DIR, "soft.json")
+        if Enhancer._soft_known is None:
+            try:
+                with open(path) as f:
+                    Enhancer._soft_known = json.load(f)
+            except (OSError, ValueError):
+                Enhancer._soft_known = {}
+        known = Enhancer._soft_known
+        if key in known:
+            return known[key]
+        if not self.ffmpeg:
+            return 1
+        graph = ("[0:v]crop=iw*0.8:ih*0.8,scale=trunc(iw/6)*6:trunc(ih/6)*6,format=gray,split[a][b];"
+                 "[b]scale=iw/3:ih/3:flags=area,scale=iw*3:ih*3:flags=bicubic[c];[a][c]psnr")
+        try:
+            r = subprocess.run(["nice", "-n", "19", self.ffmpeg, "-hide_banner", "-i", "pipe:0", "-filter_complex",
+                                graph, "-frames:v", "1", "-f", "null", "-"], input=data, capture_output=True,
+                               timeout=30)
+            m = re.search(rb"average:([0-9.]+|inf)", r.stderr)
+        except (OSError, subprocess.SubprocessError):
+            m = None
+        if not m:
+            return 1  # (couldn't tell: as before, and asked again another time)
+        known[key] = 3 if m.group(1) == b"inf" or float(m.group(1)) >= self.SOFT_PSNR else 1
+        if len(known) > 20000:
+            known.clear()
+        try:
+            os.makedirs(UPSCALED_DIR, exist_ok=True)
+            with open(path + ".part", "w") as f:
+                json.dump(known, f)
+            os.replace(path + ".part", path)
+        except OSError:
+            pass
+        return known[key]
+
     def _cache_path(self, key: str, size: tuple[int, int], ai: bool | None = None) -> str:
         import hashlib
         ai = self.ai if ai is None else ai
@@ -3418,6 +3460,13 @@ class Enhancer:
         what = {"cover": "Obal", "track": "Obal", "logo": "Logo"}.get(kind, "Obrázek pořadu")
         self.model = ESR_MODEL_ART if kind in ("logo", "icon") else ESR_MODEL
         same = size == (w0, h0)  # big enough already: no upscaling
+        # A photo that's soft all over (a small face cut out of a group photo and blown up: Benedikt Pintér's)
+        # goes to the AI from a third of its size, where what it really shows is sharp: fed as it is, the AI
+        # only smoothed the blur (and one big enough wasn't given to the AI at all).
+        self.shrink = self._soft(key, data) if kind.startswith("pic:") and self.ai else 1
+        if self.shrink > 1:
+            same = False
+            key = f"{key}|soft{self.shrink}"  # (kept under a name of its own: the old soft one isn't used)
         orig = _size(len(data))
         # source, fast enhanced (the first step shown), final; when it began, how long it took in all
         self.sizes[kind] = [len(data), None, None, time.monotonic(), None]
@@ -3891,6 +3940,12 @@ class Enhancer:
             half = os.path.join(work, "half.png")
             if self._ff(["-i", src], f"scale={w0 // 2}:{h0 // 2}:flags=lanczos,format=rgb24", half):
                 feed, how = half, "překreslení" if size == src_size else "překreslení a zvětšení"
+        shrink = getattr(self, "shrink", 1)
+        if shrink > 1:  # soft all over: from a third of it (see _enhance)
+            small = os.path.join(work, "small.png")
+            if self._ff(["-i", src], f"scale={max(16, w0 // shrink)}:{max(16, h0 // shrink)}:flags=lanczos,"
+                                     f"format=rgb24", small):
+                feed, how = small, "překreslení z třetiny (neostrý zdroj)"
         big = os.path.join(work, "x4.png")
         if self.npu_ready and self._npu(feed, big, work):
             return how if self._resize(big, size, out) else None
@@ -7812,8 +7867,11 @@ def moved_days(year: int = None) -> dict:
 
 
 def day_cz(t=None) -> dict:
-    """Today's entry of the Czech calendar: {"names", "state", "days": [[name, declared by, since]]}; on a day with
-    none, a neighbour's spare one (moved_days), marked "moved": (its "MM-DD", "včera"/"zítra")."""
+    """Today's entry of the Czech calendar: {"names", "state", "days": [[name, declared by, since]]}. On a day with
+    none: tomorrow's and the day after's most important one, "soon": {name: "zítra" | "pozítří"} (the user: then
+    say what's coming); when those have none either, a neighbour's spare one (moved_days), marked "moved": (its
+    "MM-DD", "včera"/"zítra")."""
+    import datetime
     t = t or time.localtime()
     key = f"{t.tm_mon:02d}-{t.tm_mday:02d}"
     d = dict(DAYS_CZ.get(key, {}))
@@ -7822,10 +7880,20 @@ def day_cz(t=None) -> dict:
     for shift, name in ((-2, "Velký pátek"), (1, "Velikonoční pondělí")):
         if _shift(t.tm_year, e, shift) == (t.tm_mon, t.tm_mday):
             d["state"] = name
-    if not d.get("days") and not d.get("state") and key in moved_days(t.tm_year):
-        day, src, when = moved_days(t.tm_year)[key]
-        d["days"] = [list(day)]
-        d["moved"] = (src, when)
+    if not d.get("days") and not d.get("state"):
+        today = datetime.date(t.tm_year, t.tm_mon, t.tm_mday)
+        soon = {}
+        for ahead, word in ((1, "zítra"), (2, "pozítří")):
+            nxt = ranked(DAYS_CZ.get((today + datetime.timedelta(days=ahead)).strftime("%m-%d"), {}).get("days"))
+            if nxt and nxt[0][0] not in soon:
+                soon[nxt[0][0]] = word
+                d["days"].append(list(nxt[0]))
+        if soon:
+            d["soon"] = soon
+        elif key in moved_days(t.tm_year):
+            day, src, when = moved_days(t.tm_year)[key]
+            d["days"] = [list(day)]
+            d["moved"] = (src, when)
     return d
 
 
@@ -7897,6 +7965,52 @@ def namesake_years(p: dict) -> str:
     if died:
         return f"{born[:4]}–{died[:4]} († {_let(age(born, died))})"
     return f"* {born[:4]} ({_let(age(born, time.strftime('%Y-%m-%d')))})"
+
+
+ARTIST_DATES_FILE = os.path.join(os.path.dirname(NAMESAKES_FILE), "artist-dates.json")
+
+
+def artist_dates(name: str) -> dict:
+    """A musician's birth and death, or a band's founding and end, from Wikidata: {"born": "1946-09-05",
+    "died": ""} (a year alone when no more is known); {} when not found. The one of that name that MusicBrainz
+    knows as an artist (many things share a band's name: Kabát is a coat first)."""
+    api = "https://www.wikidata.org/w/api.php?format=json&"
+
+    def get(q):
+        req = urllib.request.Request(api + q, headers={"User-Agent": MB_UA})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.load(r)
+
+    def date(claims, *props):
+        for p in props:
+            for c in claims.get(p, []):
+                v = c.get("mainsnak", {}).get("datavalue", {}).get("value") or {}
+                t = v.get("time", "")
+                if t.startswith("+") and c.get("rank") != "deprecated":
+                    return t[1:11] if v.get("precision", 9) >= 11 else t[1:8] if v.get("precision") == 10 else t[1:5]
+        return ""
+    try:
+        ids = []
+        for lang in ("cs", "en"):
+            found = get(f"action=wbsearchentities&type=item&limit=8&language={lang}&uselang={lang}&search="
+                        + urllib.parse.quote(name))
+            ids += [x["id"] for x in found.get("search", []) if x["id"] not in ids]
+        if not ids:
+            return {}
+        items = get("action=wbgetentities&props=claims&ids=" + "|".join(ids[:14]))["entities"]
+        for qid in ids[:14]:
+            c = items.get(qid, {}).get("claims", {})
+            if "P434" not in c:  # (no MusicBrainz artist: not a musician or a band)
+                continue
+            human = any((v.get("mainsnak", {}).get("datavalue", {}).get("value") or {}).get("id") == "Q5"
+                        for v in c.get("P31", []))
+            born = date(c, "P569") if human else date(c, "P571", "P2031")
+            died = date(c, "P570") if human else date(c, "P576", "P2032")
+            if born:
+                return {"born": born, "died": died, "band": not human}
+    except (OSError, ValueError, KeyError):
+        return {"failed": True}  # (asked again another time)
+    return {}
 
 
 def namesake_ok(person: dict, forms) -> bool:
@@ -8173,22 +8287,36 @@ def name_day() -> str:
     return " / ".join(names).upper()
 
 
-def special_day_name() -> str:
-    """The day's name for the clock: the state holiday, else the special days the letters are dressed for,
-    else the first international day; "" on an ordinary day."""
+def special_day_names() -> list:
+    """What the clock can call the day, the most important first: the state holiday alone; else the special days
+    the letters are dressed for (one name of them all), then each of the calendar's days; on a day with none
+    "Zítra bude …" and "Pozítří bude …"; [] on an ordinary day."""
     d = day_cz()
     if d.get("state"):
-        return d["state"]
+        return [d["state"]]
     days = holidays_today()
     themed = [HOLIDAYS[h][0] for h in days if h not in HOLIDAY_PERIODS] or [HOLIDAYS[h][0] for h in days]
-    first = d["days"][0] if d.get("days") and not d.get("moved") else None
-    if first and day_weight(first) == 5 and first[0].lower() not in " · ".join(themed).lower():
-        themed = [first[0]] + themed  # (Czech tradition first: Mikuláš before Hanukkah)
-    if themed:
-        return " · ".join(themed)
-    if d.get("moved"):  # a neighbour's: said so
-        return f"{d['days'][0][0]} {d['moved'][1]}"
-    return d["days"][0][0] if d.get("days") else ""
+    soon, moved = d.get("soon") or {}, d.get("moved")
+    rest = list(d.get("days") or [])
+    if rest and not soon and not moved and day_weight(rest[0]) == 5:
+        first = rest.pop(0)[0]
+        if first.lower() not in " · ".join(themed).lower():
+            themed = [first] + themed  # (Czech tradition first: Mikuláš before Hanukkah)
+    out = [" · ".join(themed)] if themed else []
+    for day in rest:
+        name = day[0]
+        if any(name.lower() in o.lower() for o in out):
+            continue
+        out.append(f"{soon[name].capitalize()} bude {name}" if name in soon
+                   else f"{name} {moved[1]}" if moved else name)  # (a neighbour's: said so)
+    return out
+
+
+def special_day_name() -> str:
+    """The day's name for the clock now. A day with several takes turns through every hour, each the same share
+    of it (the user: four of them, a quarter of an hour each, all day long)."""
+    names = special_day_names()
+    return names[time.localtime().tm_min * len(names) // 60] if names else ""
 
 
 def balanced_rows(text: str, most: int = 20) -> list:
@@ -8301,14 +8429,16 @@ def day_summary() -> list:
             out.append(("text", "\n".join(about)))
     days = d.get("days") or []
     if days:
-        out.append(("head", "Mezinárodní a významné dny"))
+        soon = d.get("soon") or {}
+        out.append(("head", "Dnes žádný zvláštní den není. Co bude" if soon else "Mezinárodní a významné dny"))
         rows = []
         moved = d.get("moved")
         for name, by, since in days:
             more = ", ".join(p for p in (f"vyhlásil(a) {by}" if by else "", f"od {since}" if since else "",
                                          f"patří k {int(moved[0][3:])}. {int(moved[0][:2])}., ten den jich bylo víc"
                                          if moved else "") if p)
-            rows.append("• " + esc(name) + (f" <span alpha='70%'>({esc(more)})</span>" if more else ""))
+            rows.append("• " + (f"<b>{soon[name].capitalize()}:</b> " if name in soon else "") + esc(name)
+                        + (f" <span alpha='70%'>({esc(more)})</span>" if more else ""))
         out.append(("text", "\n".join(rows)))
     if EFFECTS.get("season"):  # (the season's fall every day, a special day's with them)
         season = season_today()[0]
@@ -12469,7 +12599,8 @@ class Pager:
     same contents it goes on from the page after the last one read, not from the top again; past the end, from
     the top. Moved with the screen's frames (60, 165 a second: whatever it shows), by whole screen pixels."""
 
-    HOLD, SLIDE, READ = 12.0, 0.7, 3.0  # s a page stays; s the slide takes; s shown before a page counts as read
+    HOLD, SLIDE, READ = 20.0, 0.7, 3.0  # s a page stays (the user: 20 s, whatever shows by itself); s the slide
+    # takes; s shown before a page counts as read
 
     def __init__(self, pop, scroll):
         self.pop, self.scroll = pop, scroll
@@ -12479,8 +12610,10 @@ class Pager:
         self._tick = None
         self._at = self._since = self._slide = None
 
-    def start(self, key) -> None:
-        if key != self.key:
+    def start(self, key, top: bool = False) -> None:
+        """Shown: by itself it goes on where the last showing left off; `top`: opened by the mouse (on it, or
+        a click), from the top (the user)."""
+        if key != self.key or top:
             self.key, self.next = key, 0.0
         self._at = self._since = self._slide = None
         self.hold_till = 0.0
@@ -13295,7 +13428,6 @@ class Window(Adw.ApplicationWindow):
         self.sky_pop.set_parent(self.clock)
         self.sky_pop.set_can_target(False)
         self.sky_pager = Pager(self.sky_pop, self.sky_scroll)
-        self.sky_pager.HOLD = float(self.SKY_AUTO[2])
         self._sky_on = False  # the mouse is on the Moon
         self.sky_pop.connect("closed", lambda *_: setattr(self, "_sky_on", False))  # (put away by something
         # else, a menu opening: the mouse moving on the Moon again brings it back)
@@ -13707,7 +13839,7 @@ class Window(Adw.ApplicationWindow):
             return
         self._day_show(view)
 
-    DAY_AUTO = (20, 15)  # by itself once an hour: at :20 (well away from the panel's tours at :00 and :30), 15 s
+    DAY_AUTO = (20, 20)  # by itself once an hour: at :20 (well away from the panel's tours at :00 and :30), 20 s
 
     def _day_auto(self) -> None:
         """The day's box shown by itself for a while; not while a panel or menu is open, a tour runs, the clock's
@@ -13746,7 +13878,7 @@ class Window(Adw.ApplicationWindow):
             return
         if not self._settled(lambda: self._names_auto(tries)):
             return
-        self.names_show()
+        self.names_show(auto=True)
         shown = self._names_shown = object()
         GLib.timeout_add_seconds(self.NAMES_AUTO[1], lambda: (self._names_shown is shown and self.names_pop.popdown(),
                                                              False)[1])
@@ -13839,7 +13971,7 @@ class Window(Adw.ApplicationWindow):
         if self.names_pop.get_visible():
             self._names_fill()
 
-    def names_show(self) -> None:
+    def names_show(self, auto: bool = False) -> None:
         """Shown over the cover like the day's box (beside the names when there's no cover); not over an open
         menu."""
         if self.compact or self._menu_open():
@@ -13878,7 +14010,7 @@ class Window(Adw.ApplicationWindow):
                 rect = Gdk.Rectangle()
                 rect.x, rect.y, rect.width, rect.height = round(b.get_x()) - 12, round(b.get_y()), 1, 1
                 self.names_pop.set_pointing_to(rect)
-        self.names_pager.start((time.localtime().tm_yday, name_day()))
+        self.names_pager.start((time.localtime().tm_yday, name_day()), top=not auto)
         glass.staged()
         glass.fresh_if_changed()
         if not area:
@@ -13888,7 +14020,8 @@ class Window(Adw.ApplicationWindow):
         if area:
             GLib.idle_add(self._day_true, area, self.names_pop)
 
-    SONG_AUTO = (120, 24)  # the song's box by itself every 2 minutes, for 24 s: two pages of it (Pager.HOLD)
+    SONG_AUTO = (120, 20)  # the song's box by itself every 2 minutes, for 20 s: a page of it (Pager.HOLD), the
+    # next one the next time
 
     def _settled(self, again) -> bool:
         """A box that comes up by itself waits till the cover has finished changing: every glass makes its lens
@@ -13903,7 +14036,7 @@ class Window(Adw.ApplicationWindow):
         if (hasattr(self, "_tour") and self.get_visible() and self._tour is None and not any(w.open for w in self.waters)
                 and not self._day_on and not self.quality_pop.get_visible() and not self.names_pop.get_visible()
                 and not self.sky_pop.get_visible() and not self.song_pop.get_visible() and self._song_parts() and self._settled(self._song_auto)):
-            self.song_show()
+            self.song_show(auto=True)
             shown = self._song_shown = object()
             GLib.timeout_add_seconds(self.SONG_AUTO[1], lambda: (self._song_shown is shown and self.song_pop.popdown(),
                                                                 False)[1])
@@ -13919,7 +14052,9 @@ class Window(Adw.ApplicationWindow):
         if a.facts:
             out.append(("Vydání a nahrávání", years_ago(a.facts).replace(" · ", "\n")))
         if a.band_about:
-            out.append((first_artist(info.get("artist") or a.artist_raw or "Interpret"), a.band_about))
+            band = first_artist(info.get("artist") or a.artist_raw or "Interpret")
+            years = a.artist_years(band)  # (beside the name, like the name day's people: born, died, how old)
+            out.append((f"{band} · {years}" if years else band, a.band_about))
         if getattr(a, "album_about", "") and info.get("album"):
             out.append((f"Album {tidy_case(plain_title(info['album']))}", a.album_about))
         return out
@@ -13954,7 +14089,7 @@ class Window(Adw.ApplicationWindow):
             box.append(Gtk.Label(label=GLib.markup_escape_text(a.cz(text)), use_markup=True, xalign=0, wrap=True,
                                  attributes=attrs))
 
-    def song_show(self) -> None:
+    def song_show(self, auto: bool = False) -> None:
         """Over the cover like the day's box; not over an open menu."""
         if self.compact or self._menu_open():
             return
@@ -13983,7 +14118,7 @@ class Window(Adw.ApplicationWindow):
             rect = Gdk.Rectangle()
             rect.x, rect.y, rect.width, rect.height = round(at.x), round(at.y) - 1, w, 1
             self.song_pop.set_pointing_to(rect)
-        self.song_pager.start(tuple(self._song_parts()))
+        self.song_pager.start(tuple(self._song_parts()), top=not auto)
         glass.staged()
         glass.fresh_if_changed()
         self.song_pop.popup()
@@ -14063,7 +14198,7 @@ class Window(Adw.ApplicationWindow):
             if tex is not None and pic.get_paintable() is not tex:
                 pic.set_paintable(tex)
 
-    def sky_show(self) -> None:
+    def sky_show(self, auto: bool = False) -> None:
         """Over the cover like the day's box; not over an open menu, and not when it's switched off."""
         if self.compact or self._menu_open() or not self.app.settings.get("sky_box", True):
             return
@@ -14094,7 +14229,7 @@ class Window(Adw.ApplicationWindow):
             rect.x, rect.y, rect.width, rect.height = round(at.x), round(at.y) - 1, w, 1
             self.sky_pop.set_pointing_to(rect)
         data = self.app.sky or {}
-        self.sky_pager.start((data.get("place"), tuple(n for n, _p in data.get("parts", ()))))
+        self.sky_pager.start((data.get("place"), tuple(n for n, _p in data.get("parts", ()))), top=not auto)
         glass.staged()
         glass.fresh_if_changed()
         self.sky_pop.popup()
@@ -14112,7 +14247,7 @@ class Window(Adw.ApplicationWindow):
             return
         if not self._settled(self._sky_auto):
             return
-        self.sky_show()
+        self.sky_show(auto=True)
         if not self.sky_pop.get_visible():
             return
         shown = self._sky_shown = object()
@@ -14853,7 +14988,7 @@ class Window(Adw.ApplicationWindow):
     # quick to read), and the next time the next ones: DNES and ZAJÍMAVOSTI, then AKTUALITY and ZÍTRA… A tab with
     # nothing to show yet is left out; with nothing at all the panel stays shut.
     TOUR = ("DNES", "ZAJÍMAVOSTI", "AKTUALITY", "ZÍTRA", "POZÍTŘÍ", "HRÁLO")
-    TOUR_TABS, TOUR_SECS = 2, 15
+    TOUR_TABS, TOUR_SECS = 2, 20
 
     def _watch_show(self) -> bool:
         now = time.localtime()
@@ -15241,7 +15376,16 @@ class Window(Adw.ApplicationWindow):
 
     def _played_line(self, row: dict) -> str:
         """A played song's line under it: the album, its first release, the show."""
-        return " · ".join(x for x in (plain_title(row["album"] or ""), self.app.cz(row["facts"] or ""), row["show"]) if x)
+        years = self.app.artist_years(row["artist"])
+        who = f"{first_artist(row.get('shown_artist') or row['artist'])} {years}" if years else ""
+        return " · ".join(x for x in (who, plain_title(row["album"] or ""), self.app.cz(row["facts"] or ""),
+                                      row["show"]) if x)
+
+    def played_years(self, name: str) -> None:
+        """An artist's years looked up: HRÁLO's rows of theirs say them."""
+        for row in self._played_rows:
+            if first_artist(row["artist"]).lower() == name.lower() and row.get("label"):
+                row["label"].set_text(self._played_line(row))
 
     def _glass_button(self, icon: str, size: int, tooltip: str, on_click, color=None) -> GlassCard:
         """A button in a round dish of glass, like pause and stop below the cover (it pumps under the mouse);
@@ -16007,6 +16151,59 @@ class App(Adw.Application):
         self.weather_tick()
 
     sky = None  # the Moon and Sun box's contents (sky_parts), worked out for the weather's place
+    _dates = None  # artists' birth and death (bands' founding and end): name -> artist_dates, kept on the disk
+    _dates_queue: list = []
+    _dates_busy = False
+
+    def artist_years(self, name: str) -> str:
+        """Beside an artist's or a band's name in the glass boxes and panels, like the name day's people:
+        "* 1946 (80 let)" living, "1940–1980 († 40 let)" dead or disbanded; "" while it isn't known (looked up
+        then, one at a time, and the boxes filled in when it comes)."""
+        name = first_artist(name or "").strip()
+        if not name:
+            return ""
+        if App._dates is None:
+            try:
+                with open(ARTIST_DATES_FILE) as f:
+                    App._dates = json.load(f)
+            except (OSError, ValueError):
+                App._dates = {}
+        got = App._dates.get(name.lower())
+        if got is None:
+            App._dates[name.lower()] = {}  # (asked)
+            self._dates_queue.append(name)
+            if not App._dates_busy:
+                App._dates_busy = True
+                threading.Thread(target=self._dates_worker, daemon=True).start()
+            return ""
+        return namesake_years(got) if got.get("born") else ""
+
+    def _dates_worker(self) -> None:
+        while self._dates_queue:
+            name = self._dates_queue.pop(0)
+            got = artist_dates(name)
+            if got.get("failed"):
+                App._dates.pop(name.lower(), None)
+            else:
+                App._dates[name.lower()] = got
+                try:
+                    os.makedirs(os.path.dirname(ARTIST_DATES_FILE), exist_ok=True)
+                    with open(ARTIST_DATES_FILE + ".part", "w") as f:
+                        json.dump({k: v for k, v in App._dates.items() if v or k == name.lower()}, f,
+                                  ensure_ascii=False)
+                    os.replace(ARTIST_DATES_FILE + ".part", ARTIST_DATES_FILE)
+                except OSError:
+                    pass
+                if got.get("born"):
+                    GLib.idle_add(self._dates_got, name)
+            time.sleep(1.0)  # (a little apart: the service's limits)
+        App._dates_busy = False
+
+    def _dates_got(self, name: str) -> bool:
+        if self.win:
+            self.win.song_refresh()
+            self.win.played_years(name)
+        return False
 
     def sky_tick(self) -> None:
         """The Moon and Sun box's contents worked out anew (in a thread) every ten minutes and for another place;
