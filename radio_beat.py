@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.34.1"
+APP_VERSION = "0.34.2"
 
 import collections
 import ctypes
@@ -7791,6 +7791,9 @@ except (OSError, ValueError):
 # who a day's maker is when it's a company or a body of producers (what it does, who founded it, whose it is now,
 # its sales): maker as written in the calendar -> a sentence
 DAY_MAKERS = DAYS_CZ.pop("_makers", {})
+# what is known of a day nobody is known to have declared (where it comes from, or that even the calendars of such
+# days can't tell): day -> said as it is
+DAY_NOTES = DAYS_CZ.pop("_notes", {})
 # (a day's "declared by" that tells what it goes back to, not who declared it: said as it is)
 DAY_REASON = re.compile(r"(na |z |ze |podle |prý |tradice|svátek|Svátek|výročí|narozeniny|irská|japonský státní|"
                         r"vznikl|věnováno|vyhlášen|spontánně|fanoušci)")
@@ -8442,7 +8445,8 @@ def day_summary() -> list:
         for name, by, since in days:
             # who made it, always (the user): when nobody is known to have, that's said too
             who = ((by if DAY_REASON.match(by) else f"vyhlásil(a) {by}") if by
-                   else "kdo ho vyhlásil, se nepodařilo dohledat" if day_weight([name, by, since]) < 5 else "")
+                   else DAY_NOTES.get(name) or ("kdo ho vyhlásil, se nepodařilo dohledat"
+                                                if day_weight([name, by, since]) < 5 else ""))
             more = ", ".join(p for p in (who, f"od {since}" if since else "",
                                          f"patří k {int(moved[0][3:])}. {int(moved[0][:2])}., ten den jich bylo víc"
                                          if moved else "") if p)
@@ -8464,6 +8468,73 @@ for _hid, _h in HOLIDAYS.items():  # each day's motifs and colors, like a season
 # special day's: "name|emoji emoji…". Remembrance days (victims, genocide, slavery, violence…): quiet ones,
 # candles, doves, white flowers, ribbons.
 DAY_EMOJI_TEXT = """
+Evropský den tísňové linky 112|🚑 🚒 🚓 📞
+Den odolnosti světového cestovního ruchu|✈️ 🧳 🗺️ 🏝️
+Světový den mořských trav|🌿 🐢 🐠 🌊
+Den Tibetu|🏔️ 🙏 🕯️
+Světový den instalatérů|🔧 🚰 🚿 🪠
+Světový den práv spotřebitelů|🛒 ⚖️ 🧾
+Mezinárodní den boje proti islamofobii|🕌 🕊️ 🤝
+Světový den vyprávění příběhů|📖 🗣️ 🔥 🐉
+Světový den ústního zdraví|🦷 🪥 😁
+Světový meteorologický den|🌦️ ⛈️ 🌈 🌡️
+Den nenarozených dětí|👶 🕯️ 🤍
+Světový den zálohování dat|💾 💿 ☁️ 🖥️
+Světový den Chagasovy choroby|🩺 🕯️ 🎗️
+Den netopýrů|🦇 🌙 🌌
+Světový den stolního tenisu|🏓 🏆
+Den angličtiny|🇬🇧 📚 🎭 ✒️
+Den španělštiny|🇪🇸 📚 💃
+Den DNA|🧬 🔬 🧪
+Světový den plicní hypertenze|🫁 💙 🩺
+Den portugalštiny|🇵🇹 🇧🇷 📚
+Evropský den Slunce|☀️ 🔆 🌻
+Světový den Crohnovy nemoci a ulcerózní kolitidy|🎗️ 💜 🩺
+Světový den roztroušené sklerózy|🎗️ 🧡 🧠
+Den ruštiny|📚 ✒️ 🪆
+Den kapitána Picarda|🖖 🚀 🫖 🌌
+Den udržitelné gastronomie|🥗 🌱 🍽️ 🌍
+Svatojánská noc|🔥 🌿 🌼 ✨
+Den veřejné služby|🏛️ 🤝 📜
+Den mikropodniků a malých a středních podniků|🏪 💼 🧑‍🔧
+Světový den Tibetu|🏔️ 🙏 🪷
+Světový den svahilštiny|🌍 📚 🦒
+Den Nikoly Tesly|⚡ 💡 🔌 🧲
+Světový den dovedností mládeže|🛠️ 🎓 💡
+Světový den hadů|🐍 🌿
+Den přibližného pí|🥧 🔢 📐
+Světový den mozku|🧠 💡
+Světový den prevence utonutí|🛟 🌊 🏊
+Světový den hepatitidy|🎗️ 🩺 💛
+Světový den proti obchodování s lidmi|💙 🕊️ 🕯️
+Světový den strážců přírody|🌲 🦏 🐘 🔭
+Den památky romského holokaustu|🕯️ 🕊️ 🤍
+Světový humanitární den|🤝 ❤️ 🌍 ⛑️
+Světový den fotografie|📷 📸 🎞️ 🖼️
+Světový den jezer|🏞️ 🦆 🐟 🚣
+Světový den modliteb za péči o stvoření|🙏 🌍 🌱 🕊️
+Světový den bahňáků|🐦 🌊 🪶
+Světový den bezpečnosti pacientů|🏥 🩺 💊
+Světový den proti softwarovým patentům|💻 ⌨️ 📜
+Světový den vexilologie|🚩 🏳️ 🏴 🎌
+Světový den důstojné práce|👷 🤝 ⚖️
+Světový den bavlny|🧵 👕 🧶
+Světový den artritidy|🎗️ 🦴 💙
+Světový den mytí rukou|🧼 🫧 💧 👐
+Světový den chleba|🍞 🥖 🥨 🌾
+Světový den osteoporózy|🦴 🥛 🧀
+Den OSN|🇺🇳 🕊️ 🌍
+Světový den boje proti dětské obrně|💉 👶 🎗️
+Den povědomí o intersexualitě|💛 💜 🎗️
+Světový den měst|🏙️ 🌆 🚋 🌳
+Světový den povědomí o tsunami|🌊 🚨 🏃
+Mezinárodní den účetních|🧮 🧾 📊 💶
+Světový den zápalu plic|🫁 🩺 💙
+Světový den siamských dvojčat|👯 🤍 🎗️
+Den povědomí o nedostatku železa|🩸 🥩 🥬
+Den opic|🐒 🐵 🍌 🦧
+Zamenhofův den|💚 ⭐ 📚 🌍
+Den arabštiny|📚 ✒️ 🌙 🐪
 Autistický den hrdosti|♾️ 🧩 🌈
 Darwinův den|🐒 🐢 🦎 🌿
 Den Afriky|🌍 🦁 🐘 🥁
@@ -9027,6 +9098,14 @@ EMOJI_MOTIFS = [
     (r"PERFORMING ARTS|THEATRE|THEATER", "menpo", "#ffd54f"),
     (r"SKULL", "skull", None), (r"GHOST", "ghost", None), (r"PUMPKIN|JACK-O", "pumpkin", None), (r"BAT\b", "bat", None),
     (r"SPIDER WEB", "web", None), (r"SPIDER", "spider", None), (r"MAPLE", "maple", None),
+    # (more of the calendar's things that one of the drawn motifs can stand for)
+    (r"LIGHT BULB|ELECTRIC PLUG|MAGNET|BATTERY", "bolt", None), (r"FRAME WITH PICTURE", "palette", None),
+    (r"CITYSCAPE|CONVENIENCE STORE|DEPARTMENT STORE", "temple", "#cfd8dc"),
+    (r"BAR OF SOAP|BUBBLES|SHOWER|ROWBOAT|RING BUOY|SWIMMER|BATHTUB", "drop", "#4fc3f7"),
+    (r"RECEIPT|ABACUS|BAR CHART|BRIEFCASE|SHOPPING|CHART WITH", "coin", None), (r"BLACK NIB", "book", "#5c6bc0"),
+    (r"GREEN SALAD|FORK AND KNIFE|POT OF FOOD|SPAGHETTI", "apple", "#e53935"), (r"NATIONAL PARK", "tree", None),
+    (r"TEAPOT", "cup", "#795548"), (r"ORANGUTAN|DRAGON|DINOSAUR|SAUROPOD|T-REX|LLAMA|RACCOON|KANGAROO", "paw", "#a1887f"),
+    (r"FEATHER", "dove", "#cfd8dc"), (r"BABY", "heart", "#f06292"),
 ]
 _EMOJI_RULES = [(re.compile(p), kind, col) for p, kind, col in EMOJI_MOTIFS]
 
