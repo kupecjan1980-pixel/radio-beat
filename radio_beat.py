@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.35.0"
+APP_VERSION = "0.35.1"
 
 import collections
 import ctypes
@@ -10200,6 +10200,12 @@ class SeasonDecor:
         """A black cat sitting, facing us: ears up, tail round its side, eyes lit."""
         R = size / 2
         c = _hex("#141414", 0.97)
+        rims = []  # a moonlit edge all round: a black cat on a dark cover was nearly unseen
+        for _ in range(3):
+            rim = Gsk.Shadow()
+            rim.color, rim.dx, rim.dy, rim.radius = _rgba(225, 235, 255, 1.0), 0, 0, max(1.5, size * 0.035)
+            rims.append(rim)
+        s.push_shadow(rims)
         tail = Gsk.PathBuilder.new()
         tail.move_to(R * 0.25, R * 0.82)
         tail.cubic_to(R * 0.95, R * 0.9, R * 1.0, R * 0.25, R * 0.66, -R * 0.02)
@@ -10210,6 +10216,8 @@ class SeasonDecor:
         SeasonDecor._dot(s, 0, -R * 0.36, R * 0.34, c)
         for k in (-1, 1):
             SeasonDecor._poly(s, [(k * R * 0.33, -R * 0.42), (k * R * 0.3, -R * 0.92), (k * R * 0.02, -R * 0.62)], c)
+        s.pop()
+        for k in (-1, 1):
             SeasonDecor._oval(s, k * R * 0.15, -R * 0.4, R * 0.085, R * 0.065, _hex("#c6ff00"))
             SeasonDecor._oval(s, k * R * 0.15, -R * 0.4, R * 0.022, R * 0.06, _hex("#101010"))
         SeasonDecor._poly(s, [(-R * 0.035, -R * 0.26), (R * 0.035, -R * 0.26), (0, -R * 0.21)], _hex("#f48fb1"))
