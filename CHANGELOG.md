@@ -4,6 +4,7 @@
 
 ## 0.35 — Číselné dny: pátek třináctého a zdvojená data
 
+- **0.35.2** (2026-11-13) Pátek třináctého: světlý okraj černé kočky je plný a silnější, takže ho mají i ty malé
 - **0.35.1** (2026-11-13) Pátek třináctého: černá kočka má kolem sebe světlý měsíční okraj, na tmavém obalu skoro nebyla vidět
 - **0.35.0** (2026-11-13) Dny zvláštní jen svými čísly jsou teď zvláštními dny jako svátky: mají jméno na hodinách, vlastní padající obrázky a v okně dne povídání. **Pátek třináctého**: padají černé kočky, třináctky, prasklá zrcadla, žebříky a pro štěstí podkovy a čtyřlístky (všechno nakreslené); okno dne říká, odkud pověra je, že třináctého je pátek častěji než jiný den v týdnu (688krát za 400 let), které pátky třináctého jsou letos a kdy bude další; a malé překvapení ve 13:13. Stejně úterý třináctého (smolný den Španělů a Řeků) a pátek sedmnáctého (Italů). **Zdvojená data** 1. 1. až 12. 12.: padá číslo dne (8. 8. i čínské mince, 7. 7. čtyřlístky) a okno dne řekne, čím je datum zajímavé (11. 11.: konec první světové války v 11 hodin, začátek karnevalu v 11.11, čínský Den nezadaných; 8. 8.: šťastná osmička a olympiáda v Pekingu; 4. 4.: smolná čtyřka východní Asie; 6. 6., 7. 7., 9. 9., 10. 10.…), kdy sedí i rok (3. 3. 33), kdy je „odmocninový den“ (6. 6. 36) a že 4. 4., 6. 6., 8. 8., 10. 10. a 12. 12. jsou každý rok ve stejný den v týdnu. K tomu přestupný den 29. 2., polovina roku 2. 7., Den programátorů (256. den roku), Den čísla τ (28. 6.), Fibonacciho den (23. 11.) a palindromové datum (nejbližší 3. 2. 2030)
 
