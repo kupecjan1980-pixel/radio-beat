@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.34.2"
+APP_VERSION = "0.35.0"
 
 import collections
 import ctypes
@@ -7762,10 +7762,62 @@ HOLIDAYS = {
                  lambda y: [_shift(y, _LUNAR["hanukkah"][y], d) for d in range(8)] if y in _LUNAR["hanukkah"] else [],
                  ("candle", "candle", "david"), ("#1e88e5", "#ffffff", "#90caf9", "#ffd54f"), None),
 }
+
+
+# --- number days: dates special for their numbers alone (the user: Friday the 13th "is not a holiday or anything
+# BUT it's special", and 11. 11., 1. 1. "and so on"): the cursed ones and the doubled ones -------------------------
+def _weekday_on(y: int, day: int, weekday: int) -> list:
+    """The year's dates with that day of the month on that weekday (0 Monday): Friday the 13th's."""
+    return [(m, day) for m in range(1, 13) if datetime.date(y, m, day).weekday() == weekday]
+
+
+def _palindromes(y: int) -> list:
+    """The year's dates that read the same backwards, written ddmmyyyy (at most one a year)."""
+    text = f"{y:04d}"[::-1]
+    d, m = int(text[:2]), int(text[2:])
+    try:
+        datetime.date(y, m, d)
+    except ValueError:
+        return []
+    return [(m, d)]
+
+
+_CURSED = ("#d50000", "#7c4dff", "#eceff1", "#76ff03", "#ffab00")
+_LUCKY = ("#ffd54f", "#ffffff", "#40c4ff", "#ff80ab", "#b2ff59")
+HOLIDAYS.update({
+    "friday13": ("Pátek třináctého", "černé kočky, třináctky, prasklá zrcadla a žebříky; pro štěstí podkovy a "
+                 "čtyřlístky", lambda y: _weekday_on(y, 13, 4),
+                 ("blackcat", "blackcat", "n13", "n13", "mirror", "ladder", "horseshoe", "clover4"), _CURSED, None),
+    "tuesday13": ("Úterý třináctého", "třináctky, černé kočky a prasklá zrcadla", lambda y: _weekday_on(y, 13, 1),
+                  ("n13", "n13", "blackcat", "mirror", "horseshoe"), _CURSED, None),
+    "friday17": ("Pátek sedmnáctého", "sedmnáctky, černé kočky a prasklá zrcadla", lambda y: _weekday_on(y, 17, 4),
+                 ("n17", "n17", "blackcat", "mirror", "horseshoe"), _CURSED, None),
+    "leap": ("Přestupný den", "devětadvacítky a hvězdy",
+             lambda y: [(2, 29)] if y % 4 == 0 and (y % 100 or y % 400 == 0) else [], ("n29", "n29", "star"),
+             _LUCKY, None),
+    "tau": ("Den čísla τ", "τ a π", lambda y: [(6, 28)], ("tau", "tau", "pi"),
+            ("#40c4ff", "#ffffff", "#ffd54f", "#b388ff"), None),
+    "midyear": ("Polovina roku", "váhy a číslo 183", lambda y: [(7, 2)], ("scales", "n183", "star"), _LUCKY, None),
+    "programmer": ("Den programátorů", "číslo 256, jedničky a nuly",
+                   lambda y: [(9, 12)] if y % 4 == 0 and (y % 100 or y % 400 == 0) else [(9, 13)],
+                   ("n256", "n256", "n0", "n1"), ("#76ff03", "#00e676", "#ffffff", "#40c4ff"), None),
+    "fibonacci": ("Fibonacciho den", "ulity a čísla 1, 1, 2, 3", lambda y: [(11, 23)],
+                  ("shell", "n1", "n1", "n2", "n3"), _LUCKY, None),
+    "palindrome": ("Palindromové datum", "číslice", _palindromes, ("n0", "n1", "n2", "n3", "star"), _LUCKY, None),
+})
+# the doubled dates 1. 1. … 12. 12.: the day's number falls (with what goes with it: the lucky eight's coins)
+_TWIN_MORE = {7: ("clover4",), 8: ("coin",), 11: ("n1",)}
+for _m in range(1, 13):
+    HOLIDAYS[f"twin{_m}"] = ("Samé jedničky 11. 11." if _m == 11 else f"Zdvojené datum {_m}. {_m}.",
+                             f"čísla {_m} a hvězdy", (lambda y, m=_m: [(m, m)]),
+                             (f"n{_m}", f"n{_m}", "star") + _TWIN_MORE.get(_m, ()), _LUCKY, None)
+NUMBER_KINDS = ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "17", "29", "183", "256")
+
 HOLIDAY_PERIODS = {"advent"}  # whole stretches: mixed with the season, not instead of it
 UPRIGHT = {"bison", "castle", "pagoda", "house", "church", "factory", "tulip", "bouquet", "rainbow", "nut", "book", "drop", "dove", "hands", "apple", "cup", "glass", "cheese", "cross", "scales", "peace",
            "ribbon", "temple", "ban", "palette", "menpo", "jpflag", "palm", "sprig", "tree", "candle", "pumpkin", "ghost", "diya", "lantern", "flame", "radio", "balloon",
-           "skull", "gift", "crown", "broom", "guitar", "mimosa", "gravelight", "calavera", "papel", "mum"}
+           "skull", "gift", "crown", "broom", "guitar", "mimosa", "gravelight", "calavera", "papel", "mum",
+           "blackcat", "mirror", "ladder", "horseshoe", "tau", "pi"} | {"n" + n for n in NUMBER_KINDS}
 
 
 def holidays_today() -> list:
@@ -8325,7 +8377,10 @@ def special_day_name() -> str:
     """The day's name for the clock now. A day with several takes turns through every hour, each the same share
     of it (the user: four of them, a quarter of an hour each, all day long)."""
     names = special_day_names()
-    return names[time.localtime().tm_min * len(names) // 60] if names else ""
+    t = time.localtime()
+    if (t.tm_hour, t.tm_min) == (13, 13) and "friday13" in holidays_today():
+        return "13:13 v pátek třináctého: zaťukej na dřevo"  # (an easter egg: the cursed minute of the cursed day)
+    return names[t.tm_min * len(names) // 60] if names else ""
 
 
 def balanced_rows(text: str, most: int = 20) -> list:
@@ -8394,6 +8449,121 @@ HOLIDAY_ABOUT = {
     "diwali": "Indický svátek světel: lampičky dijá, ohňostroje a sladkosti.",
     "hanukkah": "Židovský svátek světel: osm dní se zapaluje svíce chanukije.",
 }
+
+
+def _d(md) -> str:
+    return f"{md[1]}. {md[0]}."
+
+
+def _and(parts) -> str:
+    parts = list(parts)
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " a " + parts[-1]
+
+
+def _next_weekday_on(t, day: int, weekday: int) -> str:
+    """This year's such dates and the next one after today, in words."""
+    year = _weekday_on(t.tm_year, day, weekday)
+    text = ("Letos je jediný: " if len(year) == 1 else f"Letos {'jsou' if len(year) < 5 else 'je jich'} "
+            f"{('', '', 'dva', 'tři')[len(year)] if len(year) < 4 else len(year)}: ") + _and(map(_d, year))
+    for y in range(t.tm_year, t.tm_year + 3):
+        for md in _weekday_on(y, day, weekday):
+            if (y, md[0], md[1]) > (t.tm_year, t.tm_mon, t.tm_mday):
+                return f"{text} Další bude {_d(md)}{'' if y == t.tm_year else ' ' + str(y) + '.'}"
+    return text
+
+
+def _friday13_about(t) -> str:
+    return ("Smolný den nadvakrát: v pátek byl ukřižován Kristus a u stolu Poslední večeře jich sedělo třináct. "
+            "Dohromady se pátku třináctého lidé bojí teprve od 19. století; strach z něj má i jméno, "
+            "paraskavedekatriafobie. Zatčení templářů v pátek 13. října 1307 se k pověře přidalo až ve 20. století. "
+            "Kalendář přitom pátku nadržuje: třináctého je pátek častěji než kterýkoli jiný den v týdnu (688krát "
+            "za 400 let) a žádný rok se bez něj neobejde; nejvíc mívá tři. Proti smůle: nechodit pod žebříkem, "
+            "nerozbít zrcadlo (sedm let neštěstí) a nenechat si přeběhnout přes cestu černou kočku; pro štěstí "
+            "podkova a čtyřlístek. " + _next_weekday_on(t, 13, 4))
+
+
+_TWIN_ABOUT = {
+    1: "První den roku je i první zdvojené datum. Od 1. 1. 1970 počítají počítače čas (unixový čas: sekundy od "
+       "půlnoci toho dne) a 1. 1. 2000 se čekal konec počítačového světa, chyba Y2K. Datum ze tří stejných čísel "
+       "i s rokem (naposledy 12. 12. 12) přijde znovu až 1. 1. 2101.",
+    2: "Hromnice a v Americe Den sviště (Groundhog Day): uvidí-li svišť svůj stín, potrvá zima ještě šest týdnů. "
+       "2. 2. 2020 bylo palindromem ve všech zápisech data (02022020), poprvé po 909 letech od 11. 11. 1111.",
+    3: "V Japonsku Hinamacuri, svátek dívek a panenek: rodiny vystavují panenky císařského dvora na stupních "
+       "s červeným suknem.",
+    4: "Ve východní Asii smolné číslo: čtyřka zní čínsky, japonsky i korejsky skoro jako „smrt“ (tetrafobie); domy "
+       "tam často nemají čtvrté patro a nemocnice pokoj číslo 4.",
+    5: "V Japonsku Den dětí (Kodomo no hi): nad domy vlají kapři koinobori. V Mexiku a USA Cinco de Mayo, výročí "
+       "bitvy u Puebly (1862).",
+    6: "Dvě šestky; do čísla šelmy 666 ze Zjevení Janova chybí třetí, a tu dodal rok: 6. 6. 2006 se někteří báli "
+       "rodit i ženit.",
+    7: "Šťastná sedmička dvakrát: 7. 7. 2007 se konalo rekordně mnoho svateb. V Japonsku Tanabata, svátek hvězd: "
+       "přání se píšou na proužky papíru a věší na bambus.",
+    8: "Nejšťastnější datum Číny: osmička (bā) zní jako „zbohatnout“ (fā). Olympiáda v Pekingu proto začala "
+       "8. 8. 2008 v 8 hodin 8 minut večer.",
+    9: "Devítka zní čínsky jako „dlouhotrvající“ (jiǔ), proto je 9. 9. oblíbený den svateb; japonsky ale zní jako "
+       "„utrpení“ (ku). 9. 9. 1999 se programátoři báli, že počítače vezmou 9999 jako značku konce dat.",
+    10: "Svátek dvou desítek: státní svátek Tchaj-wanu (povstání ve Wu-čchangu 10. 10. 1911). Ve dvojkové soustavě "
+        "je 1010 deset a 101010 (10. 10. 10) je 42, odpověď na otázku života, vesmíru a vůbec.",
+    11: "Čtyři jedničky: 11. 11. 1918 v 11 hodin skončila první světová válka (proto Den válečných veteránů), "
+        "11. 11. v 11.11 začíná v Porýní karnevalová sezona a v Číně je Den nezadaných (jedničky jako osamělé "
+        "hůlky), největší nákupní den světa. A na svatého Martina má přijet zima na bílém koni.",
+    12: "Poslední zdvojené datum roku. 12. 12. 2012 bylo posledním datem století ze tří stejných čísel; další "
+        "přijde 1. 1. 2101.",
+}
+
+
+def _twin_about(t) -> str:
+    m, yy = t.tm_mon, t.tm_year % 100
+    text = _TWIN_ABOUT[m]
+    if m == yy:
+        text += f" Letos sedí i rok: {m}. {m}. {yy:02d}, tři stejná čísla."
+    elif m * m == yy:
+        text += f" Letos je to i „odmocninový den“: {m} × {m} = {yy}."
+    if m in (4, 6, 8, 10, 12):
+        text += (f" 4. 4., 6. 6., 8. 8., 10. 10. a 12. 12. připadají každý rok na stejný den v týdnu (letos "
+                 f"{DAYS[t.tm_wday]}): podle nich se dá kalendář počítat z hlavy (Conwayovo pravidlo soudného dne).")
+    return text
+
+
+def _midyear_about(t) -> str:
+    leap = t.tm_year % 4 == 0 and (t.tm_year % 100 != 0 or t.tm_year % 400 == 0)
+    return ("Prostředek roku: " + ("přestupný rok má 366 dní a jeho polovina nastala dnes o půlnoci, 183 dní je "
+                                   "za námi a 183 před námi." if leap else
+                                   "dnes je 183. den z 365, před ním jich bylo 182 a po něm jich 182 zbývá; přesně "
+                                   "v poledne je rok v půli."))
+
+
+HOLIDAY_ABOUT.update({
+    "friday13": _friday13_about,
+    "tuesday13": lambda t: ("Ve Španělsku, Řecku a Latinské Americe nosí smůlu úterý třináctého (martes trece), ne "
+                            "pátek: úterý patří bohu války Martovi a v úterý 29. května 1453 padla Konstantinopol. "
+                            "Španělské rčení radí: „V úterý se nežeň ani nenaloďuj.“ " + _next_weekday_on(t, 13, 1)),
+    "friday17": lambda t: ("V Itálii je smolný pátek sedmnáctého: římské XVII se dá přeskládat na VIXI, latinsky "
+                           "„žil jsem“, tedy „jsem mrtev“. Třináctka tam naopak nosí štěstí. "
+                           + _next_weekday_on(t, 17, 4)),
+    "leap": "Den navíc jednou za čtyři roky: rok trvá 365 dní a necelých 6 hodin. Zavedl ho Julius Caesar "
+            "(45 př. n. l.); gregoriánský kalendář (1582) ho vynechává v letech dělitelných stem, ne však čtyřmi "
+            "sty (1900 ne, 2000 ano). Narodit se 29. února je šance 1 : 1461.",
+    "tau": "28. 6. jako 6,28: τ = 2π, obvod kruhu dělený poloměrem. Podle Tau manifestu Michaela Hartla (2010) je "
+           "to pro kruh to pravé číslo; slaví se dvojnásobkem koláčů než Den π.",
+    "midyear": _midyear_about,
+    "programmer": "256. den roku: 256 je počet hodnot jednoho bajtu (2⁸) a nejvyšší mocnina dvou, která se vejde "
+                  "do roku. V Rusku oficiální svátek od roku 2009; v přestupném roce připadá na 12. září.",
+    "fibonacci": "Americky psané datum 11/23 dává začátek Fibonacciho posloupnosti 1, 1, 2, 3 (každé číslo je "
+                 "součtem dvou předchozích: 5, 8, 13, 21…); najdeme ji ve spirálách ulit, šišek a slunečnic.",
+    "palindrome": lambda t: (f"Dnešní datum se čte stejně zepředu i zezadu: {t.tm_mday:02d}{t.tm_mon:02d}"
+                             f"{t.tm_year}. V tomto století je takových dnů jen 29, všechny v únoru."),
+})
+for _m in range(1, 13):
+    HOLIDAY_ABOUT[f"twin{_m}"] = _twin_about
+
+
+def holiday_about(hid: str, t=None) -> str:
+    """What the special day is, in brief ("" when nothing is written of it); some texts tell of this year."""
+    about = HOLIDAY_ABOUT.get(hid, "")
+    return about(t or time.localtime()) if callable(about) else about
+
+
 STATE_ABOUT = {
     "Nový rok a Den obnovy samostatného českého státu": "Od 1. ledna 1993 samostatná Česká republika.",
     "Velký pátek": "Den ukřižování Krista; státní svátek od 2016.",
@@ -8431,7 +8601,7 @@ def day_summary() -> list:
         if d.get("state") and HOLIDAYS[h][5] == "cz":
             continue  # the state holiday said it already
         out.append(("head", esc(HOLIDAYS[h][0])))
-        about = [esc(HOLIDAY_ABOUT[h])] if h in HOLIDAY_ABOUT else []
+        about = [esc(holiday_about(h, t))] if h in HOLIDAY_ABOUT else []
         if EFFECTS.get("season"):
             about.append(f"<i>Padají: {esc(HOLIDAYS[h][1])}</i>")
         if about:
@@ -10002,6 +10172,103 @@ class SeasonDecor:
                           w, color)
 
     @staticmethod
+    def _tau(s, rng, size, color, _sea):
+        w = max(1.5, size * 0.09)
+        SeasonDecor._line(s, [(-size * 0.33, -size * 0.25), (size * 0.36, -size * 0.28)], w, color)
+        SeasonDecor._line(s, [(0, -size * 0.26), (-size * 0.02, size * 0.26), (size * 0.1, size * 0.32)], w, color)
+
+    @staticmethod
+    def _number(s, text, size, color):
+        """A number in the clock's own heavy letters (Anton), a dark edge under it."""
+        gi.require_version("PangoCairo", "1.0")
+        from gi.repository import PangoCairo
+        lay = Pango.Layout.new(PangoCairo.FontMap.get_default().create_context())
+        desc = Pango.FontDescription.from_string("Anton")
+        desc.set_absolute_size(size * (0.92 if len(text) < 3 else 0.7) * Pango.SCALE)
+        lay.set_font_description(desc)
+        lay.set_text(text, -1)
+        ink = lay.get_pixel_extents()[0]
+        off = max(1.0, size * 0.035)
+        for dx, c in ((off, _rgba(0, 0, 0, 0.75)), (0.0, color)):
+            s.save()
+            s.translate(Graphene.Point().init(-ink.x - ink.width / 2 + dx, -ink.y - ink.height / 2 + dx))
+            s.append_layout(lay, c)
+            s.restore()
+
+    @staticmethod
+    def _blackcat(s, rng, size, color, _sea):
+        """A black cat sitting, facing us: ears up, tail round its side, eyes lit."""
+        R = size / 2
+        c = _hex("#141414", 0.97)
+        tail = Gsk.PathBuilder.new()
+        tail.move_to(R * 0.25, R * 0.82)
+        tail.cubic_to(R * 0.95, R * 0.9, R * 1.0, R * 0.25, R * 0.66, -R * 0.02)
+        st = Gsk.Stroke.new(R * 0.14)
+        st.set_line_cap(Gsk.LineCap.ROUND)
+        s.append_stroke(tail.to_path(), st, c)
+        SeasonDecor._oval(s, 0, R * 0.38, R * 0.42, R * 0.54, c)
+        SeasonDecor._dot(s, 0, -R * 0.36, R * 0.34, c)
+        for k in (-1, 1):
+            SeasonDecor._poly(s, [(k * R * 0.33, -R * 0.42), (k * R * 0.3, -R * 0.92), (k * R * 0.02, -R * 0.62)], c)
+            SeasonDecor._oval(s, k * R * 0.15, -R * 0.4, R * 0.085, R * 0.065, _hex("#c6ff00"))
+            SeasonDecor._oval(s, k * R * 0.15, -R * 0.4, R * 0.022, R * 0.06, _hex("#101010"))
+        SeasonDecor._poly(s, [(-R * 0.035, -R * 0.26), (R * 0.035, -R * 0.26), (0, -R * 0.21)], _hex("#f48fb1"))
+
+    @staticmethod
+    def _horseshoe(s, rng, size, color, _sea):
+        """A horseshoe, ends up (so the luck stays in), its nail holes along the iron."""
+        R = size / 2
+        pb = Gsk.PathBuilder.new()
+        pb.move_to(-R * 0.5, -R * 0.62)
+        pb.line_to(-R * 0.52, R * 0.02)
+        pb.cubic_to(-R * 0.52, R * 0.86, R * 0.52, R * 0.86, R * 0.52, R * 0.02)
+        pb.line_to(R * 0.5, -R * 0.62)
+        path = pb.to_path()
+        s.append_stroke(path, Gsk.Stroke.new(R * 0.3), _hex("#546e7a", 0.97))
+        s.append_stroke(path, Gsk.Stroke.new(R * 0.2), _hex("#b0bec5", 0.97))
+        for x, y in ((0.51, -0.4), (0.52, -0.08), (0.45, 0.3), (0.24, 0.57)):
+            for k in (-1, 1):
+                SeasonDecor._dot(s, k * x * R, y * R, R * 0.04, _hex("#263238"))
+
+    @staticmethod
+    def _clover4(s, rng, size, color, sea):
+        """A four-leaf clover."""
+        SeasonDecor._line(s, [(0, 0), (size * 0.03, size * 0.3), (size * 0.1, size * 0.52)], max(1.0, size * 0.05),
+                          _hex("#1b5e20"))
+        for a in (0, 90, 180, 270):
+            s.save()
+            s.rotate(a + 45)
+            s.translate(Graphene.Point().init(0, -size * 0.2))
+            SeasonDecor._heart(s, rng, size * 0.42, _hex("#2e9d43", 0.97), sea)
+            s.restore()
+
+    @staticmethod
+    def _mirror(s, rng, size, color, _sea):
+        """A hand mirror, cracked: seven years of bad luck."""
+        R = size / 2
+        gold = _hex("#d4a017", 0.97)
+        SeasonDecor._round_rect(s, -R * 0.09, R * 0.3, R * 0.18, R * 0.66, R * 0.08, gold)
+        SeasonDecor._oval(s, 0, -R * 0.22, R * 0.52, R * 0.62, gold)
+        SeasonDecor._oval(s, 0, -R * 0.22, R * 0.42, R * 0.52, _hex("#cfe8f5", 0.97))
+        cx, cy, w, dark = R * 0.06, -R * 0.3, max(1.0, size * 0.022), _hex("#37474f")
+        for a, far, kink in ((20, 0.4, 0.05), (95, 0.52, -0.06), (150, 0.44, 0.05), (215, 0.46, -0.05),
+                             (280, 0.36, 0.06), (330, 0.4, -0.04)):
+            r = math.radians(a)
+            ex, ey = cx + math.cos(r) * R * far, cy + math.sin(r) * R * far * 1.15
+            mx, my = (cx + ex) / 2 - math.sin(r) * R * kink, (cy + ey) / 2 + math.cos(r) * R * kink
+            SeasonDecor._line(s, [(cx, cy), (mx, my), (ex, ey)], w, dark)
+
+    @staticmethod
+    def _ladder(s, rng, size, color, _sea):
+        """A wooden ladder (not to be walked under)."""
+        R, w, wood = size / 2, max(1.5, size * 0.06), _hex("#a1662f", 0.97)
+        for t in (0.14, 0.38, 0.62, 0.86):
+            y, half = R * (0.9 - 1.8 * t), R * (0.45 - 0.2 * t)
+            SeasonDecor._line(s, [(-half, y), (half, y)], w * 0.8, _hex("#c98a4b", 0.97))
+        for k in (-1, 1):
+            SeasonDecor._line(s, [(k * R * 0.45, R * 0.9), (k * R * 0.25, -R * 0.9)], w, wood)
+
+    @staticmethod
     def _shamrock(s, rng, size, color, sea):
         for a in (0, 120, 240):
             s.save()
@@ -10449,6 +10716,11 @@ class SeasonDecor:
                    for i in range(4)]
             SeasonDecor._line(s, pts, w, color)
 
+
+
+for _n in NUMBER_KINDS:  # the number days' falling numbers: kinds "n13", "n8"…
+    setattr(SeasonDecor, "_n" + _n,
+            staticmethod(lambda s, rng, size, color, sea, _t=_n: SeasonDecor._number(s, _t, size, color)))
 
 
 class ClockView(Gtk.Widget):
