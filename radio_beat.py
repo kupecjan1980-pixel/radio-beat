@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.37.2"
+APP_VERSION = "0.37.3"
 
 import collections
 import ctypes
@@ -5042,6 +5042,24 @@ class CacheShare:
                 m["titles_n"] = len([1 for k, v in list(titles_got().items()) if v and not k.startswith("\0")])
             except (OSError, ValueError, TypeError, KeyError):
                 pass  # an older hub (no names yet): next round
+            # the name days' famous people (looked up once, on any computer; with TMDB's photos from one with a key)
+            try:
+                if NAMESAKES_SHARE["export"]:
+                    mine = NAMESAKES_SHARE["export"]() or []
+                    sig = sorted((r[0], r[2]) for r in mine)
+                    if sig != [tuple(x) for x in m.get("names_sig", [])]:
+                        for i in range(0, len(mine), 20):
+                            self._hub(base, "/radio-beat/v1/namesakes", json.dumps(mine[i:i + 20]).encode(), timeout=60)
+                        m["names_sig"] = sig
+                    while self.on:
+                        page = json.loads(self._hub(base, f"/radio-beat/v1/namesakes?since={m.get('names', 0)}",
+                                                    timeout=60))
+                        NAMESAKES_SHARE["merge"](page.get("namesakes") or [])
+                        m["names"] = page.get("next", m.get("names", 0))
+                        if not page.get("more"):
+                            break
+            except (OSError, ValueError, TypeError, KeyError):
+                pass
             self._save_marks()
         self.got += got
         self.info_in += info_in
@@ -8228,6 +8246,33 @@ def tmdb_key_from_file() -> str:
             return f.read().strip()
     except OSError:
         return ""
+
+
+# The name days' famous people looked up on one computer are shared through the hub (the user: like the names
+# DeepL put into Czech), so one with a TMDB key gives the others its actors' photos too (the key itself stays
+# where it is: a photo's address needs none). What comes from the hub is checked: plain fields, known photo hosts.
+NAMESAKE_IMG = re.compile(r"^https://(commons|upload|thumb)\.wikimedia\.org/|^https://image\.tmdb\.org/")
+NAMESAKES_SHARE = {"export": None, "merge": None}  # the app's: its entries out, the hub's in
+
+
+def namesakes_clean(people):
+    """A list of people as the hub gave it, only what a list of ours holds; None when it isn't one."""
+    if not isinstance(people, list) or not 0 < len(people) <= 60:
+        return None
+    out = []
+    for q in people:
+        if not isinstance(q, dict) or not isinstance(q.get("name"), str) or not 0 < len(q["name"]) <= 120:
+            return None
+        one = {}
+        for k, v in q.items():
+            if k == "img":
+                one[k] = v if isinstance(v, str) and len(v) <= 600 and NAMESAKE_IMG.match(v) else ""
+            elif k in ("name", "desc", "born", "died", "years") and (v is None or (isinstance(v, str) and len(v) <= 400)):
+                one[k] = v
+            elif k == "czech" and isinstance(v, bool):
+                one[k] = v
+        out.append(one)
+    return out
 
 
 def tmdb_picture(tmdb_id: str) -> str:
@@ -14547,6 +14592,9 @@ class Window(Adw.ApplicationWindow):
                             text=self.app.settings.get("tmdb_key", "") or tmdb_key_from_file(), show_apply_button=True)
         tmdb.connect("apply", lambda r: self.app.set_tmdb_key(r.get_text().strip()))
         group.add(tmdb)
+        self.tmdb_note = Adw.ActionRow(title="Stav klíče TMDB", subtitle="Ověřuje se…", subtitle_lines=0)
+        group.add(self.tmdb_note)
+        GLib.timeout_add_seconds(6, lambda: (self.app.tmdb_check(), False)[1])
         dl = Adw.EntryRow(title="Klíč DeepL pro české překlady názvů a textů (DeepL API Free, zdarma po registraci)",
                           text=self.app.settings.get("deepl_key", "") or deepl_key_from_file(),
                           show_apply_button=True)
@@ -16960,6 +17008,8 @@ class App(Adw.Application):
         self.share.screenshot = self.window_shot
         global TMDB_KEY
         TMDB_KEY = self.settings.get("tmdb_key", "") or tmdb_key_from_file()
+        NAMESAKES_SHARE["export"] = lambda: self._on_main(self.namesakes_export)
+        NAMESAKES_SHARE["merge"] = lambda rows: self._on_main(lambda: self.namesakes_merge(rows))
         TITLES_HOOK[0] = lambda: GLib.idle_add(lambda: (self.win and self.win.titles_translated(), False)[1])
         global DEEPL_KEY
         DEEPL_KEY = self.settings.get("deepl_key", "") or deepl_key_from_file()
@@ -18027,6 +18077,35 @@ class App(Adw.Application):
             self._namesakes_file = {k: v for k, v in self._namesakes_file.items() if v.get("tmdb") == bool(key)}
             self._namesakes = {}
         threading.Thread(target=self._names_ahead_round, daemon=True).start()
+        if self.win:
+            self.win.tmdb_note.set_subtitle("Ověřuje se…")
+        self.tmdb_check()
+
+    def tmdb_check(self) -> None:
+        """Asks TMDB whether it takes the key; the settings say it."""
+        def work():
+            if not TMDB_KEY:
+                text = ("Bez klíče: herci bez volné fotky zůstanou bez fotky, pokud ji nesdílí jiný počítač "
+                        "s klíčem")
+            else:
+                v4 = len(TMDB_KEY) > 40
+                req = urllib.request.Request(
+                    "https://api.themoviedb.org/3/configuration" + ("" if v4 else f"?api_key={TMDB_KEY}"),
+                    headers={"User-Agent": MB_UA, "Accept": "application/json",
+                             **({"Authorization": f"Bearer {TMDB_KEY}"} if v4 else {})})
+                try:
+                    with urllib.request.urlopen(req, timeout=12) as r:
+                        json.load(r)
+                    made = sum(1 for v in getattr(self, "_namesakes_file", {}).values() if v.get("tmdb"))
+                    text = (f"Klíč přijat ({time.strftime('%H:%M')}). Fotky herců z TMDB se hledají s ním; jmen "
+                            f"zpracovaných s TMDB: {made}. Sdílí se s ostatními počítači")
+                except urllib.error.HTTPError as e:
+                    text = ("TMDB klíč odmítl (neplatný klíč): zkontrolujte, že je zkopírovaný celý"
+                            if e.code in (401, 403) else f"TMDB odpověděl chybou {e.code}: zkusí se to později")
+                except (OSError, ValueError) as e:
+                    text = f"TMDB se nepodařilo zastihnout ({type(e).__name__}): klíč se ověří později"
+            GLib.idle_add(lambda: (self.win and self.win.tmdb_note.set_subtitle(text), False)[1])
+        threading.Thread(target=work, daemon=True).start()
 
     def name_meaning_today(self) -> str:
         """Where today's name(s) come from (kept; looked up in the background when not yet)."""
@@ -18197,7 +18276,7 @@ class App(Adw.Application):
                 self.enhancer.request(f"pic:{url}", url, data, (w, h), size, lambda pic: None, screen=px)
         return False
 
-    def want_namesakes(self, names: list, key: str) -> None:
+    def _namesakes_load(self) -> None:
         if not hasattr(self, "_namesakes"):
             self._namesakes = {}
             try:
@@ -18206,6 +18285,49 @@ class App(Adw.Application):
                 self._namesakes_file = {k: v for k, v in keep.items() if time.time() - v.get("at", 0) < NAMESAKES_KEEP}
             except (OSError, ValueError, AttributeError):
                 self._namesakes_file = {}
+
+    def _namesakes_save(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(NAMESAKES_FILE), exist_ok=True)
+            with open(NAMESAKES_FILE + ".part", "w") as f:
+                json.dump(self._namesakes_file, f, ensure_ascii=False)
+            os.replace(NAMESAKES_FILE + ".part", NAMESAKES_FILE)
+        except OSError:
+            pass
+
+    def namesakes_export(self) -> list:
+        """(Main thread.) The names' people looked up here, for the hub: [[names, version, with TMDB, people]]."""
+        self._namesakes_load()
+        return [[k, v["v"], int(bool(v.get("tmdb"))), v["people"]] for k, v in self._namesakes_file.items()
+                if v.get("v") == NAMESAKES_V and v.get("people")]
+
+    def namesakes_merge(self, rows) -> int:
+        """(Main thread.) The hub's: taken for names not looked up here (or not for long), and when they were
+        made with TMDB and ours without."""
+        self._namesakes_load()
+        n = 0
+        for r in rows if isinstance(rows, list) else []:
+            if not (isinstance(r, list) and len(r) == 4 and isinstance(r[0], str) and 0 < len(r[0]) <= 120
+                    and r[1] == NAMESAKES_V):
+                continue
+            mine = self._namesakes_file.get(r[0])
+            if mine and mine.get("v") == NAMESAKES_V and (mine.get("tmdb") or not r[2]):
+                continue
+            people = namesakes_clean(r[3])
+            if not people:
+                continue
+            self._namesakes_file[r[0]] = {"at": time.time(), "people": people, "v": NAMESAKES_V, "tmdb": bool(r[2])}
+            if r[0] in self._namesakes:
+                self._namesakes[r[0]] = people
+            n += 1
+        if n:
+            self._namesakes_save()
+            if self.win:
+                self.win.names_refresh()
+        return n
+
+    def want_namesakes(self, names: list, key: str) -> None:
+        self._namesakes_load()
         kept = self._namesakes_file.get(key, {})
         if kept.get("v") == NAMESAKES_V and (kept.get("tmdb") or not TMDB_KEY):  # (older, or before a TMDB key: anew)
             self._namesakes[key] = self._namesakes_file[key]["people"]
@@ -18229,13 +18351,7 @@ class App(Adw.Application):
             return False
         self._namesakes[key] = people
         self._namesakes_file[key] = {"at": time.time(), "people": people, "v": NAMESAKES_V, "tmdb": bool(TMDB_KEY)}
-        try:
-            os.makedirs(os.path.dirname(NAMESAKES_FILE), exist_ok=True)
-            with open(NAMESAKES_FILE + ".part", "w") as f:
-                json.dump(self._namesakes_file, f, ensure_ascii=False)
-            os.replace(NAMESAKES_FILE + ".part", NAMESAKES_FILE)
-        except OSError:
-            pass
+        self._namesakes_save()
         if self.win:
             self.win.names_refresh()
         return False

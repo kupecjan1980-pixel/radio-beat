@@ -62,6 +62,8 @@ class Hub:
                                                  PRIMARY KEY (artist, title));
             CREATE TABLE IF NOT EXISTS counter (name TEXT PRIMARY KEY, n INTEGER);
             CREATE TABLE IF NOT EXISTS titles (seq INTEGER UNIQUE, name TEXT PRIMARY KEY, cs TEXT);
+            CREATE TABLE IF NOT EXISTS namesakes (seq INTEGER UNIQUE, name TEXT PRIMARY KEY, v INTEGER,
+                                                  tmdb INTEGER, people TEXT);
         """)
         self.used = self.db.execute("SELECT COALESCE(SUM(size), 0) FROM files").fetchone()[0]
 
@@ -259,6 +261,36 @@ class Hub:
                 n += 1
         return n
 
+    # --- the name days' famous people (an app's lookup; a newer kind, or one made with TMDB, replaces) ---------
+    def get_namesakes(self, since: int) -> dict:
+        with self.lock:
+            rows = self.db.execute("SELECT seq, name, v, tmdb, people FROM namesakes WHERE seq > ? ORDER BY seq "
+                                   "LIMIT 20", (since,)).fetchall()
+        return {"namesakes": [[r[1], r[2], r[3], json.loads(r[4])] for r in rows],
+                "next": rows[-1][0] if rows else since, "more": len(rows) == 20}
+
+    def put_namesakes(self, rows) -> int:
+        n = 0
+        with self.lock, self.db:
+            for r in rows if isinstance(rows, list) else []:
+                if not (isinstance(r, list) and len(r) == 4 and self._text(r[0], 120, False) and r[0]
+                        and isinstance(r[1], int) and 0 < r[1] < 1000 and r[2] in (0, 1)
+                        and isinstance(r[3], list) and 0 < len(r[3]) <= 60
+                        and all(isinstance(q, dict) for q in r[3])):
+                    continue
+                people = json.dumps(r[3], ensure_ascii=False)
+                if len(people) > 60000:
+                    continue
+                old = self.db.execute("SELECT v, tmdb FROM namesakes WHERE name = ?", (r[0],)).fetchone()
+                if old and not (r[1] > old[0] or (r[1] == old[0] and r[2] > old[1])):
+                    continue
+                seq = (self.db.execute("SELECT n FROM counter WHERE name = 'namesakes'").fetchone() or (0,))[0] + 1
+                self.db.execute("INSERT OR REPLACE INTO counter VALUES ('namesakes', ?)", (seq,))
+                self.db.execute("INSERT OR REPLACE INTO namesakes VALUES (?, ?, ?, ?, ?)",
+                                (seq, r[0], r[1], r[2], people))
+                n += 1
+        return n
+
     def stats(self) -> dict:
         with self.lock:
             files = self.db.execute("SELECT COUNT(*) FROM files WHERE name LIKE '%.jpg'").fetchone()[0]
@@ -336,6 +368,8 @@ def serve(hub: Hub, port: int) -> None:
                 return self._json(hub.get_songinfo(self._since()))
             if p.startswith("/radio-beat/v1/titles"):
                 return self._json(hub.get_titles(self._since()))
+            if p.startswith("/radio-beat/v1/namesakes"):
+                return self._json(hub.get_namesakes(self._since()))
             name = p.rsplit("/", 1)[-1]
             if p.startswith("/radio-beat/v1/file/") and NAME.match(name):
                 try:
@@ -349,7 +383,8 @@ def serve(hub: Hub, port: int) -> None:
             if not self._allowed():
                 return
             p = self.path
-            if p in ("/radio-beat/v1/plays", "/radio-beat/v1/songinfo", "/radio-beat/v1/titles"):
+            if p in ("/radio-beat/v1/plays", "/radio-beat/v1/songinfo", "/radio-beat/v1/titles",
+                     "/radio-beat/v1/namesakes"):
                 body = self._body(BODY_MAX)
                 if body is None:
                     return
@@ -358,7 +393,7 @@ def serve(hub: Hub, port: int) -> None:
                 except ValueError:
                     return self._send(400, b"")
                 got = (hub.put_plays(rows) if p.endswith("plays") else hub.put_titles(rows) if p.endswith("titles")
-                       else hub.put_songinfo(rows))
+                       else hub.put_namesakes(rows) if p.endswith("namesakes") else hub.put_songinfo(rows))
                 return self._json({"new": got})
             name = p.rsplit("/", 1)[-1]
             if p.startswith("/radio-beat/v1/shot/") and LOG_ID.match(name):
