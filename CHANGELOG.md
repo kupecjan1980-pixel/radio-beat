@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.37 — Názvy česky
+
+- **0.37.0** (2026-11-14) Anglické názvy skladeb a alb mají v závorce český překlad: v panelu ⓘ (HRÁLO u skladby i jejího alba, ZAJÍMAVOSTI) a v okně o skladbě, např. „No Prayer for the Dying (Žádná modlitba za umírající)“. Asi 230 nejhranějších názvů je přeloženo ručně a je součástí aplikace (jména kapel, výběry a slovní hříčky zůstávají, jak jsou); ostatní, pokud vypadají anglicky, se zkoušejí přeložit přes překladovou službu, která ale mívá denní příděl vyčerpaný, takže přibývají pomalu
+
 ## 0.36 — Mapa Měsíce
 
 - **0.36.4** (2026-11-14) Mapa Měsíce: u pohoří je na mapě i v popisu výška nejvyšších vrcholů (Kavkaz až 6 000 m, Apeniny až 5 500 m, Jura asi 3 800 m, Alpy až 3 600 m, Karpaty až 2 400 m), u Přímého zlomu výška svahu a u Schröterova údolí hloubka

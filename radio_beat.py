@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.36.4"
+APP_VERSION = "0.37.0"
 
 import collections
 import ctypes
@@ -1211,6 +1211,23 @@ def czech_sentence(text: str) -> str:
     except OSError:
         pass
     return cs
+
+
+# English song and album names in Czech (the user: "No Prayer for the Dying (Žádná modlitba za umírající)").
+# titles_cs.json: the most played ones, translated by hand (a band's name, a compilation's or a pun is left as it
+# is). Others are asked of the translation service when they look English; that one is often out of its free
+# share for the day, so they come when they come.
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "titles_cs.json"), encoding="utf-8") as _f:
+        TITLES_CS = json.load(_f)
+except (OSError, ValueError):
+    TITLES_CS = {}
+ENGLISH_HINT = re.compile(r"\b(the|of|for|you|your|and|with|is|it's|don't|can't|love|night|all|are|was|what|when|"
+                          r"this|that|heart|world|from|never|who|will|like|girl|blues|road|black|dream)\b")
+
+
+def title_key(title: str) -> str:
+    return plain_title(title or "").strip().rstrip(".").lower()
 
 
 def _about_cache_get(key: str):
@@ -14914,7 +14931,8 @@ class Window(Adw.ApplicationWindow):
             years = a.artist_years(band)  # (beside the name, like the name day's people: born, died, how old)
             out.append((f"{band} · {years}" if years else band, a.band_about))
         if getattr(a, "album_about", "") and info.get("album"):
-            out.append((f"Album {tidy_case(plain_title(info['album']))}", a.album_about))
+            cs = a.title_cs(info["album"])
+            out.append((f"Album {tidy_case(plain_title(info['album']))}" + (f" ({cs})" if cs else ""), a.album_about))
         return out
 
     def song_refresh(self) -> None:
@@ -14930,7 +14948,7 @@ class Window(Adw.ApplicationWindow):
         attrs = Pango.AttrList()
         attrs.insert(Pango.attr_scale_new(f))
         info = a.info or {}
-        title = plain_title(info.get("title") or a.song or "")
+        title = a.with_czech(info.get("title") or a.song or "")
         head = Gtk.Label(label=GLib.markup_escape_text(title or "Právě hraje"), use_markup=True,
                          halign=Gtk.Align.START, attributes=attrs)
         head.add_css_class("day-head")
@@ -16109,6 +16127,7 @@ class Window(Adw.ApplicationWindow):
             t = Gtk.Label(label=title, xalign=0, wrap=True, hexpand=True)
             t.add_css_class("show-title")
             top.append(t)
+            self._last_title = t
         if badge or title:
             box.append(top)
         self._last_top = top
@@ -16169,7 +16188,7 @@ class Window(Adw.ApplicationWindow):
         if mode == "ZAJÍMAVOSTI":
             if a.about:
                 info = a.info or {}
-                self._puddle_block(a.badge("NOW PLAYING", a.about), plain_title(info.get("title") or a.song or ""),
+                self._puddle_block(a.badge("NOW PLAYING", a.about), a.with_czech(info.get("title") or a.song or ""),
                                    a.cz(a.about) + (f"\n{a.cz(a.facts)}" if a.facts else ""))
             while len(self.puddle_items) < 4 and (item := a.next_curiosity()):
                 self.puddle_items.append(item)
@@ -16228,9 +16247,9 @@ class Window(Adw.ApplicationWindow):
             row = {"at": at, "artist": artist, "title": title, "album": album, "show": show, "cover": cover,
                    "facts": facts, "shown_artist": shown_artist, "shown_title": shown_title}
             self._last_body = None
-            self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{shown_artist} – {plain_title(shown_title)}",
+            self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{shown_artist} – {self.app.with_czech(shown_title)}",
                                self._played_line(row) or " ", img=small_cover(cover) if cover else "")
-            row["label"] = self._last_body
+            row["label"], row["title_label"] = self._last_body, self._last_title
             # play / pause and stop in glass like the radio's: the song itself from YouTube (the radio waits)
             row["play"] = self._glass_button("media-playback-start-symbolic", 40,
                                              "Přehrát z YouTube (studiová verze, nejlepší kvalita)",
@@ -16272,8 +16291,19 @@ class Window(Adw.ApplicationWindow):
         """A played song's line under it: the album, its first release, the show."""
         years = self.app.artist_years(row["artist"])
         who = f"{first_artist(row.get('shown_artist') or row['artist'])} {years}" if years else ""
-        return " · ".join(x for x in (who, plain_title(row["album"] or ""), self.app.cz(row["facts"] or ""),
+        return " · ".join(x for x in (who, self.app.with_czech(row["album"] or ""), self.app.cz(row["facts"] or ""),
                                       row["show"]) if x)
+
+    def titles_translated(self) -> None:
+        """A name's Czech came: HRÁLO's rows, the song's box and ZAJÍMAVOSTI say it."""
+        for row in self._played_rows:
+            if row.get("title_label"):
+                row["title_label"].set_text(f"{row['shown_artist']} – {self.app.with_czech(row['shown_title'])}")
+            if row.get("label"):
+                row["label"].set_text(self._played_line(row))
+        self.song_refresh()
+        if self.puddle_open and self.PUDDLE_MODES[self.puddle_mode] == "ZAJÍMAVOSTI":
+            self._fill_puddle()
 
     def played_years(self, name: str) -> None:
         """An artist's years looked up: HRÁLO's rows of theirs say them."""
@@ -17872,6 +17902,51 @@ class App(Adw.Application):
         if self.win:
             self.win.names_refresh()
         return False
+
+    def title_cs(self, title: str) -> str:
+        """An English song's or album's name in Czech; '' when it has none (yet: asked for, the rows are told)."""
+        key = title_key(title)
+        if not key or not key.isascii():
+            return ""
+        if key in TITLES_CS:
+            return TITLES_CS[key]
+        known = self.__dict__.setdefault("_title_cs", {})
+        if key not in known and ENGLISH_HINT.search(key):
+            known[key] = ""
+            queue = self.__dict__.setdefault("_title_queue", [])
+            queue.append(key)
+            if not getattr(self, "_title_worker", None):
+                self._title_worker = threading.Thread(target=self._titles_work, daemon=True)
+                self._title_worker.start()
+        return known.get(key, "")
+
+    def with_czech(self, title: str) -> str:
+        """'No Prayer for the Dying (Žádná modlitba za umírající)'; as it is when it has no Czech."""
+        shown = plain_title(title or "")
+        cs = self.title_cs(title)
+        return f"{shown} ({cs})" if cs else shown
+
+    def _titles_work(self) -> None:
+        """(A thread.) The names waiting, one after another, slowly; the service out of its day's share: an hour's
+        rest, then again."""
+        got = False
+        while not getattr(self, "quitting", False):
+            if not self._title_queue:
+                if got and self.win:
+                    GLib.idle_add(lambda: (self.win.titles_translated(), False)[1])
+                got = False
+                time.sleep(5)
+                continue
+            key = self._title_queue[0]
+            cs = czech_sentence(key[:1].upper() + key[1:]).strip().rstrip(".")
+            if not cs:
+                time.sleep(3600)
+                continue
+            self._title_queue.pop(0)
+            if norm(cs) != norm(key):
+                self._title_cs[key] = cs[:1].upper() + cs[1:]
+                got = True
+            time.sleep(3)
 
     def _moon_face_load(self) -> None:
         """(A thread.) The Moon's photo for its phases and its map: off the disk when it was fetched before,
