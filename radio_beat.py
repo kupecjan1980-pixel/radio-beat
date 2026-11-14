@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.37.4"
+APP_VERSION = "0.37.5"
 
 import collections
 import ctypes
@@ -51,6 +51,11 @@ from gi.repository import Adw, Gdk, GLib, Gio, Graphene, Gsk, Gtk, Pango  # noqa
 
 APP_ID = "local.hanis.RadioBeat"
 HERE = os.path.dirname(os.path.realpath(__file__))
+# OMP_PROC_BIND / OMP_PLACES set for a whole session (a tuning tool did, on the author's desktop) make GNU OpenMP
+# bind every program that loads it to the first CPU core as it starts: mpv and Real-ESRGAN, started from here,
+# ran on two CPU threads out of sixteen. Not handed on to what this app starts.
+for _var in ("OMP_PROC_BIND", "OMP_PLACES", "GOMP_CPU_AFFINITY"):
+    os.environ.pop(_var, None)
 CONFIG = os.path.join(GLib.get_user_config_dir(), "radio-beat")
 SETTINGS = os.path.join(CONFIG, "settings.json")
 AUTOSTART = os.path.join(GLib.get_user_config_dir(), "autostart", f"{APP_ID}.desktop")
