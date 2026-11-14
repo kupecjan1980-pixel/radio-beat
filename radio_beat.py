@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.36.0"
+APP_VERSION = "0.36.1"
 
 import collections
 import ctypes
@@ -12187,6 +12187,7 @@ def moon_face_set(data: bytes, ai: bool = False) -> bool:
         print("Rádio Beat: fotka Měsíce:", repr(e), file=sys.stderr)
         return False
     MOON_FACE.update(mips=mips[::-1] + [(big, w)], ai=ai, v=MOON_FACE["v"] + 1, keep=buf)
+    print(f"Rádio Beat: fotka Měsíce {w}×{h} px" + (", vylepšená AI" if ai else ", jak přišla"), file=sys.stderr)
     return True
 
 
@@ -17884,6 +17885,7 @@ class App(Adw.Application):
         if not data or not px or not self.settings.get("enhance", True) or not hasattr(self, "enhancer"):
             return
         n = MOON_PHOTO_PX
+        print(f"Rádio Beat: fotka Měsíce jde k vylepšení ({n} → {2 * n} px)", file=sys.stderr)
 
         def done(pic: bytes):
             threading.Thread(target=lambda: moon_face_set(pic, True) and GLib.idle_add(self._moon_face_got),

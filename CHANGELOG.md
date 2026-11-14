@@ -4,6 +4,7 @@
 
 ## 0.36 — Mapa Měsíce
 
+- **0.36.1** (2026-11-14) Záznam říká, kdy se fotka Měsíce načetla a kdy se vrátila vylepšená AI
 - **0.36.0** (2026-11-14) Okno o Měsíci a Slunci má dvě celostránkové mapy Měsíce se jmény přímo na snímku: **moře** (oceán, 20 moří, zálivy, jezera a bažiny) a **krátery, hory a přistání** (34 kráterů, pohoří, údolí a zlomy, 12 míst, kde přistáli lidé a sondy: Apollo 11–17, Luna 2 a 9, Lunochod 1, Čchang-e 3 a 5, Čandraján 3). Pod každou mapou je ke každému jménu latinský název, velikost a pár slov: co to je, čím je zajímavé, kdo tam přistál (Moře klidu a Apollo 11, Tycho a jeho paprsky, Clavius a voda, Eugene Cernan s československou vlajkou…). Podklad je skutečný snímek přivrácené strany ze sondy Lunar Reconnaissance Orbiter (NASA), osvětlený ze strany, takže je vidět každý kráter; AI ho vylepší na dvojnásobnou velikost jako ostatní fotky. Jména se na mapu rozmístí sama tak, aby se nepřekrývala (moře přes svou plochu, ostatní vedle značky: kroužek kráter, trojúhelník hory, kosočtverec přistání). **Fáze Měsíce** (vedle tlačítka ⓘ, řada sedmi večerů v okně, Měsíc v počasí) se kreslí z téhož snímku místo kresleného kotouče, s měkkým okrajem stínu. Protože má okno teď hodně stránek, samo se každou hodinu ukáže nejvýš na čtyři a příště pokračuje, kde skončilo
 
 ## 0.35 — Číselné dny: pátek třináctého a zdvojená data
