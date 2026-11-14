@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.35.2"
+APP_VERSION = "0.36.0"
 
 import collections
 import ctypes
@@ -11045,9 +11045,8 @@ MOON_BRIGHT = ((-0.12, 0.72, 0.055, True), (-0.32, -0.12, 0.05, True), (-0.68, -
                (-0.60, -0.08, 0.03, False))  # Tycho (rays), Copernicus (rays), Aristarchus, Kepler
 
 
-def draw_moon(cr, rad: float, m: dict) -> None:
-    """The moon in cairo, centered on (0, 0), radius `rad`: bluish gray, its seas darker, its bright craters,
-    the night side dark (a faint earthshine), lit and turned as m (moon_sky) says."""
+def _moon_drawn(cr, rad: float, m: dict) -> None:
+    """The Moon's face drawn (while its photo isn't there): bluish gray, its seas darker, its bright craters."""
     cr.save()
     cr.rotate(m["q"])  # the zenith up (cairo turns clockwise; the position angles go anticlockwise, east left)
     cr.arc(0, 0, rad, 0, 2 * math.pi)
@@ -11087,6 +11086,44 @@ def draw_moon(cr, rad: float, m: dict) -> None:
         cr.set_source_rgba(0.96, 0.97, 1.0, 0.9)
         cr.fill()
     cr.restore()
+
+
+def _moon_photo(cr, rad: float, gain: float = 1.45) -> bool:
+    """The Moon's face from its photo (MOON_FACE), north up, centered on (0, 0), radius `rad`, brightened `gain`
+    times (the mosaic is dark: lit low from the side); False while there's no photo."""
+    import cairo
+    mips = MOON_FACE["mips"]
+    if not mips:
+        return False
+    surf, size = next(((s, n) for s, n in mips if n >= rad * 5), mips[-1])  # (sharp at 2.5 screen pixels a point)
+    cr.save()
+    cr.arc(0, 0, rad * 0.994, 0, 2 * math.pi)
+    cr.clip()
+    cr.save()
+    cr.scale(2 * rad / size, 2 * rad / size)
+    cr.set_source_surface(surf, -size / 2, -size / 2)
+    cr.get_source().set_filter(cairo.FILTER_GOOD)
+    cr.paint()
+    cr.restore()
+    if gain > 1:
+        g = 1 - 1 / gain
+        cr.set_operator(cairo.OPERATOR_COLOR_DODGE)
+        cr.set_source_rgb(g, g, g)
+        cr.paint()
+    cr.restore()
+    return True
+
+
+def draw_moon(cr, rad: float, m: dict) -> None:
+    """The moon in cairo, centered on (0, 0), radius `rad`: its photo (the same one the box's map shows; drawn
+    bluish gray with darker seas while that isn't there), the night side dark (a faint earthshine), lit and
+    turned as m (moon_sky) says."""
+    cr.save()
+    cr.rotate(m["q"])  # the zenith up (cairo turns clockwise; the position angles go anticlockwise, east left)
+    photo = _moon_photo(cr, rad)
+    cr.restore()
+    if not photo:
+        _moon_drawn(cr, rad, m)
     # the night side: lit side towards +x after turning to where its lit edge points, then the terminator
     # (an ellipse: x = e * sqrt(1 - y^2), e = rad * (1 - 2k)); everything left of it in shadow
     cr.save()
@@ -11095,14 +11132,17 @@ def draw_moon(cr, rad: float, m: dict) -> None:
     cr.arc(0, 0, rad, 0, 2 * math.pi)
     cr.clip()
     e = rad * (1 - 2 * m["k"])
-    cr.move_to(0, -rad)
-    cr.arc_negative(0, 0, rad, -math.pi / 2, math.pi / 2)  # the left half, top to bottom (through the left)
-    for i in range(41):  # back up along the terminator
-        y = rad - 2 * rad * i / 40
-        cr.line_to(e * math.sqrt(max(0.0, 1 - (y / rad) ** 2)), y)
-    cr.close_path()
-    cr.set_source_rgba(0.04, 0.06, 0.11, 0.86)
-    cr.fill()
+    steps = 5 if rad > 6 else 1  # the night's edge soft: darker step by step into it
+    dark = 1 - (1 - (0.93 if photo else 0.86)) ** (1 / steps)
+    for j in range(steps):
+        cr.move_to(0, -rad)
+        cr.arc_negative(0, 0, rad, -math.pi / 2, math.pi / 2)  # the left half, top to bottom (through the left)
+        for i in range(41):  # back up along the terminator
+            y = rad - 2 * rad * i / 40
+            cr.line_to((e - j * rad * 0.022) * math.sqrt(max(0.0, 1 - (y / rad) ** 2)), y)
+        cr.close_path()
+        cr.set_source_rgba(0.04, 0.06, 0.11, dark)
+        cr.fill()
     cr.restore()
     cr.arc(0, 0, rad, 0, 2 * math.pi)  # a soft edge glow
     cr.set_line_width(max(0.5, rad * 0.03))
@@ -11254,7 +11294,7 @@ class WeatherView(Gtk.Widget):
         # phases beside the button 3 of the 4 ms the whole window took a frame.
         info = getattr(self, "info", None) or {}
         key = (self.room, self.off, self.hover, id(self.parts), getattr(self, "sy", 1.0),
-               repr(info.get("sky")), repr(info.get("moon")))
+               repr(info.get("sky")), repr(info.get("moon")), MOON_FACE["v"])
         baked(self, snap, key, self._draw, hold=self.parts)
 
     def _draw(self, snap) -> None:
@@ -11977,7 +12017,7 @@ class MoonView(Gtk.Widget):
     def do_snapshot(self, snap) -> None:
         # (a picture while it's the same: see WeatherView)
         baked(self, snap, (self.room, self.off, self.hover, repr(self.now), repr(self.next),
-                           time.strftime("%-d. %-m.", time.localtime(self.when))), self._draw)
+                           time.strftime("%-d. %-m.", time.localtime(self.when)), MOON_FACE["v"]), self._draw)
 
     def _draw(self, snap) -> None:
         w, h = self.room
@@ -12063,7 +12103,7 @@ class MoonStrip(Gtk.Widget):
         _native, k = _screen_scale(self)
         if w < 20 or h < 20 or not self.days:
             return
-        key = (id(self.days), w, h, k)
+        key = (id(self.days), w, h, k, MOON_FACE["v"])
         hit = MoonStrip._pics.get(key)
         if hit is None or hit[0] is not self.days:
             if len(MoonStrip._pics) > 3:
@@ -12102,6 +12142,441 @@ class MoonStrip(Gtk.Widget):
                     PangoCairo.show_layout(cr, lay)
                 y += h * 0.20
         surf.flush()
+        return Gdk.MemoryTexture.new(W, H, Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
+                                     GLib.Bytes.new(bytes(surf.get_data())), surf.get_stride())
+
+
+# --- the Moon's photo and map ------------------------------------------------------------------------------------
+# The near side as the Lunar Reconnaissance Orbiter's camera saw it (NASA/GSFC/Arizona State University, public
+# domain): a mosaic lit low from the side, so every crater shows; an orthographic view from above 0° N 0° E, north
+# up, the disc touching the picture's edges, so a place's spot on it is worked out from where it is on the Moon.
+# The phases are drawn from the same photo (the user). Enhanced by the AI like the other photos, to twice its size.
+MOON_PHOTO = "https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote("Moon nearside LRO.jpg")
+MOON_PHOTO_PX = 1400
+MOON_FACE = {"v": 0, "mips": [], "ai": False}  # the photo as cairo pictures [(surface, size)], small to big
+
+
+def moon_face_set(data: bytes, ai: bool = False) -> bool:
+    """The Moon's photo (JPEG or PNG bytes) made ready for drawing: itself and smaller copies (halved again and
+    again: a small Moon drawn from a big photo would glitter). Any thread; False when it can't be read."""
+    import cairo
+    try:
+        tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+        w, h = tex.get_width(), tex.get_height()
+        if w != h or w < 256:
+            return False
+        dl = Gdk.TextureDownloader.new(tex)
+        dl.set_format(Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED)
+        raw, stride = dl.download_bytes()
+        buf = bytearray(raw.get_data())
+        big = cairo.ImageSurface.create_for_data(buf, cairo.FORMAT_ARGB32, w, h, stride)
+        mips, prev, n, size = [], big, w, 1024
+        while size >= 64:
+            if size < n:
+                s = cairo.ImageSurface(cairo.FORMAT_RGB24, size, size)
+                c = cairo.Context(s)
+                c.scale(size / n, size / n)
+                c.set_source_surface(prev, 0, 0)
+                c.get_source().set_filter(cairo.FILTER_BILINEAR if n == size * 2 else cairo.FILTER_GOOD)
+                c.paint()
+                s.flush()
+                mips.append((s, size))
+                prev, n = s, size
+            size //= 2
+    except (GLib.Error, AttributeError, TypeError, ValueError, MemoryError) as e:
+        print("Rádio Beat: fotka Měsíce:", repr(e), file=sys.stderr)
+        return False
+    MOON_FACE.update(mips=mips[::-1] + [(big, w)], ai=ai, v=MOON_FACE["v"] + 1, keep=buf)
+    return True
+
+
+# What's on the near side: (Czech name, Latin name, latitude north, longitude east, how big, a word on it).
+MOON_MARIA = (
+    ("Oceán bouří", "Oceanus Procellarum", 18.4, -57.4, "asi 2 600 km",
+     "Největší měsíční „moře“ a jediné zvané oceán: čedičová pláň přes celý západ přivrácené strany, asi "
+     "4 miliony km²."),
+    ("Moře dešťů", "Mare Imbrium", 32.8, -15.6, "asi 1 150 km",
+     "Lávou zalitá pánev po dopadu planetky před 3,9 miliardy let; lemují ho Apeniny, Alpy, Kavkaz, Karpaty a Jura."),
+    ("Moře jasu", "Mare Serenitatis", 28.0, 17.5, "asi 700 km",
+     "Kruhové moře východně od Moře dešťů; na jeho jihovýchodním okraji přistálo Apollo 17."),
+    ("Moře klidu", "Mare Tranquillitatis", 8.5, 31.4, "asi 870 km",
+     "Tady 20. července 1969 přistáli první lidé, Neil Armstrong a Buzz Aldrin z Apolla 11."),
+    ("Moře nepokojů", "Mare Crisium", 17.0, 59.1, "asi 550 km",
+     "Osamělý tmavý ovál u východního okraje, viditelný i pouhým okem; odtud Luna 24 přivezla roku 1976 poslední "
+     "sovětské vzorky."),
+    ("Moře hojnosti", "Mare Fecunditatis", -7.8, 51.3, "asi 850 km",
+     "Odtud roku 1970 přivezla Luna 16 první vzorky, které na Zemi dopravil automat."),
+    ("Moře nektaru", "Mare Nectaris", -15.2, 35.5, "asi 340 km",
+     "Malé kruhové moře ve staré pánvi; nad jeho západním břehem stojí trojice kráterů Theophilus, Cyrillus a "
+     "Catharina."),
+    ("Moře oblaků", "Mare Nubium", -21.3, -16.6, "asi 700 km",
+     "Na jeho východním okraji leží Přímý zlom, 110 km dlouhý svah viditelný i malým dalekohledem."),
+    ("Moře vláhy", "Mare Humorum", -24.4, -38.6, "asi 400 km",
+     "Kruhové moře na jihozápadě; na severním břehu má velký kráter Gassendi."),
+    ("Moře chladu", "Mare Frigoris", 56.0, 1.4, "asi 1 500 km",
+     "Dlouhý úzký pás tmavé lávy na severu, nad Alpami a kráterem Plato."),
+    ("Moře par", "Mare Vaporum", 13.3, 3.6, "asi 240 km",
+     "Malé moře skoro uprostřed kotouče, jihovýchodně od Apenin."),
+    ("Moře poznané", "Mare Cognitum", -10.0, -23.1, "asi 350 km",
+     "Jméno dostalo roku 1964, když sem dopadla sonda Ranger 7 a poslala první americké snímky Měsíce zblízka."),
+    ("Moře ostrovů", "Mare Insularum", 7.5, -30.9, "asi 500 km",
+     "Pláň mezi krátery Copernicus a Kepler, pojmenovaná až roku 1976."),
+    ("Humboldtovo moře", "Mare Humboldtianum", 56.8, 81.5, "asi 250 km",
+     "U severovýchodního okraje, dobře vidět jen při příznivém natočení Měsíce; nese jméno Alexandra von Humboldta."),
+    ("Moře hada", "Mare Anguis", 22.6, 67.7, "asi 150 km",
+     "Úzké klikaté moře severovýchodně od Moře nepokojů."),
+    ("Moře vln", "Mare Undarum", 6.8, 68.4, "asi 240 km",
+     "Nepravidelné skvrny lávy jihovýchodně od Moře nepokojů."),
+    ("Moře pěn", "Mare Spumans", 1.1, 65.1, "asi 140 km",
+     "Malé moře u východního okraje, jižně od Moře vln."),
+    ("Moře okrajové", "Mare Marginis", 13.3, 86.1, "asi 400 km",
+     "Na samém východním okraji kotouče, napůl už na odvrácené straně."),
+    ("Smythovo moře", "Mare Smythii", 1.3, 87.5, "asi 370 km",
+     "Na rovníku u východního okraje; po britském astronomovi Williamu Henrym Smythovi."),
+    ("Moře jižní", "Mare Australe", -38.9, 93.0, "asi 600 km",
+     "Na jihovýchodním okraji, většinou už na odvrácené straně; vidět jsou jen jeho tmavé skvrny."),
+    ("Moře východní", "Mare Orientale", -19.4, -92.8, "pánev 930 km",
+     "Střed obří pánve se třemi prstenci hor hned za západním okrajem; ze Země je vidět jen její okraj. "
+     "„Východní“ se jmenuje podle staré orientace map."),
+)
+MOON_WATERS = (
+    ("Záliv duhy", "Sinus Iridum", 44.1, -31.5, "asi 240 km",
+     "Půlkruh pohoří Jura na okraji Moře dešťů, zbytek zatopeného kráteru."),
+    ("Záliv středu", "Sinus Medii", 2.4, 1.7, "asi 290 km",
+     "Střed přivrácené strany: odtud je Země stále skoro přímo nad hlavou."),
+    ("Záliv veder", "Sinus Aestuum", 10.9, -8.8, "asi 300 km",
+     "Tmavá pláň mezi kráterem Eratosthenes a Apeninami."),
+    ("Záliv rosy", "Sinus Roris", 54.0, -56.6, "asi 200 km",
+     "Severní výběžek Oceánu bouří, navazuje na Moře chladu."),
+    ("Jezero snů", "Lacus Somniorum", 38.0, 29.2, "asi 400 km",
+     "Největší měsíční jezero, severovýchodně od Moře jasu."),
+    ("Jezero smrti", "Lacus Mortis", 45.0, 27.2, "asi 150 km",
+     "Lávou zalitý starý kráter s kráterem Bürg uprostřed."),
+    ("Bažina hniloby", "Palus Putredinis", 26.5, 0.4, "asi 160 km",
+     "Pod Apeninami; na jejím okraji u brázdy Hadley přistálo Apollo 15."),
+    ("Bažina epidemií", "Palus Epidemiarum", -32.0, -28.2, "asi 290 km",
+     "Lávová pláň s brázdami jihozápadně od Moře oblaků."),
+    ("Bažina spánku", "Palus Somni", 14.1, 45.0, "asi 160 km",
+     "Světlejší plošina mezi Mořem klidu a Mořem nepokojů, ohraničená paprsky kráteru Proclus."),
+)
+MOON_CRATERS = (
+    ("Tycho", "", -43.3, -11.4, "85 km",
+     "Mladý kráter (asi 108 milionů let) s nejvýraznějšími světlými paprsky, za úplňku sahají přes 1 500 km; "
+     "po Tychonu Brahovi."),
+    ("Copernicus", "", 9.6, -20.1, "93 km",
+     "„Monarcha Měsíce“: terasovité valy, středové vrcholky a paprsky, starý asi 800 milionů let; po Mikuláši "
+     "Koperníkovi."),
+    ("Kepler", "", 8.1, -38.0, "32 km",
+     "Malý jasný kráter s paprsky v Oceánu bouří; po Johannesu Keplerovi, který dráhy planet počítal v Praze."),
+    ("Aristarchus", "", 23.7, -47.4, "40 km",
+     "Nejjasnější místo přivrácené strany, svítí i v popelavém svitu; vedle něj se vine Schröterovo údolí."),
+    ("Plato", "", 51.6, -9.4, "asi 100 km",
+     "Kráter s tmavým, lávou zalitým rovným dnem na severním břehu Moře dešťů."),
+    ("Archimedes", "", 29.7, -4.0, "asi 82 km",
+     "Největší kráter v Moři dešťů, dno zalité lávou."),
+    ("Clavius", "", -58.4, -14.4, "asi 230 km",
+     "Jeden z největších kráterů přivrácené strany, s obloukem menších kráterů na dně; roku 2020 tu létající "
+     "observatoř SOFIA našla molekuly vody na osvětleném povrchu."),
+    ("Ptolemaeus", "", -9.2, -1.8, "asi 153 km",
+     "Obrovská valová rovina s hladkým dnem u středu kotouče; s krátery Alphonsus a Arzachel tvoří nápadnou řadu."),
+    ("Alphonsus", "", -13.4, -2.8, "asi 110 km",
+     "Sem dopadla roku 1965 sonda Ranger 9; na dně má tmavé skvrny sopečného popela."),
+    ("Arzachel", "", -18.2, -1.9, "97 km",
+     "Nejjižnější z řady, s vysokými terasovitými valy a středovou horou."),
+    ("Theophilus", "", -11.4, 26.4, "asi 100 km",
+     "Nejmladší z trojice u Moře nektaru, se středovými horami vysokými přes kilometr."),
+    ("Cyrillus", "", -13.2, 24.0, "98 km",
+     "Starší soused, jehož val Theophilus překryl."),
+    ("Catharina", "", -18.0, 23.6, "asi 100 km",
+     "Nejstarší a nejvíc rozrušený kráter z trojice."),
+    ("Posidonius", "", 31.8, 29.9, "95 km",
+     "Na východním břehu Moře jasu, dno rozpraskané brázdami."),
+    ("Aristoteles", "", 50.2, 17.4, "87 km",
+     "Velký terasovitý kráter na jižním břehu Moře chladu; s Eudoxem tvoří výraznou dvojici."),
+    ("Eudoxus", "", 44.3, 16.3, "67 km",
+     "Jižnější z dvojice, na severním konci Kavkazu."),
+    ("Atlas", "", 46.7, 44.4, "87 km",
+     "Na severovýchodě vedle Herkula; dno má protkané brázdami."),
+    ("Hercules", "", 46.7, 39.1, "69 km",
+     "Soused Atlasu s tmavým dnem a menším kráterem uvnitř."),
+    ("Endymion", "", 53.6, 56.5, "asi 123 km",
+     "Kráter s tmavým lávovým dnem u severovýchodního okraje."),
+    ("Cleomedes", "", 27.7, 55.5, "asi 130 km",
+     "Velký kráter severně od Moře nepokojů."),
+    ("Proclus", "", 16.1, 46.8, "28 km",
+     "Malý, velmi jasný kráter s vějířem paprsků jen na jednu stranu: stopa šikmého dopadu."),
+    ("Plinius", "", 15.4, 23.7, "43 km",
+     "Hlídá průliv mezi Mořem jasu a Mořem klidu."),
+    ("Manilius", "", 14.5, 9.1, "39 km",
+     "Jasný kráter na okraji Moře par."),
+    ("Eratosthenes", "", 14.5, -11.3, "59 km",
+     "Hluboký kráter na konci Apenin; jmenuje se podle něj jedno období měsíčních dějin."),
+    ("Messier", "", -1.9, 47.6, "11 km",
+     "Dvojice malých protáhlých kráterů se dvěma rovnoběžnými paprsky jako ohon komety."),
+    ("Langrenus", "", -8.9, 60.9, "132 km",
+     "Velký kráter se středovými vrcholky na východním břehu Moře hojnosti."),
+    ("Petavius", "", -25.3, 60.4, "asi 180 km",
+     "Kráter s mohutnou středovou horou a brázdou napříč dnem."),
+    ("Fra Mauro", "", -6.1, -17.0, "asi 97 km",
+     "Rozpadlý starý kráter; ve vrchovině severně od něj přistálo Apollo 14."),
+    ("Bullialdus", "", -20.7, -22.2, "61 km",
+     "Pěkně zachovaný kráter s terasami a středovou horou v Moři oblaků."),
+    ("Gassendi", "", -17.5, -39.9, "asi 110 km",
+     "Na břehu Moře vláhy; dno protkané brázdami, uvažovalo se o něm pro přistání Apolla 17."),
+    ("Grimaldi", "", -5.2, -68.6, "asi 173 km",
+     "Tmavá lávou zalitá pánev u západního okraje, jedno z nejtmavších míst Měsíce."),
+    ("Schickard", "", -44.4, -54.6, "asi 210 km",
+     "Velká valová rovina na jihozápadě se světlým pruhem přes tmavé dno."),
+    ("Pythagoras", "", 63.5, -62.8, "asi 140 km",
+     "Hluboký kráter u severozápadního okraje s dvojitou středovou horou."),
+    ("Bailly", "", -66.5, -69.1, "asi 300 km",
+     "Největší kráter přivrácené strany; u jihozápadního okraje je ale vidět silně zkreslený."),
+)
+MOON_MOUNTS = (
+    ("Apeniny", "Montes Apenninus", 18.9, -3.7, "600 km",
+     "Nejmohutnější měsíční pohoří, val pánve Moře dešťů; Mons Huygens měří 5,5 km."),
+    ("Alpy", "Montes Alpes", 47.5, -1.0, "asi 300 km",
+     "Pohoří na severovýchodním břehu Moře dešťů; protíná je Alpské údolí, Mont Blanc má 3,6 km."),
+    ("Alpské údolí", "Vallis Alpes", 49.2, 3.6, "délka asi 160 km",
+     "Rovný příkop napříč Alpami, široký až 10 km."),
+    ("Kavkaz", "Montes Caucasus", 38.4, 10.0, "asi 450 km",
+     "Odděluje Moře dešťů od Moře jasu, vrcholy až 6 km vysoké."),
+    ("Karpaty", "Montes Carpatus", 14.5, -24.4, "asi 350 km",
+     "Jižní okraj Moře dešťů, severně od kráteru Copernicus."),
+    ("Jura", "Montes Jura", 47.1, -34.0, "asi 420 km",
+     "Oblouk hor kolem Zálivu duhy; při východu Slunce svítí do tmy jako „zlaté ucho“."),
+    ("Přímý zlom", "Rupes Recta", -21.8, -7.8, "délka 110 km",
+     "Zlom v Moři oblaků, svah vysoký asi 300 m; při vycházejícím Slunci vrhá stín jako tmavá čára."),
+    ("Schröterovo údolí", "Vallis Schröteri", 26.2, -50.8, "délka asi 170 km",
+     "Největší klikaté údolí Měsíce, vyhloubené tekoucí lávou; začíná „Kobří hlavou“ u kráteru Herodotus."),
+    ("Reiner Gamma", "", 7.5, -59.0, "asi 70 km",
+     "Světlý vír bez jakéhokoli reliéfu: místní magnetické pole tu chrání povrch před tmavnutím slunečním větrem."),
+)
+MOON_LANDINGS = (
+    ("Apollo 11", "", 0.67, 23.47, "20. 7. 1969",
+     "Neil Armstrong a Buzz Aldrin, první lidé na Měsíci; Základna klidu."),
+    ("Apollo 12", "", -3.01, -23.42, "19. 11. 1969",
+     "Charles Conrad a Alan Bean přistáli na dohled od sondy Surveyor 3 a došli k ní pěšky."),
+    ("Apollo 14", "", -3.65, -17.47, "5. 2. 1971",
+     "Alan Shepard tu odpálil dva golfové míčky."),
+    ("Apollo 15", "", 26.13, 3.63, "30. 7. 1971",
+     "První lunární vozítko, u brázdy Hadley pod Apeninami."),
+    ("Apollo 16", "", -8.97, 15.50, "21. 4. 1972",
+     "Přistání v měsíční vrchovině u kráteru Descartes."),
+    ("Apollo 17", "", 20.19, 30.77, "11. 12. 1972",
+     "Údolí Taurus-Littrow; Eugene Cernan, zatím poslední člověk na Měsíci, s sebou vezl československou vlajku "
+     "(jeho předkové pocházeli z Čech a ze Slovenska)."),
+    ("Luna 2", "", 29.1, 0.0, "září 1959",
+     "Sovětská sonda, první lidský výtvor, který Měsíce dosáhl (dopadla na něj)."),
+    ("Luna 9", "", 7.08, -64.37, "3. 2. 1966",
+     "První měkké přistání a první snímky z povrchu."),
+    ("Lunochod 1", "", 38.2, -35.0, "17. 11. 1970",
+     "První vozítko na jiném světě (přivezla ho Luna 17), ujelo 10,5 km."),
+    ("Čchang-e 3", "", 44.12, -19.51, "14. 12. 2013",
+     "Čínský modul s vozítkem Nefritový králík: první měkké přistání po 37 letech."),
+    ("Čchang-e 5", "", 43.06, -51.92, "1. 12. 2020",
+     "Odvezla na Zemi 1,7 kg vzorků, první od roku 1976."),
+    ("Čandraján 3", "", -69.37, 32.32, "23. 8. 2023",
+     "Indická sonda, první přistání poblíž jižního pólu."),
+)
+# the box's two maps, each a page, and what's said under each: (which, title, [(headline, rows, style)])
+MOON_MAPS = (
+    ("seas", "MOŘE MĚSÍCE", (("Moře a oceán", MOON_MARIA, "sea"), ("Zálivy, jezera a bažiny", MOON_WATERS, "water"))),
+    ("craters", "KRÁTERY, HORY\nA PŘISTÁNÍ", (("Krátery", MOON_CRATERS, "crater"),
+                                             ("Pohoří, údolí a zlomy", MOON_MOUNTS, "mount"),
+                                             ("Kde přistáli lidé a sondy", MOON_LANDINGS, "landing"))),
+)
+MOON_INK = {"sea": (1.0, 0.90, 0.66), "water": (1.0, 0.82, 0.63), "crater": (1.0, 1.0, 1.0),
+            "mount": (0.75, 0.94, 0.69), "landing": (1.0, 0.62, 0.54)}
+
+
+def moon_map_draw(cr, which: str, w: float, h: float) -> list:
+    """The Moon's map in cairo, w by h: the photo, as big as fits, and on it the names of `which` (MOON_MAPS):
+    a sea's across the sea itself, the others' beside a mark at their spot, each where it covers no other name
+    or mark (the nearest free place round it, a thin line to it when that's further off). Those that found no
+    place: returned (said in the log)."""
+    import cairo
+    gi.require_version("PangoCairo", "1.0")
+    from gi.repository import PangoCairo
+    title, groups = next((t, g) for k, t, g in MOON_MAPS if k == which)
+    R = min(w, h) / 2 - 2
+    cx, cy = w / 2, h / 2
+    cr.save()
+    cr.translate(cx, cy)
+    if not _moon_photo(cr, R, 1.22):
+        _moon_drawn(cr, R, {"q": 0.0})
+    cr.restore()
+    fs = max(8.0, min(w, h) * 0.0205)
+
+    def layout(text, size, spacing=0.0):
+        lay = PangoCairo.create_layout(cr)
+        desc = Pango.FontDescription.from_string("Oswald SemiBold")
+        desc.set_absolute_size(size * Pango.SCALE)
+        lay.set_font_description(desc)
+        lay.set_alignment(Pango.Alignment.CENTER)
+        lay.set_spacing(int(-size * 0.18 * Pango.SCALE))
+        if spacing:
+            attrs = Pango.AttrList()
+            attrs.insert(Pango.attr_letter_spacing_new(int(spacing * Pango.SCALE)))
+            lay.set_attributes(attrs)
+        lay.set_text(text, -1)
+        return lay, lay.get_pixel_extents()[0]
+
+    def write(lay, ink, x, y, size, color, alpha=1.0):
+        cr.move_to(x - ink.x, y - ink.y)
+        PangoCairo.layout_path(cr, lay)
+        cr.set_line_join(cairo.LINE_JOIN_ROUND)
+        cr.set_line_width(size * 0.3)
+        cr.set_source_rgba(0, 0, 0, 0.78)
+        cr.stroke_preserve()
+        cr.set_source_rgba(*color, alpha)
+        cr.fill()
+
+    placed = []  # names' boxes (x0, y0, x1, y1)
+    # the corners, free of the Moon: what map it is, which way it's turned, whose photo
+    lay, ink = layout(title, fs * 1.15, fs * 0.06)
+    lay.set_alignment(Pango.Alignment.LEFT)
+    write(lay, ink, 4, 4, fs * 1.15, (1, 1, 1), 0.95)
+    placed.append((4, 4, 4 + ink.width, 4 + ink.height))
+    for text, right, bottom in (("sever nahoře,\nvýchod vpravo", True, False),
+                                ("snímek sondy LRO\n(NASA)" + (", vylepšený AI" if MOON_FACE["ai"] else ""),
+                                 False, True)):
+        lay, ink = layout(text, fs * 0.8)
+        lay.set_alignment(Pango.Alignment.RIGHT if right else Pango.Alignment.LEFT)
+        x, y = (w - 4 - ink.width if right else 4), (h - 4 - ink.height if bottom else 4)
+        write(lay, ink, x, y, fs * 0.8, (1, 1, 1), 0.7)
+        placed.append((x, y, x + ink.width, y + ink.height))
+
+    items = []
+    for _head, rows, style in groups:
+        for name, _latin, lat, lon, size, _text in rows:
+            la, lo = math.radians(lat), math.radians(lon)
+            x, y, z = math.cos(la) * math.sin(lo), math.sin(la), math.cos(la) * math.cos(lo)
+            if z < 0.05:  # at the edge or just past it: its mark on the edge
+                n = math.hypot(x, y) or 1.0
+                x, y = x / n * 0.992, y / n * 0.992
+            area = style in ("sea", "water") and z > 0.45  # (a sea seen from the side: a mark and a name beside it)
+            km = float("".join(ch for ch in size if ch.isdigit()) or 0) if style == "sea" else 0.0
+            items.append({"name": name, "style": style, "x": cx + x * R, "y": cy - y * R, "area": area,
+                          "size": fs * (1.0 + min(0.55, km / 2600)) if area and style == "sea" else
+                          fs * (0.92 if style == "water" else 1.0), "mark": 0.0 if area else fs * 0.3})
+    pad = fs * 0.14
+
+    def free(box, me) -> bool:
+        x0, y0, x1, y1 = box
+        if x0 < 3 or y0 < 3 or x1 > w - 3 or y1 > h - 3:
+            return False
+        if any(x0 < b[2] + pad and x1 > b[0] - pad and y0 < b[3] + pad and y1 > b[1] - pad for b in placed):
+            return False
+        return not any(o is not me and o["mark"] and x0 < o["x"] + o["mark"] and x1 > o["x"] - o["mark"]
+                       and y0 < o["y"] + o["mark"] and y1 > o["y"] - o["mark"] for o in items)
+
+    lost = []
+    for it in items:
+        text = it["name"]
+        if it["area"]:
+            text = text.upper()
+            words = text.split(" ")
+            if len(words) > 1 and len(text) > 8:  # in two rows, as even as can be
+                cut = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
+                text = " ".join(words[:cut]) + "\n" + " ".join(words[cut:])
+        lay, ink = layout(text, it["size"], it["size"] * 0.07 if it["area"] else 0.0)
+        tw, th, ax, ay = ink.width, ink.height, it["x"], it["y"]
+        g = it["mark"] + fs * 0.32
+        spots = []
+        if it["area"]:
+            spots += [(ax - tw / 2, ay - th / 2 + d * th, False) for d in (0, -0.5, 0.5, -1.0, 1.0)]
+        beside = [(ax + g, ay - th / 2), (ax - g - tw, ay - th / 2), (ax - tw / 2, ay + g), (ax - tw / 2, ay - g - th),
+                  (ax + g * 0.75, ay + g * 0.75), (ax + g * 0.75, ay - g * 0.75 - th),
+                  (ax - g * 0.75 - tw, ay + g * 0.75), (ax - g * 0.75 - tw, ay - g * 0.75 - th)]
+        if ax > cx + 0.5 * R:  # near the east edge: towards the middle first
+            beside = [beside[1], beside[0]] + beside[2:]
+        spots += [(x, y, False) for x, y in beside]
+        for d in (fs * 1.7, fs * 3.0, fs * 4.5, fs * 6.5):  # further off, a line to it
+            for ang in (0, 180, 90, 270, 45, 315, 135, 225, 22, 338, 158, 202, 68, 292, 112, 248):
+                c, s = math.cos(math.radians(ang)), math.sin(math.radians(ang))
+                px, py = ax + c * d, ay + s * d
+                spots.append((px if c > 0.3 else px - tw if c < -0.3 else px - tw / 2,
+                              py if s > 0.3 else py - th if s < -0.3 else py - th / 2, True))
+        spot = next(((x, y, far) for x, y, far in spots if free((x, y, x + tw, y + th), it)), None)
+        color = MOON_INK[it["style"]]
+        if it["mark"]:
+            m = it["mark"]
+            if spot and spot[2]:  # the line, from the mark to the name's nearest edge
+                x, y = spot[0], spot[1]
+                tx, ty = min(max(ax, x), x + tw), min(max(ay, y), y + th)
+                for width, col in ((fs * 0.2, (0, 0, 0, 0.6)), (fs * 0.09, (*color, 0.9))):
+                    cr.move_to(ax, ay)
+                    cr.line_to(tx, ty)
+                    cr.set_line_width(width)
+                    cr.set_source_rgba(*col)
+                    cr.stroke()
+            if it["style"] == "mount":  # a small peak
+                cr.move_to(ax, ay - m)
+                cr.line_to(ax + m, ay + m * 0.8)
+                cr.line_to(ax - m, ay + m * 0.8)
+                cr.close_path()
+            elif it["style"] == "landing":  # a diamond
+                cr.move_to(ax, ay - m)
+                cr.line_to(ax + m, ay)
+                cr.line_to(ax, ay + m)
+                cr.line_to(ax - m, ay)
+                cr.close_path()
+            else:
+                cr.arc(ax, ay, m * 0.8, 0, 2 * math.pi)
+            cr.set_line_width(fs * 0.24)
+            cr.set_source_rgba(0, 0, 0, 0.75)
+            cr.stroke_preserve()
+            cr.set_source_rgba(*color, 1.0)
+            if it["style"] in ("crater", "sea", "water"):  # a ring: what's inside stays seen
+                cr.set_line_width(fs * 0.11)
+                cr.stroke()
+            else:
+                cr.fill()
+        if not spot:
+            lost.append(it["name"])
+            continue
+        write(lay, ink, spot[0], spot[1], it["size"], color)
+        placed.append((spot[0], spot[1], spot[0] + tw, spot[1] + th))
+    return lost
+
+
+class MoonMap(Gtk.Widget):
+    """In the Moon and Sun box: the Moon's map, a page of the box big, its names written on it. Kept as a
+    picture (made on the processor, once for a size and a photo)."""
+
+    _pics: dict = {}
+
+    def __init__(self, which: str, w: int, h: int, **kw):
+        super().__init__(**kw)
+        self.which, self.w, self.h = which, w, h
+
+    def do_measure(self, orientation, for_size):
+        n = self.w if orientation == Gtk.Orientation.HORIZONTAL else self.h
+        return n, n, -1, -1
+
+    def do_snapshot(self, snap) -> None:
+        _native, k = _screen_scale(self)
+        key = (self.which, self.w, self.h, k, MOON_FACE["v"])
+        tex = MoonMap._pics.get(key)
+        if tex is None:
+            if len(MoonMap._pics) > 3:
+                MoonMap._pics.clear()
+            tex = MoonMap._pics[key] = self._picture(k)
+        snap.append_texture(tex, Graphene.Rect().init(0, 0, self.w, self.h))
+
+    def _picture(self, k: float):
+        import cairo
+        t0 = time.monotonic()
+        W, H = max(1, round(self.w * k)), max(1, round(self.h * k))
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
+        cr = cairo.Context(surf)
+        cr.scale(k, k)
+        lost = moon_map_draw(cr, self.which, self.w, self.h)
+        surf.flush()
+        print(f"Rádio Beat: mapa Měsíce ({self.which}) {W}×{H} px nakreslena za "
+              f"{round((time.monotonic() - t0) * 1000)} ms" + (f"; bez místa: {', '.join(lost)}" if lost else ""),
+              file=sys.stderr)
         return Gdk.MemoryTexture.new(W, H, Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
                                      GLib.Bytes.new(bytes(surf.get_data())), surf.get_stride())
 
@@ -14499,6 +14974,8 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
         GLib.idle_add(self._day_true, area, self.song_pop)
 
+    SKY_AUTO_PAGES = 4  # by itself that many pages at most a time (with the Moon's maps it has many): the next
+    # hour it goes on where it stopped
     SKY_AUTO = (10, 30, 20)  # the Moon and Sun box by itself once an hour: at :10 (away from :00, :20, :30 and
     # :45), each page for 20 s (the user: 10 s was too short to read one), 30 s at least
 
@@ -14511,7 +14988,10 @@ class Window(Adw.ApplicationWindow):
         data = a.sky or {}
         box = self.sky_list
         f = getattr(self, "_day_text_f", None) or 0.7
-        filled = (id(data), f, self._scale)
+        area = self._day_area()
+        r = int(28 * max(1.0, self._scale))
+        page = (round(area[2]) - 2 * r, round(area[3]) - 2 * r - 10) if area else (0, 0)
+        filled = (id(data), f, self._scale, page)
         if data and box.get_first_child() is not None and getattr(self, "_sky_filled", None) == (filled, data):
             return  # (as it is: nothing laid out or drawn anew)
         self._sky_filled = (filled, data)
@@ -14564,6 +15044,33 @@ class Window(Adw.ApplicationWindow):
                 lab.set_valign(Gtk.Align.CENTER)
                 row.append(lab)
                 box.append(row)
+        # the Moon's map (the user: a full page, its seas, craters and the rest named and told of): each map a
+        # page of the box, under it what's on it
+        if min(page) < 240:
+            return
+        esc = GLib.markup_escape_text
+        for which, _title, groups in MOON_MAPS:
+            box.append(MoonMap(which, page[0], page[1], halign=Gtk.Align.CENTER))
+            for head, rows, _style in groups:
+                h = Gtk.Label(label=esc(head), use_markup=True, halign=Gtk.Align.START, attributes=attrs,
+                              margin_top=6)
+                h.add_css_class("day-head")
+                box.append(h)
+                for name, latin, _lat, _lon, size, text in rows:
+                    note = ", ".join(p for p in (latin, size) if p)
+                    box.append(Gtk.Label(label=f"<b>{esc(name)}</b> <span alpha='70%'>({esc(note)})</span> "
+                                               f"{esc(text)}", use_markup=True, xalign=0, wrap=True,
+                                         attributes=attrs))
+
+    def moon_redraw(self) -> None:
+        """The Moon's photo came (or came back enhanced): what's drawn from it, drawn anew."""
+        self.moon_view.queue_draw()
+        self.weather_view.queue_draw()
+        c = self.sky_list.get_first_child()
+        while c is not None:
+            if isinstance(c, (MoonStrip, MoonMap)):
+                c.queue_draw()
+            c = c.get_next_sibling()
 
     def sky_pics(self) -> None:
         """The photos as they come (and come back AI-enhanced)."""
@@ -14634,7 +15141,7 @@ class Window(Adw.ApplicationWindow):
         def timed() -> bool:  # (laid out by now: how many pages it has)
             adj = self.sky_scroll.get_vadjustment()
             page = max(1.0, adj.get_page_size())
-            pages = 1 + math.ceil(max(0.0, adj.get_upper() - page) / (page * 0.9))
+            pages = min(self.SKY_AUTO_PAGES, 1 + math.ceil(max(0.0, adj.get_upper() - page) / (page * 0.9)))
             GLib.timeout_add_seconds(max(self.SKY_AUTO[1], pages * self.SKY_AUTO[2]) - 2, close)
             return False
         GLib.timeout_add_seconds(2, timed)
@@ -16397,6 +16904,7 @@ class App(Adw.Application):
         threading.Thread(target=self._gpu_watch, daemon=True).start()
         threading.Thread(target=self._background, daemon=True).start()
         threading.Thread(target=self._names_ahead, daemon=True).start()
+        threading.Thread(target=self._moon_face_load, daemon=True).start()
         # text as big as on this desktop everywhere (KDE says 1.0, Omarchy 1.64): the 'i' panel and the menus
         # look the same on the DeskMini's full HD as on a 4K screen at 2x
         Gtk.Settings.get_default().set_property("gtk-xft-dpi", int(96 * 1024 * self.TEXT_SCALE))
@@ -17352,6 +17860,36 @@ class App(Adw.Application):
             self.win.names_refresh()
         return False
 
+    def _moon_face_load(self) -> None:
+        """(A thread.) The Moon's photo for its phases and its map: off the disk when it was fetched before,
+        else fetched (tried again later when that fails); then enhanced."""
+        for wait in (0, 60, 600, 3600, 6 * 3600):
+            time.sleep(wait)
+            data = namesake_photo(MOON_PHOTO)
+            if data and moon_face_set(data):
+                GLib.idle_add(self._moon_face_got, data)
+                return
+
+    def _moon_face_got(self, data: bytes = None) -> bool:
+        if self.win:
+            self.win.moon_redraw()
+        if data is not None:
+            self._moon_src = data
+            GLib.timeout_add_seconds(20, lambda: (self._moon_face_enhance(), False)[1])  # (after the start's work)
+        return False
+
+    def _moon_face_enhance(self) -> None:
+        """The Moon's photo through the AI like the other photos, to twice its size (kept in their cache)."""
+        data, px = getattr(self, "_moon_src", None), self.enhance_px()
+        if not data or not px or not self.settings.get("enhance", True) or not hasattr(self, "enhancer"):
+            return
+        n = MOON_PHOTO_PX
+
+        def done(pic: bytes):
+            threading.Thread(target=lambda: moon_face_set(pic, True) and GLib.idle_add(self._moon_face_got),
+                             daemon=True).start()
+        self.enhancer.request("pic:" + MOON_PHOTO, MOON_PHOTO, data, (n, n), (2 * n, 2 * n), done, screen=px)
+
     def want_name_pic(self, url: str) -> None:
         """A namesake's photo: off the disk when it was downloaded before (instant), enhanced as the panels'."""
         if url and url not in self.show_pics:
@@ -17514,6 +18052,9 @@ class App(Adw.Application):
         """The panels closed: the small pictures shown with the quick pass get the full enhancing now."""
         for kind in list(self.enhancer.light_done):
             url = kind[4:]
+            if url == MOON_PHOTO:
+                self._moon_face_enhance()
+                continue
             data = self.show_src.get(url)
             if data:
                 self._enhance_small(url, data)
