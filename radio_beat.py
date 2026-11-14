@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.37.3"
+APP_VERSION = "0.37.4"
 
 import collections
 import ctypes
@@ -3465,7 +3465,8 @@ class Enhancer:
         return kind == "bg" or kind.startswith("pic:")
 
     def _must_yield(self, kind: str) -> bool:
-        return self._low(kind) and any(not self._low(k) for k in list(self.jobs))
+        # (not while a panel is open: then only the small pictures are made, the rest waits for it to close)
+        return self._low(kind) and not self.quiet and any(not self._low(k) for k in list(self.jobs))
 
     def drop(self, kind: str) -> None:
         self.jobs.pop(kind, None)
@@ -3533,18 +3534,33 @@ class Enhancer:
                     if kind is None:
                         break
                 else:
+                    # What's on the main screen first, then anything else that isn't a small picture (the icons):
+                    # the small pictures give way to all of those (_must_yield), so one of them picked ahead
+                    # of, say, the icons' job stepped aside at once, stayed queued and was picked again, for
+                    # ever: nothing behind it was ever made (the Moon's photo waited for hours) and the worker
+                    # spun on the processor.
                     kind = next((k for k in ("cover", "track", "logo", "show") if k in self.jobs),
-                                next((k for k in list(self.jobs) if k in self.first),
-                                     next((k for k in list(self.jobs) if k != "bg"), "bg")))
+                                next((k for k in list(self.jobs) if not self._low(k)),
+                                     next((k for k in list(self.jobs) if k in self.first),
+                                          next((k for k in list(self.jobs) if k != "bg"), "bg"))))
                     if kind not in self.jobs:
                         break
                 job = self.jobs[kind]
+                moon = "pic:" + MOON_PHOTO
+                if moon in self.jobs and kind != moon and time.monotonic() - getattr(self, "_moon_said", 0) > 60:
+                    self._moon_said = time.monotonic()  # (why the Moon's photo waits: for the log)
+                    print(f"Rádio Beat: fotka Měsíce čeká, na řadě je {kind[:60]} (ve frontě {len(self.jobs)}: "
+                          f"{', '.join(sorted({k if not self._low(k) else k[:3] for k in self.jobs}))}; první "
+                          f"{len(self.first)}, tichý režim {self.quiet})", file=sys.stderr)
                 self.running = (kind, job[0])
+                began = time.monotonic()
                 try:
                     self._enhance(kind, job)
                 except Exception as e:  # never take the app down over a picture
                     print(f"enhancer: {e}", file=sys.stderr)
                 self.running = None
+                if self.jobs.get(kind) is job and time.monotonic() - began < 0.5:
+                    time.sleep(0.5)  # (put off at once and still waiting: no spinning, whatever the reason)
                 # (made to wait for the picture on the screen: it stays queued, and starts again after it)
                 if self.jobs.get(kind) is job and not self._must_yield(kind):
                     del self.jobs[kind]
