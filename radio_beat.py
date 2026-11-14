@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.36.2"
+APP_VERSION = "0.36.3"
 
 import collections
 import ctypes
@@ -15007,6 +15007,12 @@ class Window(Adw.ApplicationWindow):
         if not data:
             box.append(Gtk.Label(label="Počítá se…", xalign=0, attributes=attrs))
             return
+        # the Moon's maps first (the user: the map first, then the phases), each a page of the box; what's on them
+        # is told at the box's end
+        maps = min(page) >= 240
+        if maps:
+            for which, _title, _groups in MOON_MAPS:
+                box.append(MoonMap(which, page[0], page[1], halign=Gtk.Align.CENTER))
         for i, (name, paras) in enumerate(data["parts"]):  # (no headline of the box's own: the user took it out)
             h = Gtk.Label(label=GLib.markup_escape_text(name), use_markup=True, halign=Gtk.Align.START,
                           attributes=attrs, margin_top=6 if i else 0)
@@ -15047,13 +15053,11 @@ class Window(Adw.ApplicationWindow):
                 lab.set_valign(Gtk.Align.CENTER)
                 row.append(lab)
                 box.append(row)
-        # the Moon's map (the user: a full page, its seas, craters and the rest named and told of): each map a
-        # page of the box, under it what's on it
-        if min(page) < 240:
+        # what's on the Moon's maps (the user: its seas, craters and the rest named and told of)
+        if not maps:
             return
         esc = GLib.markup_escape_text
-        for which, _title, groups in MOON_MAPS:
-            box.append(MoonMap(which, page[0], page[1], halign=Gtk.Align.CENTER))
+        for _which, _title, groups in MOON_MAPS:
             for head, rows, _style in groups:
                 h = Gtk.Label(label=esc(head), use_markup=True, halign=Gtk.Align.START, attributes=attrs,
                               margin_top=6)
