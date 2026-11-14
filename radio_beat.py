@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.37.1"
+APP_VERSION = "0.37.2"
 
 import collections
 import ctypes
@@ -1262,6 +1262,50 @@ ENGLISH_HINT = re.compile(r"\b(the|of|for|you|your|and|with|is|it's|don't|can't|
 
 
 TITLES_GOT = os.path.join(os.path.dirname(FACTS_CACHE), "titles-cs.json")  # what the service translated
+
+
+_titles_got: dict = {}  # name (title_key) -> its Czech ('' when it has none); loaded once
+_titles_lock = threading.Lock()
+TITLES_HOOK = [None]  # called (any thread) when names came from the hub
+
+
+def titles_got() -> dict:
+    with _titles_lock:
+        if not _titles_got.get("\0loaded"):
+            try:
+                with open(TITLES_GOT, encoding="utf-8") as f:
+                    _titles_got.update({k: v for k, v in json.load(f).items() if isinstance(v, str)})
+            except (OSError, ValueError, AttributeError):
+                pass
+            _titles_got["\0loaded"] = "1"
+    return _titles_got
+
+
+def titles_save(skip=()) -> None:
+    with _titles_lock:
+        keep = {k: v for k, v in _titles_got.items() if not k.startswith("\0") and (v or k not in skip)}
+        try:
+            os.makedirs(os.path.dirname(TITLES_GOT), exist_ok=True)
+            with open(TITLES_GOT + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(keep, f, ensure_ascii=False)
+            os.replace(TITLES_GOT + ".tmp", TITLES_GOT)
+        except OSError:
+            pass
+
+
+def titles_merge(rows) -> int:
+    """Names translated on another computer (from the hub): [[name, Czech]]; those not known here are kept."""
+    got, n = titles_got(), 0
+    for r in rows if isinstance(rows, list) else []:
+        if (isinstance(r, list) and len(r) == 2 and all(isinstance(x, str) for x in r) and 0 < len(r[0]) <= 200
+                and 0 < len(r[1]) <= 300 and r[0].isascii() and r[0] not in TITLES_CS and not got.get(r[0])):
+            got[r[0]] = r[1]
+            n += 1
+    if n:
+        titles_save()
+        if TITLES_HOOK[0]:
+            TITLES_HOOK[0]()
+    return n
 
 
 def title_key(title: str) -> str:
@@ -4982,6 +5026,22 @@ class CacheShare:
                 m["info"] = page.get("next", m["info"])
                 if not page.get("more"):
                     break
+            # song and album names a translation service put into Czech (each asked of it once, on any computer)
+            try:
+                mine = [[k, v] for k, v in list(titles_got().items()) if v and not k.startswith("\0")]
+                if len(mine) != m.get("titles_n"):
+                    for i in range(0, len(mine), 500):
+                        self._hub(base, "/radio-beat/v1/titles", json.dumps(mine[i:i + 500]).encode(), timeout=60)
+                    m["titles_n"] = len(mine)
+                while self.on:
+                    page = json.loads(self._hub(base, f"/radio-beat/v1/titles?since={m.get('titles', 0)}", timeout=60))
+                    titles_merge(page.get("titles") or [])
+                    m["titles"] = page.get("next", m.get("titles", 0))
+                    if not page.get("more"):
+                        break
+                m["titles_n"] = len([1 for k, v in list(titles_got().items()) if v and not k.startswith("\0")])
+            except (OSError, ValueError, TypeError, KeyError):
+                pass  # an older hub (no names yet): next round
             self._save_marks()
         self.got += got
         self.info_in += info_in
@@ -14492,6 +14552,10 @@ class Window(Adw.ApplicationWindow):
                           show_apply_button=True)
         dl.connect("apply", lambda r: self.app.set_deepl_key(r.get_text().strip()))
         group.add(dl)
+        # (whether DeepL took the key: the user saw only the key as pasted)
+        self.deepl_note = Adw.ActionRow(title="Stav klíče DeepL", subtitle="Ověřuje se…", subtitle_lines=0)
+        group.add(self.deepl_note)
+        GLib.timeout_add_seconds(5, lambda: (self.app.deepl_check(), False)[1])
         self.moon_row = Adw.SwitchRow(title="Měsíc vlevo od tlačítka ⓘ", subtitle_lines=0,
                                       subtitle="Jak je teď vidět z vybraného místa, šipka a jeho příští fáze s datem. "
                                                "Vypne i zapne se také klepnutím přímo na něj")
@@ -16896,6 +16960,7 @@ class App(Adw.Application):
         self.share.screenshot = self.window_shot
         global TMDB_KEY
         TMDB_KEY = self.settings.get("tmdb_key", "") or tmdb_key_from_file()
+        TITLES_HOOK[0] = lambda: GLib.idle_add(lambda: (self.win and self.win.titles_translated(), False)[1])
         global DEEPL_KEY
         DEEPL_KEY = self.settings.get("deepl_key", "") or deepl_key_from_file()
         self.share.hub_url = self.settings.get("hub_url", "")
@@ -17918,12 +17983,38 @@ class App(Adw.Application):
         self.settings["deepl_key"] = key
         save_settings(self.settings)
         DEEPL_KEY = key
-        known = self.__dict__.get("_title_cs")
-        if known is not None:  # (those with no Czech so far: asked again, of DeepL)
-            for k in [k for k, v in known.items() if not v]:
-                del known[k]
+        known = titles_got()
+        for k in [k for k, v in known.items() if not v and not k.startswith("\0")]:  # (no Czech so far: asked again)
+            del known[k]
         if self.win:
             self.win.titles_translated()
+            self.win.deepl_note.set_subtitle("Ověřuje se…")
+        self.deepl_check()
+
+    def deepl_check(self) -> None:
+        """Asks DeepL whether it takes the key and how much of the month's share is used; the settings say it."""
+        def work():
+            if not DEEPL_KEY:
+                text = "Bez klíče: nové názvy a texty se zkoušejí přeložit přes bezplatnou službu (často vyčerpanou)"
+            else:
+                host = "api-free.deepl.com" if DEEPL_KEY.endswith(":fx") else "api.deepl.com"
+                req = urllib.request.Request(f"https://{host}/v2/usage", headers={
+                    "Authorization": f"DeepL-Auth-Key {DEEPL_KEY}", "User-Agent": UA})
+                try:
+                    with urllib.request.urlopen(req, timeout=12) as r:
+                        u = json.load(r)
+                    used, limit = u.get("character_count", 0), u.get("character_limit", 0)
+                    text = (f"Klíč přijat ({time.strftime('%H:%M')}). Tento měsíc využito {used:,} z {limit:,} "
+                            f"znaků".replace(",", " ")
+                            + (". Příděl je vyčerpaný: překládat se bude zase příští měsíc" if limit and used >= limit
+                               else ""))
+                except urllib.error.HTTPError as e:
+                    text = ("DeepL klíč odmítl (neplatný klíč): zkontrolujte, že je zkopírovaný celý"
+                            if e.code in (401, 403) else f"DeepL odpověděl chybou {e.code}: zkusí se to později")
+                except (OSError, ValueError) as e:
+                    text = f"DeepL se nepodařilo zastihnout ({type(e).__name__}): klíč se ověří později"
+            GLib.idle_add(lambda: (self.win and self.win.deepl_note.set_subtitle(text), False)[1])
+        threading.Thread(target=work, daemon=True).start()
 
     def set_tmdb_key(self, key: str) -> None:
         """The user's TMDB key: actors without a free photo get their TMDB profile photo; the days ahead looked up
@@ -17968,13 +18059,7 @@ class App(Adw.Application):
             return ""
         if key in TITLES_CS:
             return TITLES_CS[key]
-        if "_title_cs" not in self.__dict__:  # (what the translation service said before, kept)
-            try:
-                with open(TITLES_GOT, encoding="utf-8") as f:
-                    self._title_cs = json.load(f)
-            except (OSError, ValueError):
-                self._title_cs = {}
-        known = self._title_cs
+        known = self._title_cs = titles_got()  # (what the translation service said before, here or elsewhere)
         if key not in known and (DEEPL_KEY or ENGLISH_HINT.search(key)):  # (DeepL tells English from Czech itself)
             known[key] = ""
             shown = plain_title(title).strip()
@@ -18018,14 +18103,7 @@ class App(Adw.Application):
             if cs and norm(cs) != norm(key):
                 self._title_cs[key] = cs[:1].upper() + cs[1:]
                 got = True
-            try:  # (kept, the names with no Czech too: asked once)
-                os.makedirs(os.path.dirname(TITLES_GOT), exist_ok=True)
-                with open(TITLES_GOT + ".tmp", "w", encoding="utf-8") as f:
-                    json.dump({k: v for k, v in self._title_cs.items()
-                               if v or k not in {q[0] for q in self._title_queue}}, f, ensure_ascii=False)
-                os.replace(TITLES_GOT + ".tmp", TITLES_GOT)
-            except OSError:
-                pass
+            titles_save({q[0] for q in self._title_queue})  # (kept, the names with no Czech too: asked once)
             time.sleep(1 if DEEPL_KEY else 3)
 
     def _moon_face_load(self) -> None:

@@ -61,6 +61,7 @@ class Hub:
                                                  cover TEXT, facts TEXT, shown_artist TEXT, shown_title TEXT,
                                                  PRIMARY KEY (artist, title));
             CREATE TABLE IF NOT EXISTS counter (name TEXT PRIMARY KEY, n INTEGER);
+            CREATE TABLE IF NOT EXISTS titles (seq INTEGER UNIQUE, name TEXT PRIMARY KEY, cs TEXT);
         """)
         self.used = self.db.execute("SELECT COALESCE(SUM(size), 0) FROM files").fetchone()[0]
 
@@ -235,6 +236,29 @@ class Hub:
                     n += 1
         return n
 
+    # --- song and album names in Czech (what an app's translation service made of them; the first one stays) ---
+    def get_titles(self, since: int) -> dict:
+        with self.lock:
+            rows = self.db.execute("SELECT seq, name, cs FROM titles WHERE seq > ? ORDER BY seq LIMIT ?",
+                                   (since, PAGE)).fetchall()
+        return {"titles": [[r[1], r[2]] for r in rows], "next": rows[-1][0] if rows else since,
+                "more": len(rows) == PAGE}
+
+    def put_titles(self, rows) -> int:
+        n = 0
+        with self.lock, self.db:
+            for r in rows if isinstance(rows, list) else []:
+                if not (isinstance(r, list) and len(r) == 2 and self._text(r[0], 200, False)
+                        and self._text(r[1], 300, False) and r[0] and r[1] and r[0].isascii() and r[0] == r[0].lower()):
+                    continue
+                if self.db.execute("SELECT 1 FROM titles WHERE name = ?", (r[0],)).fetchone():
+                    continue
+                seq = (self.db.execute("SELECT n FROM counter WHERE name = 'titles'").fetchone() or (0,))[0] + 1
+                self.db.execute("INSERT OR REPLACE INTO counter VALUES ('titles', ?)", (seq,))
+                self.db.execute("INSERT INTO titles VALUES (?, ?, ?)", (seq, r[0], r[1]))
+                n += 1
+        return n
+
     def stats(self) -> dict:
         with self.lock:
             files = self.db.execute("SELECT COUNT(*) FROM files WHERE name LIKE '%.jpg'").fetchone()[0]
@@ -310,6 +334,8 @@ def serve(hub: Hub, port: int) -> None:
                 return self._json(hub.get_plays(self._since()))
             if p.startswith("/radio-beat/v1/songinfo"):
                 return self._json(hub.get_songinfo(self._since()))
+            if p.startswith("/radio-beat/v1/titles"):
+                return self._json(hub.get_titles(self._since()))
             name = p.rsplit("/", 1)[-1]
             if p.startswith("/radio-beat/v1/file/") and NAME.match(name):
                 try:
@@ -323,7 +349,7 @@ def serve(hub: Hub, port: int) -> None:
             if not self._allowed():
                 return
             p = self.path
-            if p in ("/radio-beat/v1/plays", "/radio-beat/v1/songinfo"):
+            if p in ("/radio-beat/v1/plays", "/radio-beat/v1/songinfo", "/radio-beat/v1/titles"):
                 body = self._body(BODY_MAX)
                 if body is None:
                     return
@@ -331,7 +357,8 @@ def serve(hub: Hub, port: int) -> None:
                     rows = json.loads(body)
                 except ValueError:
                     return self._send(400, b"")
-                got = hub.put_plays(rows) if p.endswith("plays") else hub.put_songinfo(rows)
+                got = (hub.put_plays(rows) if p.endswith("plays") else hub.put_titles(rows) if p.endswith("titles")
+                       else hub.put_songinfo(rows))
                 return self._json({"new": got})
             name = p.rsplit("/", 1)[-1]
             if p.startswith("/radio-beat/v1/shot/") and LOG_ID.match(name):
