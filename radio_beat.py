@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.36.1"
+APP_VERSION = "0.36.2"
 
 import collections
 import ctypes
@@ -3085,6 +3085,8 @@ class Enhancer:
 
     def _picture(self, text: str) -> None:
         kind = self.running[0] if self.running else "cover"
+        if kind == "pic:" + MOON_PHOTO:  # (a big job that comes once: how it went, for the log)
+            print("Rádio Beat: fotka Měsíce:", text, file=sys.stderr)
         if self.on_picture and kind != "bg":  # (an old cover isn't what's on the screen)
             GLib.idle_add(lambda: (self.on_picture(text, kind), False)[1])
 
