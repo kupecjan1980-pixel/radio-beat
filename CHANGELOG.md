@@ -4,6 +4,7 @@
 
 ## 0.37 — Názvy česky
 
+- **0.37.1** (2026-11-14) České názvy: ručně přeloženo všech asi 2 550 přeložitelných názvů skladeb a alb, které kdy rádio v aplikaci hrálo (z 3 600; jména kapel, výběry typu „Led Zeppelin IV“ a české názvy bez háčků zůstávají). Pro nové názvy a pro texty o skladbách jde v nastavení zadat vlastní klíč DeepL (API Free): DeepL sám pozná, co je anglicky, a přeložené si aplikace pamatuje; bez klíče se dál zkouší bezplatná služba
 - **0.37.0** (2026-11-14) Anglické názvy skladeb a alb mají v závorce český překlad: v panelu ⓘ (HRÁLO u skladby i jejího alba, ZAJÍMAVOSTI) a v okně o skladbě, např. „No Prayer for the Dying (Žádná modlitba za umírající)“. Asi 230 nejhranějších názvů je přeloženo ručně a je součástí aplikace (jména kapel, výběry a slovní hříčky zůstávají, jak jsou); ostatní, pokud vypadají anglicky, se zkoušejí přeložit přes překladovou službu, která ale mívá denní příděl vyčerpaný, takže přibývají pomalu
 
 ## 0.36 — Mapa Měsíce

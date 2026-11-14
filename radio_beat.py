@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.37.0"
+APP_VERSION = "0.37.1"
 
 import collections
 import ctypes
@@ -955,8 +955,43 @@ def song_facts(artist: str, song: str) -> str:
 ABOUT_CACHE = os.path.join(os.path.dirname(FACTS_CACHE), "about-cs.json")
 
 
+DEEPL_KEY = ""  # the user's own DeepL API key (the free plan's ends with ":fx"), from the settings ("deepl_key")
+DEEPL_KEY_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "radio-beat",
+                              "deepl-key")  # (or here, a file of its own, like TMDB's)
+
+
+def deepl_key_from_file() -> str:
+    try:
+        with open(DEEPL_KEY_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def deepl(text: str):
+    """(Czech, the language DeepL took the text for: "EN", "CS"…) through DeepL with the user's key; None when
+    there's no key or it can't (not reached, the key refused, the month's share used up)."""
+    if not DEEPL_KEY or not text.strip():
+        return None
+    host = "api-free.deepl.com" if DEEPL_KEY.endswith(":fx") else "api.deepl.com"
+    req = urllib.request.Request(f"https://{host}/v2/translate", method="POST",
+                                 data=json.dumps({"text": [text], "target_lang": "CS"}).encode(),
+                                 headers={"Authorization": f"DeepL-Auth-Key {DEEPL_KEY}",
+                                          "Content-Type": "application/json", "User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            t = json.load(r)["translations"][0]
+        return t.get("text", ""), (t.get("detected_source_language") or "").upper()
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+
+
 def to_czech(text: str) -> str:
-    """English → Czech through MyMemory (a free translation service: the text is sent there); '' if it can't."""
+    """English → Czech: through DeepL when the user gave a key, else (or when that fails) through MyMemory (a
+    free translation service); the text is sent there; '' if it can't."""
+    got = deepl(text)
+    if got and got[0]:
+        return got[0]
     out, chunk = [], ""
     for sentence in sentences(text):
         if len(chunk) + len(sentence) > 450 and chunk:
@@ -1224,6 +1259,9 @@ except (OSError, ValueError):
     TITLES_CS = {}
 ENGLISH_HINT = re.compile(r"\b(the|of|for|you|your|and|with|is|it's|don't|can't|love|night|all|are|was|what|when|"
                           r"this|that|heart|world|from|never|who|will|like|girl|blues|road|black|dream)\b")
+
+
+TITLES_GOT = os.path.join(os.path.dirname(FACTS_CACHE), "titles-cs.json")  # what the service translated
 
 
 def title_key(title: str) -> str:
@@ -14449,6 +14487,11 @@ class Window(Adw.ApplicationWindow):
                             text=self.app.settings.get("tmdb_key", "") or tmdb_key_from_file(), show_apply_button=True)
         tmdb.connect("apply", lambda r: self.app.set_tmdb_key(r.get_text().strip()))
         group.add(tmdb)
+        dl = Adw.EntryRow(title="Klíč DeepL pro české překlady názvů a textů (DeepL API Free, zdarma po registraci)",
+                          text=self.app.settings.get("deepl_key", "") or deepl_key_from_file(),
+                          show_apply_button=True)
+        dl.connect("apply", lambda r: self.app.set_deepl_key(r.get_text().strip()))
+        group.add(dl)
         self.moon_row = Adw.SwitchRow(title="Měsíc vlevo od tlačítka ⓘ", subtitle_lines=0,
                                       subtitle="Jak je teď vidět z vybraného místa, šipka a jeho příští fáze s datem. "
                                                "Vypne i zapne se také klepnutím přímo na něj")
@@ -16853,6 +16896,8 @@ class App(Adw.Application):
         self.share.screenshot = self.window_shot
         global TMDB_KEY
         TMDB_KEY = self.settings.get("tmdb_key", "") or tmdb_key_from_file()
+        global DEEPL_KEY
+        DEEPL_KEY = self.settings.get("deepl_key", "") or deepl_key_from_file()
         self.share.hub_url = self.settings.get("hub_url", "")
         self.db.on_play = lambda: GLib.idle_add(lambda: (self.win and self.win.played_new(), False)[1])
         self.share.set_on(self.settings.get("share", True))
@@ -17867,6 +17912,19 @@ class App(Adw.Application):
             got = self._namesakes.get(key)
         return got
 
+    def set_deepl_key(self, key: str) -> None:
+        """The user's DeepL key: names and texts not translated yet are asked of DeepL from now on."""
+        global DEEPL_KEY
+        self.settings["deepl_key"] = key
+        save_settings(self.settings)
+        DEEPL_KEY = key
+        known = self.__dict__.get("_title_cs")
+        if known is not None:  # (those with no Czech so far: asked again, of DeepL)
+            for k in [k for k, v in known.items() if not v]:
+                del known[k]
+        if self.win:
+            self.win.titles_translated()
+
     def set_tmdb_key(self, key: str) -> None:
         """The user's TMDB key: actors without a free photo get their TMDB profile photo; the days ahead looked up
         again for it."""
@@ -17910,11 +17968,18 @@ class App(Adw.Application):
             return ""
         if key in TITLES_CS:
             return TITLES_CS[key]
-        known = self.__dict__.setdefault("_title_cs", {})
-        if key not in known and ENGLISH_HINT.search(key):
+        if "_title_cs" not in self.__dict__:  # (what the translation service said before, kept)
+            try:
+                with open(TITLES_GOT, encoding="utf-8") as f:
+                    self._title_cs = json.load(f)
+            except (OSError, ValueError):
+                self._title_cs = {}
+        known = self._title_cs
+        if key not in known and (DEEPL_KEY or ENGLISH_HINT.search(key)):  # (DeepL tells English from Czech itself)
             known[key] = ""
+            shown = plain_title(title).strip()
             queue = self.__dict__.setdefault("_title_queue", [])
-            queue.append(key)
+            queue.append((key, shown.title() if shown.isupper() else shown))
             if not getattr(self, "_title_worker", None):
                 self._title_worker = threading.Thread(target=self._titles_work, daemon=True)
                 self._title_worker.start()
@@ -17937,16 +18002,31 @@ class App(Adw.Application):
                 got = False
                 time.sleep(5)
                 continue
-            key = self._title_queue[0]
-            cs = czech_sentence(key[:1].upper() + key[1:]).strip().rstrip(".")
-            if not cs:
-                time.sleep(3600)
-                continue
+            key, shown = self._title_queue[0]
+            if DEEPL_KEY:
+                r = deepl(shown)
+                if r is None:
+                    time.sleep(600)
+                    continue
+                cs = r[0].strip() if r[1] == "EN" else ""  # (a Czech name, a band's: left as it is)
+            else:
+                cs = czech_sentence(shown).strip().rstrip(".")
+                if not cs:
+                    time.sleep(3600)
+                    continue
             self._title_queue.pop(0)
-            if norm(cs) != norm(key):
+            if cs and norm(cs) != norm(key):
                 self._title_cs[key] = cs[:1].upper() + cs[1:]
                 got = True
-            time.sleep(3)
+            try:  # (kept, the names with no Czech too: asked once)
+                os.makedirs(os.path.dirname(TITLES_GOT), exist_ok=True)
+                with open(TITLES_GOT + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump({k: v for k, v in self._title_cs.items()
+                               if v or k not in {q[0] for q in self._title_queue}}, f, ensure_ascii=False)
+                os.replace(TITLES_GOT + ".tmp", TITLES_GOT)
+            except OSError:
+                pass
+            time.sleep(1 if DEEPL_KEY else 3)
 
     def _moon_face_load(self) -> None:
         """(A thread.) The Moon's photo for its phases and its map: off the disk when it was fetched before,
