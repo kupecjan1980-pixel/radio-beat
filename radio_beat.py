@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.38.0"
+APP_VERSION = "0.38.1"
 
 import collections
 import ctypes
@@ -11421,6 +11421,12 @@ class WeatherView(Gtk.Widget):
         (_lay, ink), x = self.parts["b"]
         return 0, 0, min(w, x + ink.width), h
 
+    def moon_hit(self):
+        """Where its moon is (x, y, w, h), on a clear night; None when it shows none."""
+        if self.off or not self.parts or not self.info or not self.info["sky"].get("moon"):
+            return None
+        return 0, 0, self.parts["icon"], self.room[1]
+
     @property
     def lines(self):
         return [self.info["temps"]] if self.info else []
@@ -12555,6 +12561,26 @@ MOON_MOUNTS = (
 MOON_HEIGHTS = {"Apeniny": "až 5 500 m", "Alpy": "až 3 600 m", "Kavkaz": "až 6 000 m", "Karpaty": "až 2 400 m",
                 "Jura": "asi 3 800 m", "Přímý zlom": "svah 300 m", "Schröterovo údolí": "hloubka až 1 000 m",
                 "Nejvyšší bod Měsíce": "10 786 m"}
+# how deep the seas lie (the user: like the mountains' heights): the lava's surface at a sea's middle under the
+# Moon's mean level (the sphere of 1 737.4 km), metres. Worked out from the LRO's laser altimeter's map (LOLA
+# LDEM_4, a quarter of a degree a point): the median over a disc a fifth of the sea's width round its middle.
+MOON_DEPTHS = {"Oceán bouří": 1800, "Moře dešťů": 2300, "Moře jasu": 2600, "Moře klidu": 1000, "Moře nepokojů": 3600,
+               "Moře hojnosti": 1900, "Moře nektaru": 2800, "Moře oblaků": 2400, "Moře vláhy": 2400,
+               "Moře chladu": 2500, "Moře par": 1200, "Moře poznané": 1900, "Moře ostrovů": 1000,
+               "Humboldtovo moře": 4300, "Moře hada": 2400, "Moře vln": 500, "Moře pěn": 1800, "Moře okrajové": 1900,
+               "Smythovo moře": 3900, "Moře jižní": 1400, "Moře východní": 2400, "Moře moskevské": 3200,
+               "Moře důmyslu": 3300}
+# said once under the headline of the seas' rows
+MOON_HEAD_NOTES = {"Moře a oceán": "Hloubka u každého moře říká, jak hluboko pod střední úrovní Měsíce (koulí o "
+                                   "poloměru 1 737,4 km) leží hladina ztuhlé lávy uprostřed něj; podle laserového "
+                                   "výškoměru sondy LRO."}
+
+
+def moon_measure(name: str, style: str) -> str:
+    """A mountain's height or a sea's depth in words, '' for what has neither."""
+    if style == "sea" and name in MOON_DEPTHS:
+        return "hloubka " + f"{MOON_DEPTHS[name]:,}".replace(",", " ") + " m"
+    return MOON_HEIGHTS.get(name, "")
 MOON_LANDINGS = (
     ("Apollo 11", "", 0.67, 23.47, "20. 7. 1969",
      "Neil Armstrong a Buzz Aldrin, první lidé na Měsíci; Základna klidu."),
@@ -12727,16 +12753,22 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
     cr.restore()
     fs = max(8.0, min(w, h) * 0.0205)
 
-    def layout(text, size, spacing=0.0):
+    def layout(text, size, spacing=0.0, tail=""):  # (tail: the text's end written smaller, a sea's depth)
         lay = PangoCairo.create_layout(cr)
         desc = Pango.FontDescription.from_string("Oswald SemiBold")
         desc.set_absolute_size(size * Pango.SCALE)
         lay.set_font_description(desc)
         lay.set_alignment(Pango.Alignment.CENTER)
         lay.set_spacing(int(-size * 0.18 * Pango.SCALE))
-        if spacing:
+        if spacing or tail:
             attrs = Pango.AttrList()
-            attrs.insert(Pango.attr_letter_spacing_new(int(spacing * Pango.SCALE)))
+            if spacing:
+                attrs.insert(Pango.attr_letter_spacing_new(int(spacing * Pango.SCALE)))
+            if tail:
+                small = Pango.attr_scale_new(0.6)
+                small.start_index = len(text.encode()) - len(tail.encode())
+                small.end_index = len(text.encode())
+                attrs.insert(small)
             lay.set_attributes(attrs)
         lay.set_text(text, -1)
         return lay, lay.get_pixel_extents()[0]
@@ -12794,16 +12826,20 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
 
     lost = []
     for it in items:
-        text = it["name"]
-        if it["name"] in MOON_HEIGHTS:
-            text += f" ({MOON_HEIGHTS[it['name']]})"
+        text, tail = it["name"], ""
+        measure = moon_measure(it["name"], it["style"])
+        if measure and not it["area"]:
+            text += f" ({measure})"
         if it["area"]:
             text = text.upper()
             words = text.split(" ")
             if len(words) > 1 and len(text) > 8:  # in two rows, as even as can be
                 cut = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
                 text = " ".join(words[:cut]) + "\n" + " ".join(words[cut:])
-        lay, ink = layout(text, it["size"], it["size"] * 0.07 if it["area"] else 0.0)
+            if measure:  # a sea's depth under its name, smaller
+                tail = measure
+                text += "\n" + tail
+        lay, ink = layout(text, it["size"], it["size"] * 0.07 if it["area"] else 0.0, tail)
         tw, th, ax, ay = ink.width, ink.height, it["x"], it["y"]
         g = it["mark"] + fs * 0.32
         spots = []
@@ -15391,13 +15427,16 @@ class Window(Adw.ApplicationWindow):
             return
         esc = GLib.markup_escape_text
         for _which, _title, groups in MOON_MAPS:
-            for head, rows, _style in groups:
-                h = Gtk.Label(label=esc(head), use_markup=True, halign=Gtk.Align.START, attributes=attrs,
-                              margin_top=6)
+            for head, rows, style in groups:
+                # (wrapped: a headline longer than the box is wide made the whole box wider, past the cover's edge)
+                h = Gtk.Label(label=esc(head), use_markup=True, halign=Gtk.Align.START, xalign=0, wrap=True,
+                              attributes=attrs, margin_top=6)
                 h.add_css_class("day-head")
                 box.append(h)
+                if head in MOON_HEAD_NOTES:
+                    box.append(Gtk.Label(label=esc(MOON_HEAD_NOTES[head]), xalign=0, wrap=True, attributes=attrs))
                 for name, latin, _lat, _lon, size, text in rows:
-                    note = ", ".join(p for p in (latin, size, MOON_HEIGHTS.get(name, "")) if p)
+                    note = ", ".join(p for p in (latin, size, moon_measure(name, style)) if p)
                     box.append(Gtk.Label(label=f"<b>{esc(name)}</b> <span alpha='70%'>({esc(note)})</span> "
                                                f"{esc(text)}", use_markup=True, xalign=0, wrap=True,
                                          attributes=attrs))
@@ -15456,6 +15495,14 @@ class Window(Adw.ApplicationWindow):
         self.sky_pop.popup()
         GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
         GLib.idle_add(self._day_true, area, self.sky_pop)
+
+        def sized() -> bool:  # (its contents must never make it wider than its place over the cover: for the log)
+            if self.sky_pop.get_visible():
+                print(f"Rádio Beat: okno Měsíce a Slunce {glass.get_width()}×{glass.get_height()} px, místo pro "
+                      f"ně {w}×{h} px" + ("" if (glass.get_width(), glass.get_height()) == (w, h) else
+                                         ": NESEDÍ"), file=sys.stderr)
+            return False
+        GLib.timeout_add(1500, sized)
 
     def _sky_auto(self) -> None:
         """Once an hour by itself: 20 s for each of its pages, 30 s at least; not over a menu,
@@ -16337,6 +16384,10 @@ class Window(Adw.ApplicationWindow):
         self.weather_view.set_state(hover=at is self.weather_view)
         self.moon_view.set_state(hover=at is self.moon_view)
         on = at is self.moon_view and not self.moon_view.off  # the mouse on the Moon: its box, gone when it leaves
+        if at is self.weather_view and (spot := self.weather_view.moon_hit()):
+            # the weather's moon (beside the logo, on a clear night) as well (the user: either moon)
+            ok, b = self.weather_view.compute_bounds(self)
+            on = ok and 0 <= x - b.get_x() - spot[0] < spot[2] and 0 <= y - b.get_y() - spot[1] < spot[3]
         if on != self._sky_on:
             self._sky_on = on
             if on:

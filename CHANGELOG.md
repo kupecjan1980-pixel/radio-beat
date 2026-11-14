@@ -4,6 +4,7 @@
 
 ## 0.38 — Odvrácená strana Měsíce
 
+- **0.38.1** (2026-11-14) Okno o Měsíci a Slunci se otevře i najetím myší na Měsíc v počasí vedle loga (za jasné noci), nejen na Měsíce vedle tlačítka ⓘ. Okno je zase přesně tak široké jako okno o skladbě a ostatní: dlouhý nadpis v popisech odvrácené strany se nezalamoval a roztáhl ho přes pravý okraj obalu. U moří je na mapě i v popisu **hloubka** stejně jako výška u pohoří (Moře nepokojů 3 600 m, Humboldtovo moře 4 300 m, Moře klidu 1 000 m…): jak hluboko pod střední úrovní Měsíce leží hladina ztuhlé lávy uprostřed moře, spočítáno z výškoměru sondy LRO
 - **0.38.0** (2026-11-14) Okno o Měsíci a Slunci má třetí celostránkovou mapu, hned po mapě moří a mapě kráterů, hor a přistání: **odvrácenou stranu Měsíce**. Podklad je snímek téže sondy (Lunar Reconnaissance Orbiter, NASA) ve stejném pohledu, jen se středem na 180° délky; AI ho vylepší na dvojnásobnou velikost stejně jako snímek přivrácené strany. Na mapě jsou moře (Moskevské, Důmyslu, na okrajích Východní a Jižní), pánev Jižní pól–Aitken, 22 kráterů a pánví (Tsiolkovskiy, Gagarin, Korolev, Hertzsprung, Apollo, Daedalus uprostřed…), šest kráterů se jmény vědců z českých zemí (Šafařík, Nušl, Bečvář, Mendel, Purkyně, Heyrovský), nejvyšší bod Měsíce (10 786 m) a místa, kam dosedly sondy (Čchang-e 4 a 6, Ranger 4). Popisy ke každému jménu jsou na konci okna za popisy přivrácené strany
 
 ## 0.37 — Názvy česky
