@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.36.3"
+APP_VERSION = "0.36.4"
 
 import collections
 import ctypes
@@ -12337,24 +12337,28 @@ MOON_CRATERS = (
 )
 MOON_MOUNTS = (
     ("Apeniny", "Montes Apenninus", 18.9, -3.7, "600 km",
-     "Nejmohutnější měsíční pohoří, val pánve Moře dešťů; Mons Huygens měří 5,5 km."),
+     "Nejmohutnější měsíční pohoří, val pánve Moře dešťů; nejvyšší je Mons Huygens."),
     ("Alpy", "Montes Alpes", 47.5, -1.0, "asi 300 km",
-     "Pohoří na severovýchodním břehu Moře dešťů; protíná je Alpské údolí, Mont Blanc má 3,6 km."),
+     "Pohoří na severovýchodním břehu Moře dešťů; protíná je Alpské údolí, nejvyšší je Mont Blanc."),
     ("Alpské údolí", "Vallis Alpes", 49.2, 3.6, "délka asi 160 km",
      "Rovný příkop napříč Alpami, široký až 10 km."),
     ("Kavkaz", "Montes Caucasus", 38.4, 10.0, "asi 450 km",
-     "Odděluje Moře dešťů od Moře jasu, vrcholy až 6 km vysoké."),
+     "Odděluje Moře dešťů od Moře jasu; má nejvyšší vrcholy z pohoří kolem Moře dešťů."),
     ("Karpaty", "Montes Carpatus", 14.5, -24.4, "asi 350 km",
      "Jižní okraj Moře dešťů, severně od kráteru Copernicus."),
     ("Jura", "Montes Jura", 47.1, -34.0, "asi 420 km",
      "Oblouk hor kolem Zálivu duhy; při východu Slunce svítí do tmy jako „zlaté ucho“."),
     ("Přímý zlom", "Rupes Recta", -21.8, -7.8, "délka 110 km",
-     "Zlom v Moři oblaků, svah vysoký asi 300 m; při vycházejícím Slunci vrhá stín jako tmavá čára."),
+     "Zlom v Moři oblaků; při vycházejícím Slunci vrhá stín jako tmavá čára."),
     ("Schröterovo údolí", "Vallis Schröteri", 26.2, -50.8, "délka asi 170 km",
      "Největší klikaté údolí Měsíce, vyhloubené tekoucí lávou; začíná „Kobří hlavou“ u kráteru Herodotus."),
     ("Reiner Gamma", "", 7.5, -59.0, "asi 70 km",
      "Světlý vír bez jakéhokoli reliéfu: místní magnetické pole tu chrání povrch před tmavnutím slunečním větrem."),
 )
+# how high the mountains stand over the plains at their feet (their highest peaks), how deep the valleys are:
+# written beside the name on the map too (the user)
+MOON_HEIGHTS = {"Apeniny": "až 5 500 m", "Alpy": "až 3 600 m", "Kavkaz": "až 6 000 m", "Karpaty": "až 2 400 m",
+                "Jura": "asi 3 800 m", "Přímý zlom": "svah 300 m", "Schröterovo údolí": "hloubka až 1 000 m"}
 MOON_LANDINGS = (
     ("Apollo 11", "", 0.67, 23.47, "20. 7. 1969",
      "Neil Armstrong a Buzz Aldrin, první lidé na Měsíci; Základna klidu."),
@@ -12477,6 +12481,8 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
     lost = []
     for it in items:
         text = it["name"]
+        if it["name"] in MOON_HEIGHTS:
+            text += f" ({MOON_HEIGHTS[it['name']]})"
         if it["area"]:
             text = text.upper()
             words = text.split(" ")
@@ -15064,7 +15070,7 @@ class Window(Adw.ApplicationWindow):
                 h.add_css_class("day-head")
                 box.append(h)
                 for name, latin, _lat, _lon, size, text in rows:
-                    note = ", ".join(p for p in (latin, size) if p)
+                    note = ", ".join(p for p in (latin, size, MOON_HEIGHTS.get(name, "")) if p)
                     box.append(Gtk.Label(label=f"<b>{esc(name)}</b> <span alpha='70%'>({esc(note)})</span> "
                                                f"{esc(text)}", use_markup=True, xalign=0, wrap=True,
                                          attributes=attrs))

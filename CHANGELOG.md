@@ -4,6 +4,7 @@
 
 ## 0.36 — Mapa Měsíce
 
+- **0.36.4** (2026-11-14) Mapa Měsíce: u pohoří je na mapě i v popisu výška nejvyšších vrcholů (Kavkaz až 6 000 m, Apeniny až 5 500 m, Jura asi 3 800 m, Alpy až 3 600 m, Karpaty až 2 400 m), u Přímého zlomu výška svahu a u Schröterova údolí hloubka
 - **0.36.3** (2026-11-14) Okno o Měsíci a Slunci začíná mapami Měsíce (moře, pak krátery, hory a přistání), teprve po nich jde Měsíc dnes a jeho fáze, Slunce a úkazy; popisy toho, co je na mapách, jsou na konci
 - **0.36.2** (2026-11-14) Záznam říká i to, jak vylepšování fotky Měsíce postupuje (zatím se k němu AI nedostala: hledá se proč)
 - **0.36.1** (2026-11-14) Záznam říká, kdy se fotka Měsíce načetla a kdy se vrátila vylepšená AI
