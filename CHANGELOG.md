@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.38 — Odvrácená strana Měsíce
+
+- **0.38.0** (2026-11-14) Okno o Měsíci a Slunci má třetí celostránkovou mapu, hned po mapě moří a mapě kráterů, hor a přistání: **odvrácenou stranu Měsíce**. Podklad je snímek téže sondy (Lunar Reconnaissance Orbiter, NASA) ve stejném pohledu, jen se středem na 180° délky; AI ho vylepší na dvojnásobnou velikost stejně jako snímek přivrácené strany. Na mapě jsou moře (Moskevské, Důmyslu, na okrajích Východní a Jižní), pánev Jižní pól–Aitken, 22 kráterů a pánví (Tsiolkovskiy, Gagarin, Korolev, Hertzsprung, Apollo, Daedalus uprostřed…), šest kráterů se jmény vědců z českých zemí (Šafařík, Nušl, Bečvář, Mendel, Purkyně, Heyrovský), nejvyšší bod Měsíce (10 786 m) a místa, kam dosedly sondy (Čchang-e 4 a 6, Ranger 4). Popisy ke každému jménu jsou na konci okna za popisy přivrácené strany
+
 ## 0.37 — Názvy česky
 
 - **0.37.5** (2026-11-14) Přehrávač (mpv) a AI vylepšování (Real-ESRGAN) běžely na autorově počítači jen na dvou vláknech procesoru ze šestnácti: v prostředí sezení byly proměnné OMP_PROC_BIND a OMP_PLACES (z ladicího nástroje), se kterými se každý program používající GNU OpenMP při startu přiváže k prvnímu jádru. Aplikace je už svým podprocesům nepředává

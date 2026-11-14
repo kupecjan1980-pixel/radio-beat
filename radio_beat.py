@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.37.5"
+APP_VERSION = "0.38.0"
 
 import collections
 import ctypes
@@ -3189,8 +3189,9 @@ class Enhancer:
 
     def _picture(self, text: str) -> None:
         kind = self.running[0] if self.running else "cover"
-        if kind == "pic:" + MOON_PHOTO:  # (a big job that comes once: how it went, for the log)
-            print("Rádio Beat: fotka Měsíce:", text, file=sys.stderr)
+        if kind[:4] == "pic:" and kind[4:] in MOON_SIDES:  # (a big job that comes once: how it went, for the log)
+            print("Rádio Beat: fotka Měsíce" + (" (odvrácená strana):" if kind[4:] == MOON_FAR_PHOTO else ":"),
+                  text, file=sys.stderr)
         if self.on_picture and kind != "bg":  # (an old cover isn't what's on the screen)
             GLib.idle_add(lambda: (self.on_picture(text, kind), False)[1])
 
@@ -3551,8 +3552,8 @@ class Enhancer:
                     if kind not in self.jobs:
                         break
                 job = self.jobs[kind]
-                moon = "pic:" + MOON_PHOTO
-                if moon in self.jobs and kind != moon and time.monotonic() - getattr(self, "_moon_said", 0) > 60:
+                moon = next(("pic:" + u for u in MOON_SIDES if "pic:" + u in self.jobs), "")
+                if moon and kind[4:] not in MOON_SIDES and time.monotonic() - getattr(self, "_moon_said", 0) > 60:
                     self._moon_said = time.monotonic()  # (why the Moon's photo waits: for the log)
                     print(f"Rádio Beat: fotka Měsíce čeká, na řadě je {kind[:60]} (ve frontě {len(self.jobs)}: "
                           f"{', '.join(sorted({k if not self._low(k) else k[:3] for k in self.jobs}))}; první "
@@ -11271,11 +11272,12 @@ def _moon_drawn(cr, rad: float, m: dict) -> None:
     cr.restore()
 
 
-def _moon_photo(cr, rad: float, gain: float = 1.45) -> bool:
-    """The Moon's face from its photo (MOON_FACE), north up, centered on (0, 0), radius `rad`, brightened `gain`
-    times (the mosaic is dark: lit low from the side); False while there's no photo."""
+def _moon_photo(cr, rad: float, gain: float = 1.45, face: dict = None) -> bool:
+    """The Moon's face from its photo (MOON_FACE; `face`: the far side's, MOON_FAR), north up, centered on (0, 0),
+    radius `rad`, brightened `gain` times (the mosaic is dark: lit low from the side); False while there's no
+    photo."""
     import cairo
-    mips = MOON_FACE["mips"]
+    mips = (MOON_FACE if face is None else face)["mips"]
     if not mips:
         return False
     surf, size = next(((s, n) for s, n in mips if n >= rad * 5), mips[-1])  # (sharp at 2.5 screen pixels a point)
@@ -12337,12 +12339,21 @@ class MoonStrip(Gtk.Widget):
 MOON_PHOTO = "https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote("Moon nearside LRO.jpg")
 MOON_PHOTO_PX = 1400
 MOON_FACE = {"v": 0, "mips": [], "ai": False}  # the photo as cairo pictures [(surface, size)], small to big
+# The far side (the user: its map after the near side's two, AI-enhanced the same): the same camera's mosaic, the
+# same view from above 0° N 180° E (north up, so the near side's western edge is on its right). Commons has it
+# 18 000 px wide; asked for at 1920 px (one of the widths its server makes), enhanced to twice that.
+MOON_FAR_PHOTO = ("https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote("Moon Farside LRO.jpg")
+                  + "?width=1920")
+MOON_FAR = {"v": 0, "mips": [], "ai": False}
+MOON_SIDES = {MOON_PHOTO: MOON_FACE, MOON_FAR_PHOTO: MOON_FAR}  # each side's photo and where it's kept
 
 
-def moon_face_set(data: bytes, ai: bool = False) -> bool:
+def moon_face_set(data: bytes, ai: bool = False, face: dict = None) -> bool:
     """The Moon's photo (JPEG or PNG bytes) made ready for drawing: itself and smaller copies (halved again and
-    again: a small Moon drawn from a big photo would glitter). Any thread; False when it can't be read."""
+    again: a small Moon drawn from a big photo would glitter). `face`: which side's (MOON_FACE when not said).
+    Any thread; False when it can't be read."""
     import cairo
+    face = MOON_FACE if face is None else face
     try:
         tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
         w, h = tex.get_width(), tex.get_height()
@@ -12369,8 +12380,11 @@ def moon_face_set(data: bytes, ai: bool = False) -> bool:
     except (GLib.Error, AttributeError, TypeError, ValueError, MemoryError) as e:
         print("Rádio Beat: fotka Měsíce:", repr(e), file=sys.stderr)
         return False
-    MOON_FACE.update(mips=mips[::-1] + [(big, w)], ai=ai, v=MOON_FACE["v"] + 1, keep=buf)
-    print(f"Rádio Beat: fotka Měsíce {w}×{h} px" + (", vylepšená AI" if ai else ", jak přišla"), file=sys.stderr)
+    face.update(mips=mips[::-1] + [(big, w)], ai=ai, v=face["v"] + 1, keep=buf)
+    if not ai:
+        face["src"] = w  # (how big it came: enhanced to twice that)
+    print("Rádio Beat: fotka Měsíce" + (" (odvrácená strana)" if face is MOON_FAR else "") + f" {w}×{h} px"
+          + (", vylepšená AI" if ai else ", jak přišla"), file=sys.stderr)
     return True
 
 
@@ -12539,7 +12553,8 @@ MOON_MOUNTS = (
 # how high the mountains stand over the plains at their feet (their highest peaks), how deep the valleys are:
 # written beside the name on the map too (the user)
 MOON_HEIGHTS = {"Apeniny": "až 5 500 m", "Alpy": "až 3 600 m", "Kavkaz": "až 6 000 m", "Karpaty": "až 2 400 m",
-                "Jura": "asi 3 800 m", "Přímý zlom": "svah 300 m", "Schröterovo údolí": "hloubka až 1 000 m"}
+                "Jura": "asi 3 800 m", "Přímý zlom": "svah 300 m", "Schröterovo údolí": "hloubka až 1 000 m",
+                "Nejvyšší bod Měsíce": "10 786 m"}
 MOON_LANDINGS = (
     ("Apollo 11", "", 0.67, 23.47, "20. 7. 1969",
      "Neil Armstrong a Buzz Aldrin, první lidé na Měsíci; Základna klidu."),
@@ -12567,15 +12582,124 @@ MOON_LANDINGS = (
     ("Čandraján 3", "", -69.37, 32.32, "23. 8. 2023",
      "Indická sonda, první přistání poblíž jižního pólu."),
 )
-# the box's two maps, each a page, and what's said under each: (which, title, [(headline, rows, style)])
+# What's on the far side: the same rows (longitude east; west of 180° negative, as on the near side).
+MOON_FAR_SEAS = (
+    ("Moře moskevské", "Mare Moscoviense", 27.3, 147.9, "asi 280 km",
+     "Jedno z mála moří odvrácené strany. Jméno mu dali sovětští astronomové podle snímků sondy Luna 3, která "
+     "odvrácenou stranu v říjnu 1959 vyfotografovala jako první; lidé ji na vlastní oči poprvé viděli v prosinci "
+     "1968 z Apolla 8."),
+    ("Moře důmyslu", "Mare Ingenii", -33.7, 163.5, "asi 320 km",
+     "Tmavá láva ve starých kráterech na okraji pánve Jižní pól–Aitken; přes ni se vinou světlé víry, jako je "
+     "Reiner Gamma na přivrácené straně."),
+    ("Moře východní", "Mare Orientale", -19.4, -92.8, "pánev 930 km",
+     "Odtud je vidět na samém pravém okraji: nejmladší velká pánev Měsíce, stará asi 3,8 miliardy let, se třemi "
+     "prstenci hor."),
+    ("Moře jižní", "Mare Australe", -38.9, 93.0, "asi 600 km",
+     "Na levém okraji: tmavé skvrny lávy ve staré, málo znatelné pánvi; zčásti je vidět i ze Země."),
+)
+MOON_FAR_BASIN = (
+    ("Pánev Jižní pól–Aitken", "", -53.0, -169.0, "asi 2 500 km",
+     "Největší, nejhlubší a nejstarší známá pánev Měsíce a jeden z největších kráterů sluneční soustavy: přes "
+     "4,2 miliardy let stará, dno až 8 km pod okolím. Na snímku je to tmavší kraj dole; sahá až k jižnímu pólu."),
+)
+MOON_FAR_CRATERS = (
+    ("Tsiolkovskiy", "", -20.4, 129.0, "asi 185 km",
+     "Nejnápadnější kráter odvrácené strany: tmavé lávové dno a uprostřed světlá hora. Je už na snímcích Luny 3; "
+     "po Konstantinu Ciolkovském, otci kosmonautiky."),
+    ("Gagarin", "", -19.7, 149.4, "asi 265 km",
+     "Velký starý kráter, silně rozbitý pozdějšími dopady; po Juriji Gagarinovi, prvním člověku ve vesmíru."),
+    ("Korolev", "", -4.0, -157.4, "asi 420 km",
+     "Pánev se dvěma prstenci; po Sergeji Koroljovovi, hlavním konstruktérovi sovětských raket."),
+    ("Hertzsprung", "", 1.4, -128.7, "asi 570 km",
+     "Jedna z největších pánví odvrácené strany, s vnitřním prstencem hor; po dánském astronomovi Ejnaru "
+     "Hertzsprungovi."),
+    ("Apollo", "", -36.1, -151.8, "asi 540 km",
+     "Dvojitá pánev uvnitř pánve Jižní pól–Aitken; krátery v ní nesou jména astronautů programu Apollo a posádek "
+     "raketoplánů Challenger a Columbia. Na jejím jižním okraji přistála Čchang-e 6."),
+    ("Mendeleev", "", 5.7, 140.9, "asi 310 km",
+     "Pánev s rovným dnem a řetízkem malých kráterů; po Dmitriji Mendělejevovi, tvůrci periodické tabulky prvků."),
+    ("Daedalus", "", -5.9, 179.4, "93 km",
+     "Skoro přesně uprostřed odvrácené strany. Ta není temná: Slunce na ni svítí stejně dlouho jako na "
+     "přivrácenou, jen ze Země ji nikdy nevidíme. Měsíc tu stíní rádiový šum ze Země, proto se o tomto místě "
+     "uvažuje pro radioteleskop."),
+    ("Icarus", "", -5.3, -173.2, "asi 95 km",
+     "Soused Daedala s nezvykle vysokou středovou horou, vyšší než jeho val."),
+    ("Aitken", "", -16.4, 173.0, "135 km",
+     "Tmavé dno a středové vrcholky; stojí na severním okraji obří pánve, která má jméno po něm a po jižním pólu."),
+    ("Van de Graaff", "", -27.4, 172.2, "asi 230 km",
+     "Dva srostlé krátery ve tvaru osmičky; je tu silnější magnetické pole a víc přirozené radioaktivity než v okolí."),
+    ("Von Kármán", "", -44.5, 176.3, "asi 180 km",
+     "Tady v lednu 2019 poprvé přistála sonda na odvrácené straně, čínská Čchang-e 4. Theodore von Kármán byl "
+     "americký průkopník letectví a raket, rodák z Budapešti."),
+    ("Jules Verne", "", -35.0, 147.0, "asi 145 km",
+     "Kráter s tmavým lávovým dnem, na odvrácené straně vzácným; po autorovi románu Ze Země na Měsíc."),
+    ("Leibnitz", "", -38.3, 179.2, "asi 245 km",
+     "Velký kráter s tmavým dnem hned vedle Von Kármána."),
+    ("Oppenheimer", "", -35.2, -166.3, "asi 210 km",
+     "Na dně má tmavé skvrny sopečného popela kolem prasklin; po Robertu Oppenheimerovi."),
+    ("Schrödinger", "", -75.0, 132.4, "asi 320 km",
+     "Dobře zachovaná pánev s vnitřním prstencem hor nedaleko jižního pólu; na dně má sopečný kužel."),
+    ("Antoniadi", "", -69.7, -172.0, "asi 140 km",
+     "V malém kráteru na jeho dně je nejnižší místo Měsíce, asi 9 km pod středním poloměrem."),
+    ("Compton", "", 55.3, 103.8, "asi 160 km",
+     "Středová hora obklopená půlkruhem vrcholků, dno s brázdami; po bratrech fyzicích Comptonových."),
+    ("Birkhoff", "", 58.7, -146.1, "asi 345 km",
+     "Stará, silně rozrušená valová rovina na severu s řadou mladších kráterů na dně."),
+    ("Jackson", "", 22.4, -163.1, "71 km",
+     "Mladý kráter s největší soustavou světlých paprsků na odvrácené straně, obdoba Tycha."),
+    ("Ohm", "", 18.3, -113.8, "64 km",
+     "Mladý kráter s paprsky, které sahají stovky kilometrů daleko."),
+    ("Giordano Bruno", "", 36.0, 102.9, "22 km",
+     "Jeden z nejmladších větších kráterů Měsíce (jen několik milionů let), s dlouhými jasnými paprsky."),
+    ("King", "", 5.0, 120.5, "asi 76 km",
+     "Středová hora ve tvaru račího klepeta a za severním valem hladké jezírko ztuhlé taveniny."),
+)
+MOON_FAR_CZECH = (
+    ("Šafařík", "", 10.6, 176.9, "27 km",
+     "Po Vojtěchu Šafaříkovi, českém chemikovi a astronomovi, který desítky let pozoroval Měsíc a proměnné hvězdy."),
+    ("Nušl", "", 32.3, 167.6, "61 km",
+     "Po Františku Nušlovi, českém astronomovi, spoluzakladateli hvězdárny v Ondřejově."),
+    ("Bečvář", "", -2.9, 124.5, "67 km",
+     "Po Antonínu Bečvářovi, autorovi slavných hvězdných atlasů a zakladateli observatoře na Skalnatém plese."),
+    ("Mendel", "", -48.8, -109.4, "asi 140 km",
+     "Po Gregoru Mendelovi, který v brněnském klášteře objevil zákony dědičnosti."),
+    ("Purkyně", "", -1.6, 94.9, "48 km",
+     "Po fyziologovi Janu Evangelistovi Purkyně; leží na levém okraji snímku."),
+    ("Heyrovský", "", -39.6, -95.3, "16 km",
+     "Po Jaroslavu Heyrovském, nositeli Nobelovy ceny za chemii; na pravém okraji u Moře východního."),
+)
+MOON_FAR_TOP = (
+    ("Nejvyšší bod Měsíce", "", 5.41, -158.63, "",
+     "Na valu u kráteru Engelhardt: 10 786 m nad středním poloměrem Měsíce, o 1 938 m výš, než je Mount Everest "
+     "nad mořem."),
+)
+MOON_FAR_LANDINGS = (
+    ("Čchang-e 4", "", -45.44, 177.60, "3. 1. 2019",
+     "První měkké přistání na odvrácené straně, v kráteru Von Kármán, s vozítkem Nefritový králík 2; spojení se "
+     "Zemí drží přes družici za Měsícem."),
+    ("Čchang-e 6", "", -41.64, -153.99, "1. 6. 2024",
+     "Přivezla na Zemi první vzorky z odvrácené strany, skoro 2 kg z pánve Apollo."),
+    ("Ranger 4", "", -15.5, -130.7, "26. 4. 1962",
+     "První americká sonda, která Měsíce dosáhla: po poruše počítače dopadla na odvrácenou stranu bez jediného "
+     "snímku."),
+)
+# the box's maps, each a page, and what's said under each: (which, title, [(headline, rows, style)]); "far" is
+# drawn on the far side's photo, its middle at 180° of longitude
 MOON_MAPS = (
     ("seas", "MOŘE MĚSÍCE", (("Moře a oceán", MOON_MARIA, "sea"), ("Zálivy, jezera a bažiny", MOON_WATERS, "water"))),
     ("craters", "KRÁTERY, HORY\nA PŘISTÁNÍ", (("Krátery", MOON_CRATERS, "crater"),
                                              ("Pohoří, údolí a zlomy", MOON_MOUNTS, "mount"),
                                              ("Kde přistáli lidé a sondy", MOON_LANDINGS, "landing"))),
+    ("far", "ODVRÁCENÁ\nSTRANA MĚSÍCE", (("Odvrácená strana: moře", MOON_FAR_SEAS, "sea"),
+                                         ("Odvrácená strana: největší pánev", MOON_FAR_BASIN, "basin"),
+                                         ("Odvrácená strana: krátery a pánve", MOON_FAR_CRATERS, "crater"),
+                                         ("Odvrácená strana: krátery se jmény vědců z českých zemí",
+                                          MOON_FAR_CZECH, "crater"),
+                                         ("Odvrácená strana: nejvyšší bod", MOON_FAR_TOP, "mount"),
+                                         ("Odvrácená strana: kde přistály sondy", MOON_FAR_LANDINGS, "landing"))),
 )
 MOON_INK = {"sea": (1.0, 0.90, 0.66), "water": (1.0, 0.82, 0.63), "crater": (1.0, 1.0, 1.0),
-            "mount": (0.75, 0.94, 0.69), "landing": (1.0, 0.62, 0.54)}
+            "mount": (0.75, 0.94, 0.69), "landing": (1.0, 0.62, 0.54), "basin": (0.72, 0.86, 1.0)}
 
 
 def moon_map_draw(cr, which: str, w: float, h: float) -> list:
@@ -12587,12 +12711,19 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
     gi.require_version("PangoCairo", "1.0")
     from gi.repository import PangoCairo
     title, groups = next((t, g) for k, t, g in MOON_MAPS if k == which)
+    far = which == "far"
+    face = MOON_FAR if far else MOON_FACE
     R = min(w, h) / 2 - 2
     cx, cy = w / 2, h / 2
     cr.save()
     cr.translate(cx, cy)
-    if not _moon_photo(cr, R, 1.22):
-        _moon_drawn(cr, R, {"q": 0.0})
+    if not _moon_photo(cr, R, 1.22, face):
+        if far:  # (no drawn stand-in for this side: a plain gray disc until its photo comes)
+            cr.arc(0, 0, R, 0, 2 * math.pi)
+            cr.set_source_rgb(0.40, 0.41, 0.44)
+            cr.fill()
+        else:
+            _moon_drawn(cr, R, {"q": 0.0})
     cr.restore()
     fs = max(8.0, min(w, h) * 0.0205)
 
@@ -12626,8 +12757,9 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
     lay.set_alignment(Pango.Alignment.LEFT)
     write(lay, ink, 4, 4, fs * 1.15, (1, 1, 1), 0.95)
     placed.append((4, 4, 4 + ink.width, 4 + ink.height))
-    for text, right, bottom in (("sever nahoře,\nvýchod vpravo", True, False),
-                                ("snímek sondy LRO\n(NASA)" + (", vylepšený AI" if MOON_FACE["ai"] else ""),
+    for text, right, bottom in (("sever nahoře; ze Země\nnení nikdy vidět" if far else
+                                 "sever nahoře,\nvýchod vpravo", True, False),
+                                ("snímek sondy LRO\n(NASA)" + (", vylepšený AI" if face["ai"] else ""),
                                  False, True)):
         lay, ink = layout(text, fs * 0.8)
         lay.set_alignment(Pango.Alignment.RIGHT if right else Pango.Alignment.LEFT)
@@ -12638,15 +12770,16 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
     items = []
     for _head, rows, style in groups:
         for name, _latin, lat, lon, size, _text in rows:
-            la, lo = math.radians(lat), math.radians(lon)
+            la, lo = math.radians(lat), math.radians(lon - (180.0 if far else 0.0))
             x, y, z = math.cos(la) * math.sin(lo), math.sin(la), math.cos(la) * math.cos(lo)
             if z < 0.05:  # at the edge or just past it: its mark on the edge
                 n = math.hypot(x, y) or 1.0
                 x, y = x / n * 0.992, y / n * 0.992
-            area = style in ("sea", "water") and z > 0.45  # (a sea seen from the side: a mark and a name beside it)
-            km = float("".join(ch for ch in size if ch.isdigit()) or 0) if style == "sea" else 0.0
+            # (a sea seen from the side: a mark and a name beside it)
+            area = style in ("sea", "water", "basin") and z > 0.45
+            km = float("".join(ch for ch in size if ch.isdigit()) or 0) if style in ("sea", "basin") else 0.0
             items.append({"name": name, "style": style, "x": cx + x * R, "y": cy - y * R, "area": area,
-                          "size": fs * (1.0 + min(0.55, km / 2600)) if area and style == "sea" else
+                          "size": fs * (1.0 + min(0.55, km / 2600)) if area and style in ("sea", "basin") else
                           fs * (0.92 if style == "water" else 1.0), "mark": 0.0 if area else fs * 0.3})
     pad = fs * 0.14
 
@@ -12718,7 +12851,7 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
             cr.set_source_rgba(0, 0, 0, 0.75)
             cr.stroke_preserve()
             cr.set_source_rgba(*color, 1.0)
-            if it["style"] in ("crater", "sea", "water"):  # a ring: what's inside stays seen
+            if it["style"] in ("crater", "sea", "water", "basin"):  # a ring: what's inside stays seen
                 cr.set_line_width(fs * 0.11)
                 cr.stroke()
             else:
@@ -12747,7 +12880,7 @@ class MoonMap(Gtk.Widget):
 
     def do_snapshot(self, snap) -> None:
         _native, k = _screen_scale(self)
-        key = (self.which, self.w, self.h, k, MOON_FACE["v"])
+        key = (self.which, self.w, self.h, k, MOON_FACE["v"], MOON_FAR["v"])
         tex = MoonMap._pics.get(key)
         if tex is None:
             if len(MoonMap._pics) > 3:
@@ -18207,35 +18340,44 @@ class App(Adw.Application):
             time.sleep(1 if DEEPL_KEY else 3)
 
     def _moon_face_load(self) -> None:
-        """(A thread.) The Moon's photo for its phases and its map: off the disk when it was fetched before,
-        else fetched (tried again later when that fails); then enhanced."""
+        """(A thread.) The Moon's photos (the near side for its phases and maps, the far side for its map): off
+        the disk when they were fetched before, else fetched (tried again later when that fails); then enhanced."""
+        todo = list(MOON_SIDES)
         for wait in (0, 60, 600, 3600, 6 * 3600):
             time.sleep(wait)
-            data = namesake_photo(MOON_PHOTO)
-            if data and moon_face_set(data):
-                GLib.idle_add(self._moon_face_got, data)
+            for url in list(todo):
+                data = namesake_photo(url)
+                if data and moon_face_set(data, face=MOON_SIDES[url]):
+                    todo.remove(url)
+                    GLib.idle_add(self._moon_face_got, url, data)
+            if not todo:
                 return
 
-    def _moon_face_got(self, data: bytes = None) -> bool:
+    def _moon_face_got(self, url: str = None, data: bytes = None) -> bool:
         if self.win:
             self.win.moon_redraw()
         if data is not None:
-            self._moon_src = data
-            GLib.timeout_add_seconds(20, lambda: (self._moon_face_enhance(), False)[1])  # (after the start's work)
+            if not hasattr(self, "_moon_srcs"):
+                self._moon_srcs = {}
+            self._moon_srcs[url] = data
+            # (after the start's work; the near side, which the phases are drawn from too, first)
+            GLib.timeout_add_seconds(20 if url == MOON_PHOTO else 30,
+                                     lambda: (self._moon_face_enhance(url), False)[1])
         return False
 
-    def _moon_face_enhance(self) -> None:
-        """The Moon's photo through the AI like the other photos, to twice its size (kept in their cache)."""
-        data, px = getattr(self, "_moon_src", None), self.enhance_px()
+    def _moon_face_enhance(self, url: str = MOON_PHOTO) -> None:
+        """A Moon's photo through the AI like the other photos, to twice its size (kept in their cache)."""
+        data, px, face = getattr(self, "_moon_srcs", {}).get(url), self.enhance_px(), MOON_SIDES[url]
         if not data or not px or not self.settings.get("enhance", True) or not hasattr(self, "enhancer"):
             return
-        n = MOON_PHOTO_PX
-        print(f"Rádio Beat: fotka Měsíce jde k vylepšení ({n} → {2 * n} px)", file=sys.stderr)
+        n = face.get("src") or MOON_PHOTO_PX
+        print("Rádio Beat: fotka Měsíce" + (" (odvrácená strana)" if face is MOON_FAR else "")
+              + f" jde k vylepšení ({n} → {2 * n} px)", file=sys.stderr)
 
         def done(pic: bytes):
-            threading.Thread(target=lambda: moon_face_set(pic, True) and GLib.idle_add(self._moon_face_got),
+            threading.Thread(target=lambda: moon_face_set(pic, True, face) and GLib.idle_add(self._moon_face_got),
                              daemon=True).start()
-        self.enhancer.request("pic:" + MOON_PHOTO, MOON_PHOTO, data, (n, n), (2 * n, 2 * n), done, screen=px)
+        self.enhancer.request("pic:" + url, url, data, (n, n), (2 * n, 2 * n), done, screen=px)
 
     def want_name_pic(self, url: str) -> None:
         """A namesake's photo: off the disk when it was downloaded before (instant), enhanced as the panels'."""
@@ -18436,8 +18578,8 @@ class App(Adw.Application):
         """The panels closed: the small pictures shown with the quick pass get the full enhancing now."""
         for kind in list(self.enhancer.light_done):
             url = kind[4:]
-            if url == MOON_PHOTO:
-                self._moon_face_enhance()
+            if url in MOON_SIDES:
+                self._moon_face_enhance(url)
                 continue
             data = self.show_src.get(url)
             if data:
