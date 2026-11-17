@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.40 — Měsíc i latinsky a anglicky
+
+- **0.40.0** (2026-11-17) Na mapách Měsíce mají moře, zálivy, jezera, bažiny a pohoří pod českým jménem menším písmem i původní latinské a anglické jméno („MOŘE KLIDU / Mare Tranquillitatis / Sea of Tranquility“); u malých značek na okraji jen latinské, a kde by se delší popisek nevešel, zůstane jen české jméno. V popisech pod mapami jsou obě jména v závorce u všeho, co je má (i sondy: Lunokhod 1, Chang'e 3, Chandrayaan-3). Fotka Měsíce se AI vylepšuje jen jednou: dosud se po každém zavření okna (i toho, co se samo otevírá u skladby) vylepšovala znovu, každou minutu či dvě. Řádky u hodin v listopadu nemají bledé barvy (šedorůžovou a světle meruňkovou nahradila tmavší oranžová a rezavá), takže svátky jako „Den boje za svobodu a demokracii a Mezinárodní den studentstva“ jsou líp čitelné. V nastavení je u „Verze … aktuální“ i čas vydání, ne jen datum
+
 ## 0.39 — Česky i jména kapel
 
 - **0.39.1** (2026-11-17) Český překlad v závorce je i na **hlavní obrazovce**: u názvu skladby, jména kapely i alba, stejně jako v okně ⓘ, např. „Feelin' Bad (Cítím se zle)“, „Spooky Tooth (Strašidelný zub)“, „Spooky Two (Strašidelná dvojka)“. Když překlad přijde až později, doplní se bez bliknutí, jako by šlo o novou skladbu

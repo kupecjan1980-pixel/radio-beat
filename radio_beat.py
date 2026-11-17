@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.39.1"
+APP_VERSION = "0.40.0"
 
 import collections
 import ctypes
@@ -24,6 +24,7 @@ import datetime
 import glob
 import html
 import itertools
+import calendar
 import json
 import math
 import os
@@ -267,6 +268,15 @@ AUTO_UPDATE_S = 5 * 60  # how often it looks for a new version
 LATEST: dict = {}  # the newest commit seen by update_status()
 
 
+def _when_local(iso: str) -> str:
+    """GitHub's '2026-11-17T09:31:05Z' as here: '17. 11. 2026 10:31' (the date alone when it can't be read)."""
+    try:
+        t = time.localtime(calendar.timegm(time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S")))
+        return f"{t.tm_mday}. {t.tm_mon}. {t.tm_year} {t.tm_hour}:{t.tm_min:02d}"
+    except (ValueError, TypeError):
+        return (iso or "")[:10]
+
+
 def update_status() -> tuple[bool | None, str]:
     """(newer version on GitHub?, text); None when it couldn't be checked.
     Compares the installed commit (VERSION, written by install.sh) with GitHub's newest."""
@@ -285,7 +295,7 @@ def update_status() -> tuple[bool | None, str]:
         # not an installed copy (no VERSION: run from the source folder): never replaced by an update
         return False, "Běží ze složky se zdrojáky: sám se neaktualizuje"
     if mine == sha:
-        return False, f"Verze {APP_VERSION}: aktuální ({info['committer']['date'][:10]})"
+        return False, f"Verze {APP_VERSION}: aktuální (vydaná {_when_local(info['committer']['date'])})"
     # Only forwards: GitHub's commit must come after the installed one (a newer local build stays).
     if re.fullmatch(r"[0-9a-f]{7,40}", mine):
         try:
@@ -300,7 +310,7 @@ def update_status() -> tuple[bool | None, str]:
             return False, (f"Verze {APP_VERSION}: aktuální (novější než na GitHubu)" if status == "behind"
                            else f"Verze {APP_VERSION}: aktuální")
     theirs = remote_version(sha)
-    return True, (f"Nová verze {theirs or ''} z {info['committer']['date'][:10]} (teď {APP_VERSION}):\n"
+    return True, (f"Nová verze {theirs or ''} z {_when_local(info['committer']['date'])} (teď {APP_VERSION}):\n"
                   f"{info['message'].splitlines()[0]}").replace("verze  z", "verze z")
 
 
@@ -7778,7 +7788,7 @@ MONTH_COLORS = {
     8: ("#ffb703", "#fb8500", "#8ecae6", "#ffd166", "#f4a261", "#e9c46a"),
     9: ("#e9c46a", "#f4a261", "#e76f51", "#a7c957", "#f2e8cf", "#ffb347"),
     10: ("#ff8c1a", "#ffb347", "#ff6b4a", "#ffd166", "#e25822", "#f4a259"),
-    11: ("#d4a373", "#e76f51", "#f4a261", "#ffcc80", "#bc8a5f", "#c9ada7"),
+    11: ("#d4a373", "#e76f51", "#f4a261", "#e0782f", "#bc8a5f", "#cf5f34"),  # (no pale ones: hard to read)
     12: ("#e0f7ff", "#a8dadc", "#ffffff", "#ff4d4d", "#7bd389", "#ffd700"),
 }
 
@@ -12737,6 +12747,38 @@ MOON_FAR_LANDINGS = (
      "První americká sonda, která Měsíce dosáhla: po poruše počítače dopadla na odvrácenou stranu bez jediného "
      "snímku."),
 )
+# The names in English (the Latin, the IAU's, is in the tables): beside the Czech, as the songs' Czech is beside
+# their names (the user: the original and the English names of the seas and the rest).
+MOON_EN = {
+    "Oceán bouří": "Ocean of Storms", "Moře dešťů": "Sea of Showers", "Moře jasu": "Sea of Serenity",
+    "Moře klidu": "Sea of Tranquility", "Moře nepokojů": "Sea of Crises", "Moře hojnosti": "Sea of Fecundity",
+    "Moře nektaru": "Sea of Nectar", "Moře oblaků": "Sea of Clouds", "Moře vláhy": "Sea of Moisture",
+    "Moře chladu": "Sea of Cold", "Moře par": "Sea of Vapors", "Moře poznané": "Sea that has become Known",
+    "Moře ostrovů": "Sea of Islands", "Humboldtovo moře": "Humboldt's Sea", "Moře hada": "Serpent Sea",
+    "Moře vln": "Sea of Waves", "Moře pěn": "Foaming Sea", "Moře okrajové": "Border Sea",
+    "Smythovo moře": "Smyth's Sea", "Moře jižní": "Southern Sea", "Moře východní": "Eastern Sea",
+    "Záliv duhy": "Bay of Rainbows", "Záliv středu": "Central Bay", "Záliv veder": "Seething Bay",
+    "Záliv rosy": "Bay of Dew", "Jezero snů": "Lake of Dreams", "Jezero smrti": "Lake of Death",
+    "Bažina hniloby": "Marsh of Decay", "Bažina epidemií": "Marsh of Epidemics", "Bažina spánku": "Marsh of Sleep",
+    "Apeniny": "Apennine Mountains", "Alpy": "Alps", "Alpské údolí": "Alpine Valley",
+    "Kavkaz": "Caucasus Mountains", "Karpaty": "Carpathian Mountains", "Jura": "Jura Mountains",
+    "Přímý zlom": "Straight Wall", "Schröterovo údolí": "Schröter's Valley",
+    "Moře moskevské": "Sea of Moscow", "Moře důmyslu": "Sea of Cleverness",
+    "Pánev Jižní pól–Aitken": "South Pole–Aitken basin", "Nejvyšší bod Měsíce": "Highest point of the Moon",
+    "Lunochod 1": "Lunokhod 1", "Čchang-e 3": "Chang'e 3", "Čchang-e 4": "Chang'e 4", "Čchang-e 5": "Chang'e 5",
+    "Čchang-e 6": "Chang'e 6", "Čandraján 3": "Chandrayaan-3",
+}
+
+
+def moon_names(name: str, latin: str) -> str:
+    """'Mare Tranquillitatis, Sea of Tranquility': the name's original (Latin) and English, those that differ."""
+    out = []
+    for n in (latin, MOON_EN.get(name, "")):
+        if n and norm(n) != norm(name) and n not in out:
+            out.append(n)
+    return ", ".join(out)
+
+
 # the box's maps, each a page, and what's said under each: (which, title, [(headline, rows, style)]); "far" is
 # drawn on the far side's photo, its middle at 180° of longitude
 MOON_MAPS = (
@@ -12829,7 +12871,7 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
 
     items = []
     for _head, rows, style in groups:
-        for name, _latin, lat, lon, size, _text in rows:
+        for name, latin, lat, lon, size, _text in rows:
             la, lo = math.radians(lat), math.radians(lon - (180.0 if far else 0.0))
             x, y, z = math.cos(la) * math.sin(lo), math.sin(la), math.cos(la) * math.cos(lo)
             if z < 0.05:  # at the edge or just past it: its mark on the edge
@@ -12838,7 +12880,7 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
             # (a sea seen from the side: a mark and a name beside it)
             area = style in ("sea", "water", "basin") and z > 0.45
             km = float("".join(ch for ch in size if ch.isdigit()) or 0) if style in ("sea", "basin") else 0.0
-            items.append({"name": name, "style": style, "x": cx + x * R, "y": cy - y * R, "area": area,
+            items.append({"name": name, "other": moon_names(name, latin), "style": style, "x": cx + x * R, "y": cy - y * R, "area": area,
                           "size": fs * (1.0 + min(0.55, km / 2600)) if area and style in ("sea", "basin") else
                           fs * (0.92 if style == "water" else 1.0), "mark": 0.0 if area else fs * 0.3})
     pad = fs * 0.14
@@ -12852,23 +12894,7 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
         return not any(o is not me and o["mark"] and x0 < o["x"] + o["mark"] and x1 > o["x"] - o["mark"]
                        and y0 < o["y"] + o["mark"] and y1 > o["y"] - o["mark"] for o in items)
 
-    lost = []
-    for it in items:
-        text, tail = it["name"], ""
-        measure = moon_measure(it["name"], it["style"])
-        if measure and not it["area"]:
-            text += f" ({measure})"
-        if it["area"]:
-            text = text.upper()
-            words = text.split(" ")
-            if len(words) > 1 and len(text) > 8:  # in two rows, as even as can be
-                cut = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
-                text = " ".join(words[:cut]) + "\n" + " ".join(words[cut:])
-            if measure:  # a sea's depth under its name, smaller
-                tail = measure
-                text += "\n" + tail
-        lay, ink = layout(text, it["size"], it["size"] * 0.07 if it["area"] else 0.0, tail)
-        tw, th, ax, ay = ink.width, ink.height, it["x"], it["y"]
+    def moon_spot(it, tw, th, ax, ay):
         g = it["mark"] + fs * 0.32
         spots = []
         if it["area"]:
@@ -12885,7 +12911,39 @@ def moon_map_draw(cr, which: str, w: float, h: float) -> list:
                 px, py = ax + c * d, ay + s * d
                 spots.append((px if c > 0.3 else px - tw if c < -0.3 else px - tw / 2,
                               py if s > 0.3 else py - th if s < -0.3 else py - th / 2, True))
-        spot = next(((x, y, far) for x, y, far in spots if free((x, y, x + tw, y + th), it)), None)
+        return next(((x, y, far) for x, y, far in spots if free((x, y, x + tw, y + th), it)), None)
+
+    lost = []
+    for it in items:
+        text, tail = it["name"], ""
+        measure = moon_measure(it["name"], it["style"])
+        if measure and not it["area"]:
+            text += f" ({measure})"
+        if it["area"]:
+            text = text.upper()
+            words = text.split(" ")
+            if len(words) > 1 and len(text) > 8:  # in two rows, as even as can be
+                cut = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
+                text = " ".join(words[:cut]) + "\n" + " ".join(words[cut:])
+            # (under the name, smaller: the original and the English name, then a sea's depth)
+            tail = "\n".join(p for p in (it["other"].replace(", ", "\n") if it["other"] else "", measure) if p)
+            if tail:
+                text += "\n" + tail
+        elif it["other"]:  # (beside a mark, where room is short: the original alone under the name, smaller)
+            tail = it["other"].split(", ")[0]
+            text += "\n" + tail
+        short = None
+        if it["other"]:  # (the name without the original and English: when the whole finds no place)
+            short = text.split("\n" + tail)[0] if tail else text
+            if measure and it["area"]:
+                short += "\n" + measure
+        for attempt in (0, 1):
+            lay, ink = layout(text, it["size"], it["size"] * 0.07 if it["area"] else 0.0, tail)
+            tw, th, ax, ay = ink.width, ink.height, it["x"], it["y"]
+            spot = moon_spot(it, tw, th, ax, ay)
+            if spot or short is None or attempt:
+                break
+            text, tail = short, (measure if measure and it["area"] else "")
         color = MOON_INK[it["style"]]
         if it["mark"]:
             m = it["mark"]
@@ -15465,7 +15523,7 @@ class Window(Adw.ApplicationWindow):
                 if head in MOON_HEAD_NOTES:
                     box.append(Gtk.Label(label=esc(MOON_HEAD_NOTES[head]), xalign=0, wrap=True, attributes=attrs))
                 for name, latin, _lat, _lon, size, text in rows:
-                    note = ", ".join(p for p in (latin, size, moon_measure(name, style)) if p)
+                    note = ", ".join(p for p in (moon_names(name, latin), size, moon_measure(name, style)) if p)
                     box.append(Gtk.Label(label=f"<b>{esc(name)}</b> <span alpha='70%'>({esc(note)})</span> "
                                                f"{esc(text)}", use_markup=True, xalign=0, wrap=True,
                                          attributes=attrs))
@@ -18507,11 +18565,17 @@ class App(Adw.Application):
         data, px, face = getattr(self, "_moon_srcs", {}).get(url), self.enhance_px(), MOON_SIDES[url]
         if not data or not px or not self.settings.get("enhance", True) or not hasattr(self, "enhancer"):
             return
+        done_once = self.__dict__.setdefault("_moon_enhanced", set())
+        if url in done_once:  # (the same photo: enhanced once is enough; closing a box asked for it again and again)
+            self.enhancer.light_done.discard("pic:" + url)
+            return
         n = face.get("src") or MOON_PHOTO_PX
         print("Rádio Beat: fotka Měsíce" + (" (odvrácená strana)" if face is MOON_FAR else "")
               + f" jde k vylepšení ({n} → {2 * n} px)", file=sys.stderr)
 
         def done(pic: bytes):
+            if "pic:" + url not in self.enhancer.light_done:  # (the full pass, not a box's quick one)
+                done_once.add(url)
             threading.Thread(target=lambda: moon_face_set(pic, True, face) and GLib.idle_add(self._moon_face_got),
                              daemon=True).start()
         self.enhancer.request("pic:" + url, url, data, (n, n), (2 * n, 2 * n), done, screen=px)
