@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.39.0"
+APP_VERSION = "0.39.1"
 
 import collections
 import ctypes
@@ -16693,6 +16693,7 @@ class Window(Adw.ApplicationWindow):
             if row.get("label"):
                 row["label"].set_text(self._played_line(row))
         self.song_refresh()
+        self.refresh()  # (the main screen's song, band and album)
         if self.puddle_open and self.PUDDLE_MODES[self.puddle_mode] == "ZAJÍMAVOSTI":
             self._fill_puddle()
 
@@ -17075,12 +17076,15 @@ class Window(Adw.ApplicationWindow):
         self.back_disc.set_visible(bool(a.song_track))
         info = a.info or {}
         title = plain_title(info.get("title") or a.song or "Rádio Beat")
-        if title != self.song.get_text() and self.song.get_text():
+        if title != getattr(self, "_song_shown", "") and self.song.get_text():
             self.blink()
-        self.song.set_text(title)
-        artist = info.get("artist") or a.artist_raw or "První bigbeat u nás"
-        self.artist.set_text(artist)
-        self.album.set_text(tidy_case(plain_title(info.get("album") or "")))
+        self._song_shown = title  # (the name itself: its Czech coming later isn't a new song)
+        self.song.set_text(a.with_czech(title) if info.get("title") or a.song else title)
+        artist = info.get("artist") or a.artist_raw
+        self.artist.set_text(a.artist_czech(artist) if artist else "První bigbeat u nás")
+        album = tidy_case(plain_title(info.get("album") or ""))
+        cs = a.title_cs(album) if album else ""
+        self.album.set_text(f"{album} ({cs})" if cs else album)
         self.album.set_visible(bool(info.get("album")))
         self.facts.set_text(a.cz(a.facts))
         self.facts.set_visible(bool(a.facts))
@@ -17158,11 +17162,14 @@ def _track_refresh(self) -> None:
     a = self.app
     tv, t = a.track_view, a.song_track
     title = plain_title(tv.get("shown_title") or tv["title"])
-    if title != self.song.get_text() and self.song.get_text():
+    if title != getattr(self, "_song_shown", "") and self.song.get_text():
         self.blink()
-    self.song.set_text(title)
-    self.artist.set_text(tv.get("shown_artist") or tv["artist"])
-    self.album.set_text(tidy_case(plain_title(tv.get("album") or "")))
+    self._song_shown = title
+    self.song.set_text(a.with_czech(title))
+    self.artist.set_text(a.artist_czech(tv.get("shown_artist") or tv["artist"]))
+    album = tidy_case(plain_title(tv.get("album") or ""))
+    cs = a.title_cs(album) if album else ""
+    self.album.set_text(f"{album} ({cs})" if cs else album)
     self.album.set_visible(bool(tv.get("album")))
     self.facts.set_text(a.cz(tv.get("facts") or ""))
     self.facts.set_visible(bool(tv.get("facts")))

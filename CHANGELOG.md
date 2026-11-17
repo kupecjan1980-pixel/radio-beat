@@ -4,7 +4,8 @@
 
 ## 0.39 — Česky i jména kapel
 
-- **0.39.0** (2026-11-17) V okně ⓘ (HRÁLO) a v okně o skladbě mají český překlad v závorce i **jména kapel**, ne jen názvy skladeb a alb, např. „Spooky Tooth (Strašidelný zub) – Feelin' Bad (Cítím se zle)“, „Deep Purple (Temně nachová)“, „Iron Maiden (Železná panna)“. Hlavní obrazovka zůstává bez překladů. Ručně přeloženo dalších asi 2 500 jmen kapel, skladeb a alb ze všech dosud zahraných (1 270 z nich má český překlad; jména lidí, vymyšlená slova, zkratky a české kapely bez háčků zůstávají, jak jsou). Album Spooky Two je správně „Strašidelná dvojka“. S klíčem DeepL se na pozadí přeloží i všechno nové v historii, a to po 40 názvech najednou místo po jednom; překlad, který jen vrátí totéž jméno (případně bez „The“), se nezobrazí
+- **0.39.1** (2026-11-17) Český překlad v závorce je i na **hlavní obrazovce**: u názvu skladby, jména kapely i alba, stejně jako v okně ⓘ, např. „Feelin' Bad (Cítím se zle)“, „Spooky Tooth (Strašidelný zub)“, „Spooky Two (Strašidelná dvojka)“. Když překlad přijde až později, doplní se bez bliknutí, jako by šlo o novou skladbu
+- **0.39.0** (2026-11-17) V okně ⓘ (HRÁLO) a v okně o skladbě mají český překlad v závorce i **jména kapel**, ne jen názvy skladeb a alb, např. „Spooky Tooth (Strašidelný zub) – Feelin' Bad (Cítím se zle)“, „Deep Purple (Temně nachová)“, „Iron Maiden (Železná panna)“. Ručně přeloženo dalších asi 2 500 jmen kapel, skladeb a alb ze všech dosud zahraných (1 270 z nich má český překlad; jména lidí, vymyšlená slova, zkratky a české kapely bez háčků zůstávají, jak jsou). Album Spooky Two je správně „Strašidelná dvojka“. S klíčem DeepL se na pozadí přeloží i všechno nové v historii, a to po 40 názvech najednou místo po jednom; překlad, který jen vrátí totéž jméno (případně bez „The“), se nezobrazí
 
 ## 0.38 — Odvrácená strana Měsíce
 
