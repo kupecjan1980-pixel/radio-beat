@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.1"
+APP_VERSION = "0.40.2"
 
 import collections
 import ctypes
@@ -266,6 +266,19 @@ RAW = f"https://raw.githubusercontent.com/{REPO}/master"
 
 AUTO_UPDATE_S = 5 * 60  # how often it looks for a new version
 LATEST: dict = {}  # the newest commit seen by update_status()
+
+
+def installed_commit() -> str:
+    """The commit installed (VERSION, written by install.sh and by an update); '' when run from the sources."""
+    try:
+        with open(os.path.join(HERE, "VERSION")) as f:
+            mine = f.read().strip()
+    except OSError:
+        return ""
+    return mine if re.fullmatch(r"[0-9a-f]{7,40}", mine) else ""
+
+
+RUNNING_COMMIT = installed_commit()  # what this process was started from: a newer install under it restarts it
 
 
 def _when_local(iso: str) -> str:
@@ -17707,6 +17720,15 @@ class App(Adw.Application):
     def _checked(self, ready, text):
         self.update_busy, self.update_ready, self.update_text = False, ready, text
         self.update()
+        now = installed_commit()
+        if RUNNING_COMMIT and now and now != RUNNING_COMMIT and not ready and not self.installing:
+            # a newer version was installed under this running one (install.sh by hand, or another copy's
+            # update): nothing to download, it's already there; the old one in memory quits and the new one starts
+            print(f"Rádio Beat: nainstalovaná verze ({now[:7]}) je jiná než ta, co běží ({RUNNING_COMMIT[:7]}): "
+                  "restart na novou", file=sys.stderr)
+            self.update_text = "Nová verze je nainstalovaná: spouští se…"
+            self.update()
+            return self._updated(None)
         if ready and self.settings.get("auto_update", True):
             self.update_clicked()  # installs it and restarts
         return False
