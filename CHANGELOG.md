@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.39 — Česky i jména kapel
+
+- **0.39.0** (2026-11-17) V okně ⓘ (HRÁLO) a v okně o skladbě mají český překlad v závorce i **jména kapel**, ne jen názvy skladeb a alb, např. „Spooky Tooth (Strašidelný zub) – Feelin' Bad (Cítím se zle)“, „Deep Purple (Temně nachová)“, „Iron Maiden (Železná panna)“. Hlavní obrazovka zůstává bez překladů. Ručně přeloženo dalších asi 2 500 jmen kapel, skladeb a alb ze všech dosud zahraných (1 270 z nich má český překlad; jména lidí, vymyšlená slova, zkratky a české kapely bez háčků zůstávají, jak jsou). Album Spooky Two je správně „Strašidelná dvojka“. S klíčem DeepL se na pozadí přeloží i všechno nové v historii, a to po 40 názvech najednou místo po jednom; překlad, který jen vrátí totéž jméno (případně bez „The“), se nezobrazí
+
 ## 0.38 — Odvrácená strana Měsíce
 
 - **0.38.1** (2026-11-14) Okno o Měsíci a Slunci se otevře i najetím myší na Měsíc v počasí vedle loga (za jasné noci), nejen na Měsíce vedle tlačítka ⓘ. Okno je zase přesně tak široké jako okno o skladbě a ostatní: dlouhý nadpis v popisech odvrácené strany se nezalamoval a roztáhl ho přes pravý okraj obalu. U moří je na mapě i v popisu **hloubka** stejně jako výška u pohoří (Moře nepokojů 3 600 m, Humboldtovo moře 4 300 m, Moře klidu 1 000 m…): jak hluboko pod střední úrovní Měsíce leží hladina ztuhlé lávy uprostřed moře, spočítáno z výškoměru sondy LRO

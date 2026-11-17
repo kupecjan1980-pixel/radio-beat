@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.38.1"
+APP_VERSION = "0.39.0"
 
 import collections
 import ctypes
@@ -991,6 +991,33 @@ def deepl(text: str):
         return None
 
 
+def deepl_many(texts: list):
+    """Like deepl() for several texts in one request: [(Czech, language)] in their order; None when it can't."""
+    if not DEEPL_KEY or not texts:
+        return None
+    host = "api-free.deepl.com" if DEEPL_KEY.endswith(":fx") else "api.deepl.com"
+    req = urllib.request.Request(f"https://{host}/v2/translate", method="POST",
+                                 data=json.dumps({"text": texts, "target_lang": "CS"}).encode(),
+                                 headers={"Authorization": f"DeepL-Auth-Key {DEEPL_KEY}",
+                                          "Content-Type": "application/json", "User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            got = json.load(r)["translations"]
+        if len(got) != len(texts):
+            return None
+        return [(t.get("text", ""), (t.get("detected_source_language") or "").upper()) for t in got]
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
+def name_translated(src: str, cs: str) -> bool:
+    """Whether a name's Czech says something of its own: not the same words back ("Jimi Hendrix"), nor the
+    name less its "The" ("The Rolling Stones" -> "Rolling Stones")."""
+    small = {"the", "a", "and", "an", "of"}
+    new = set(norm(cs).split()) - set(norm(src).split()) - small
+    return bool(new)
+
+
 def to_czech(text: str) -> str:
     """English → Czech: through DeepL when the user gave a key, else (or when that fails) through MyMemory (a
     free translation service); the text is sent there; '' if it can't."""
@@ -1253,10 +1280,11 @@ def czech_sentence(text: str) -> str:
     return cs
 
 
-# English song and album names in Czech (the user: "No Prayer for the Dying (Žádná modlitba za umírající)").
-# titles_cs.json: the most played ones, translated by hand (a band's name, a compilation's or a pun is left as it
-# is). Others are asked of the translation service when they look English; that one is often out of its free
-# share for the day, so they come when they come.
+# English song, album and band names in Czech (the user: "No Prayer for the Dying (Žádná modlitba za
+# umírající)"; later: the bands' names too, "Spooky Tooth (Strašidelný zub)"). titles_cs.json: the most played
+# songs and albums, translated by hand. Others are asked of the translation service (DeepL with the user's key:
+# all of them, and every name the history holds, in the background; without one only those that look English,
+# of a free service often out of its share for the day, so they come when they come).
 try:
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "titles_cs.json"), encoding="utf-8") as _f:
         TITLES_CS = json.load(_f)
@@ -15274,6 +15302,7 @@ class Window(Adw.ApplicationWindow):
         if a.band_about:
             band = first_artist(info.get("artist") or a.artist_raw or "Interpret")
             years = a.artist_years(band)  # (beside the name, like the name day's people: born, died, how old)
+            band = a.artist_czech(band)
             out.append((f"{band} · {years}" if years else band, a.band_about))
         if getattr(a, "album_about", "") and info.get("album"):
             cs = a.title_cs(info["album"])
@@ -16607,7 +16636,8 @@ class Window(Adw.ApplicationWindow):
             row = {"at": at, "artist": artist, "title": title, "album": album, "show": show, "cover": cover,
                    "facts": facts, "shown_artist": shown_artist, "shown_title": shown_title}
             self._last_body = None
-            self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}", f"{shown_artist} – {self.app.with_czech(shown_title)}",
+            self._puddle_block(f"{t.tm_hour}:{t.tm_min:02d}",
+                               f"{self.app.artist_czech(shown_artist)} – {self.app.with_czech(shown_title)}",
                                self._played_line(row) or " ", img=small_cover(cover) if cover else "")
             row["label"], row["title_label"] = self._last_body, self._last_title
             # play / pause and stop in glass like the radio's: the song itself from YouTube (the radio waits)
@@ -16658,7 +16688,8 @@ class Window(Adw.ApplicationWindow):
         """A name's Czech came: HRÁLO's rows, the song's box and ZAJÍMAVOSTI say it."""
         for row in self._played_rows:
             if row.get("title_label"):
-                row["title_label"].set_text(f"{row['shown_artist']} – {self.app.with_czech(row['shown_title'])}")
+                row["title_label"].set_text(f"{self.app.artist_czech(row['shown_artist'])} – "
+                                            f"{self.app.with_czech(row['shown_title'])}")
             if row.get("label"):
                 row["label"].set_text(self._played_line(row))
         self.song_refresh()
@@ -17313,6 +17344,7 @@ class App(Adw.Application):
         threading.Thread(target=self._background, daemon=True).start()
         threading.Thread(target=self._names_ahead, daemon=True).start()
         threading.Thread(target=self._moon_face_load, daemon=True).start()
+        threading.Thread(target=self._titles_history, daemon=True).start()
         # text as big as on this desktop everywhere (KDE says 1.0, Omarchy 1.64): the 'i' panel and the menus
         # look the same on the DeskMini's full HD as on a 4K screen at 2x
         Gtk.Settings.get_default().set_property("gtk-xft-dpi", int(96 * 1024 * self.TEXT_SCALE))
@@ -18336,23 +18368,30 @@ class App(Adw.Application):
             self.win.names_refresh()
         return False
 
-    def title_cs(self, title: str) -> str:
-        """An English song's or album's name in Czech; '' when it has none (yet: asked for, the rows are told)."""
+    def title_cs(self, title: str, ask: bool = True) -> str:
+        """An English song's, album's or band's name in Czech; '' when it has none (yet: asked for, the rows are
+        told when it comes)."""
         key = title_key(title)
         if not key or not key.isascii():
             return ""
         if key in TITLES_CS:
             return TITLES_CS[key]
         known = self._title_cs = titles_got()  # (what the translation service said before, here or elsewhere)
-        if key not in known and (DEEPL_KEY or ENGLISH_HINT.search(key)):  # (DeepL tells English from Czech itself)
+        if ask and key not in known and (DEEPL_KEY or ENGLISH_HINT.search(key)):  # (DeepL tells English itself)
             known[key] = ""
             shown = plain_title(title).strip()
-            queue = self.__dict__.setdefault("_title_queue", [])
-            queue.append((key, shown.title() if shown.isupper() else shown))
-            if not getattr(self, "_title_worker", None):
-                self._title_worker = threading.Thread(target=self._titles_work, daemon=True)
-                self._title_worker.start()
+            self._title_ask(key, shown.title() if shown.isupper() else shown)
         return known.get(key, "")
+
+    def _title_ask(self, key: str, shown: str, first: bool = True) -> None:
+        queue = self.__dict__.setdefault("_title_queue", [])
+        if first:
+            queue.insert(0, (key, shown))  # (one on the screen now before the history's)
+        else:
+            queue.append((key, shown))
+        if not getattr(self, "_title_worker", None):
+            self._title_worker = threading.Thread(target=self._titles_work, daemon=True)
+            self._title_worker.start()
 
     def with_czech(self, title: str) -> str:
         """'No Prayer for the Dying (Žádná modlitba za umírající)'; as it is when it has no Czech."""
@@ -18360,9 +18399,44 @@ class App(Adw.Application):
         cs = self.title_cs(title)
         return f"{shown} ({cs})" if cs else shown
 
+    def artist_czech(self, artist: str) -> str:
+        """'Spooky Tooth (Strašidelný zub)'; a person's name, a Czech band's, as it is."""
+        artist = (artist or "").strip()
+        cs = self.title_cs(artist)
+        return f"{artist} ({cs})" if cs else artist
+
+    def _titles_history(self) -> None:
+        """(A thread, a while after the start.) Every name the history holds, the bands' too, asked of DeepL in
+        the background, the most played first: their Czech is there before they play again."""
+        time.sleep(120)
+        if not DEEPL_KEY:
+            return
+        rows = []
+        try:
+            with self.db.lock:
+                for col in ("artist", "title", "album"):
+                    rows += self.db.db.execute(
+                        f"SELECT {col}, COUNT(*) FROM plays WHERE {col} <> '' GROUP BY {col}").fetchall()
+                for col in ("shown_artist", "shown_title"):
+                    rows += [(r[0], 1) for r in self.db.db.execute(f"SELECT {col} FROM names WHERE {col} <> ''")]
+        except Exception as e:  # (sqlite3's errors: no names table on an old database)
+            print(f"názvy z historie: {e}", file=sys.stderr)
+        rows.sort(key=lambda r: -r[1])
+        known, n = titles_got(), 0
+        for name, _ in rows:
+            key = title_key(name or "")
+            if not key or not key.isascii() or key in TITLES_CS or key in known:
+                continue
+            known[key] = ""
+            shown = plain_title(name).strip()
+            self._title_ask(key, shown.title() if shown.isupper() else shown, first=False)
+            n += 1
+        if n:
+            print(f"názvy z historie: {n} k překladu (DeepL, na pozadí)", file=sys.stderr)
+
     def _titles_work(self) -> None:
-        """(A thread.) The names waiting, one after another, slowly; the service out of its day's share: an hour's
-        rest, then again."""
+        """(A thread.) The names waiting: through DeepL many at once, else one after another, slowly; the service
+        out of its day's share: an hour's rest, then again."""
         got = False
         while not getattr(self, "quitting", False):
             if not self._title_queue:
@@ -18371,23 +18445,28 @@ class App(Adw.Application):
                 got = False
                 time.sleep(5)
                 continue
-            key, shown = self._title_queue[0]
             if DEEPL_KEY:
-                r = deepl(shown)
-                if r is None:
+                part = self._title_queue[:40]
+                res = deepl_many([shown for _, shown in part])
+                if res is None:
                     time.sleep(600)
                     continue
-                cs = r[0].strip() if r[1] == "EN" else ""  # (a Czech name, a band's: left as it is)
+                answers = [r[0].strip() if r[1] == "EN" else "" for r in res]  # (a Czech name: left as it is)
             else:
-                cs = czech_sentence(shown).strip().rstrip(".")
+                part = self._title_queue[:1]
+                cs = czech_sentence(part[0][1]).strip().rstrip(".")
                 if not cs:
                     time.sleep(3600)
                     continue
-            self._title_queue.pop(0)
-            if cs and norm(cs) != norm(key):
-                self._title_cs[key] = cs[:1].upper() + cs[1:]
-                got = True
+                answers = [cs]
+            del self._title_queue[:len(part)]
+            for (key, shown), cs in zip(part, answers):
+                if cs and norm(cs) != norm(key) and name_translated(shown, cs):
+                    self._title_cs[key] = cs[:1].upper() + cs[1:]
+                    got = True
             titles_save({q[0] for q in self._title_queue})  # (kept, the names with no Czech too: asked once)
+            if got and self.win and len(self._title_queue) % 400 < len(part):  # (now and then while many go)
+                GLib.idle_add(lambda: (self.win.titles_translated(), False)[1])
             time.sleep(1 if DEEPL_KEY else 3)
 
     def _moon_face_load(self) -> None:
