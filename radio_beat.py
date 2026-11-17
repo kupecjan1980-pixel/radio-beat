@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.0"
+APP_VERSION = "0.40.1"
 
 import collections
 import ctypes
@@ -1352,7 +1352,24 @@ def titles_merge(rows) -> int:
 
 
 def title_key(title: str) -> str:
-    return plain_title(title or "").strip().rstrip(".").lower()
+    # (typographic quotes as plain ones: "Here’s" is "Here's")
+    title = (title or "").translate({0x2019: "'", 0x2018: "'", 0x00b4: "'", 0x201c: '"', 0x201d: '"', 0x2013: "-"})
+    return plain_title(title).strip().rstrip(".").lower()
+
+
+_titles_loose: dict = {}  # norm(name) -> its hand-made Czech: the same name spelled a little differently
+
+
+def title_hand(key: str):
+    """The hand-made Czech for a name (None: none made); "Never Mind The Bollocks Here's The Sex Pistols"
+    without its comma finds the one with it."""
+    if key in TITLES_CS:
+        return TITLES_CS[key]
+    if not _titles_loose and TITLES_CS:
+        for k, v in TITLES_CS.items():
+            if v or norm(k) not in _titles_loose:
+                _titles_loose[norm(k)] = v
+    return _titles_loose.get(norm(key))
 
 
 def _about_cache_get(key: str):
@@ -18439,8 +18456,9 @@ class App(Adw.Application):
         key = title_key(title)
         if not key or not key.isascii():
             return ""
-        if key in TITLES_CS:
-            return TITLES_CS[key]
+        hand = title_hand(key)
+        if hand is not None:
+            return hand
         known = self._title_cs = titles_got()  # (what the translation service said before, here or elsewhere)
         if ask and key not in known and (DEEPL_KEY or ENGLISH_HINT.search(key)):  # (DeepL tells English itself)
             known[key] = ""
@@ -18490,7 +18508,7 @@ class App(Adw.Application):
         known, n = titles_got(), 0
         for name, _ in rows:
             key = title_key(name or "")
-            if not key or not key.isascii() or key in TITLES_CS or key in known:
+            if not key or not key.isascii() or title_hand(key) is not None or key in known:
                 continue
             known[key] = ""
             shown = plain_title(name).strip()
