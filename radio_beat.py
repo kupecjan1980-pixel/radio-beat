@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.9"
+APP_VERSION = "0.41.0"
 
 import collections
 import ctypes
@@ -3794,12 +3794,19 @@ class Enhancer:
     # (a second or two of CPU): the AI pictures themselves stay as they are, shared, so a change of level needs no AI.
     # level -> (stronger than the original by this much: starts, full; how far a found area grows, at 300 px)
     FIX_LEVELS = {"off": None, "weak": (2.2, 3.4, 5), "medium": (1.5, 2.3, 7), "strong": (1.25, 1.8, 14)}
-    FIX_EMPTY = 0.002  # of the picture at most: nothing found, the picture as it is
+    FIX_EMPTY = 0.002  # of the picture at most: no invented pattern found
+    FIX_EMPTY_CHANGED = 0.0002  # no changed small thing found either: the picture as it is
+    # Small things the AI drew differently, not stronger: tiny lettering redrawn (the user: Eagles' "hell freezes
+    # over" read "holl froozos ovor", every e closed into an o). Found by shrinking the AI's picture back to the
+    # original's size: where it kept the picture the two match but for sharpness; where it invented, a dark gap
+    # turned light or the other way round (difference in 16-bit grey after a slight blur: starts, full). Grain and
+    # texture redrawn stay below it (24 covers from the history: at most 0.1 % found, glitter specks).
+    FIX_CHANGED = (18000, 28000)
     FIX_KEEP = 300 << 20  # bytes of fixed pictures kept (few: most covers have nothing to fix)
     fix_level = "strong"
 
     def _fix_path(self, cached: str) -> str:
-        return os.path.join(UPSCALED_DIR, "fixed", f"{os.path.basename(cached)[:-4]}-{self.fix_level}.jpg")
+        return os.path.join(UPSCALED_DIR, "fixed", f"{os.path.basename(cached)[:-4]}-{self.fix_level}-v2.jpg")
 
     @staticmethod
     def _round_steps(name: str, n: int) -> list[str]:
@@ -3821,19 +3828,43 @@ class Enhancer:
                     f"[{name}3][{name}4]blend=all_mode=difference,gblur=sigma=9,scale=300:300:flags=area,"
                     f"format=gray16le[{name}]")
         ratio = f"clip((A/(4*B+262.1)-{lo / 4})/{(hi - lo) / 4},0,1)*65535"
+        c0, c1 = self.FIX_CHANGED
+        changed = (f"[2]scale={w2}:{h2}:flags=lanczos,format=gray16le,gblur=sigma=1.0[ca];"
+                   f"[3]scale={w2}:{h2}:flags=lanczos,format=gray16le,gblur=sigma=1.0[co];"
+                   f"[ca][co]blend=all_mode=difference,format=gray16le,"
+                   f"geq=lum='clip((lum(X,Y)-{c0})/{c1 - c0},0,1)*65535',format=gray,"
+                   + ",".join(self._round_steps("dilation", 3))
+                   # (at 300 px a spot this small is a fraction of a pixel, averaged faint: full strength again,
+                   # and round it a little, so the whole word goes back, not a pale blend into the AI's letters)
+                   + ",scale=300:300:flags=area,geq=lum='clip(lum(X,Y)*12,0,255)',"
+                   + ",".join(self._round_steps("dilation", 2)) + ",gblur=sigma=1.5[c]")
         graph = (f"{strength(0, 'a')};{strength(1, 'o')};[a][o]blend=all_expr='{ratio}',format=gray16le,format=gray,"
                  + ",".join(self._round_steps("erosion", 9) + self._round_steps("dilation", 9 + grow))
-                 + ",gblur=sigma=5[m]")
+                 + f",gblur=sigma=5[p];{changed}")
+        both = out + ".c"
         cmd = ["nice", "-n", "19", self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-filter_threads", "2",
-               "-filter_complex_threads", "2", "-i", picture, "-i", original, "-filter_complex", graph, "-map", "[m]",
-               "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", out]
+               "-filter_complex_threads", "2", "-i", picture, "-i", original, "-i", picture, "-i", original,
+               "-filter_complex", graph,
+               "-map", "[p]", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", out,
+               "-map", "[c]", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", both]
         proc = self.proc = self._spawn(cmd)
         proc.communicate()
         self._reap(proc)
-        if proc.returncode or not os.path.exists(out) or os.path.getsize(out) != 90000:
+        if proc.returncode or any(not os.path.exists(f) or os.path.getsize(f) != 90000 for f in (out, both)):
             return None
         with open(out, "rb") as f:
-            return sum(f.read()) / (255 * 90000)
+            pat = f.read()
+        with open(both, "rb") as f:
+            chg = f.read()
+        found_p, found_c = sum(pat) / (255 * 90000), sum(chg) / (255 * 90000)
+        # each by its own measure: the patterns only over big areas, the changed small things however small
+        keep_p, keep_c = found_p >= self.FIX_EMPTY, found_c >= self.FIX_EMPTY_CHANGED
+        if not (keep_p or keep_c):
+            return 0.0
+        mask = bytes(max(a if keep_p else 0, b if keep_c else 0) for a, b in zip(pat, chg))
+        with open(out, "wb") as f:
+            f.write(mask)
+        return max(sum(mask) / (255 * 90000), self.FIX_EMPTY_CHANGED)
 
     def _fix_merge(self, original: str, picture: str, mask: str, size: tuple[int, int], out: str) -> bool:
         w, h = size
@@ -3873,7 +3904,7 @@ class Enhancer:
             if found is None:
                 return pic
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            if found < self.FIX_EMPTY:
+            if found <= 0:
                 open(path, "wb").close()
                 return pic
             _, w, h = GdkPixbuf.Pixbuf.get_file_info(picture)

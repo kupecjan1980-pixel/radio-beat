@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.41 — Drobné nápisy na obalech bez vymyšlených písmen
+
+- **0.41.0** (2026-11-18) AI zvětšování obalů občas překreslí drobné písmo na jiná písmena: u Eagles „hell freezes over“ zavřelo každé e do o („holl froozos ovor“). Aplikace teď obrázek od AI zmenší zpátky na původní velikost a porovná s originálem: kde se malá věc změnila (světlá mezera ztmavla nebo naopak), vrátí se tam původní, měkčí, ale správný obrázek. Zrnitost a textury, které AI jen dokreslí, to nechává být. Všechny obaly se podle toho jednou znovu prověří (sekunda práce procesoru u každého, až se zobrazí)
+
 ## 0.40 — Měsíc i latinsky a anglicky
 
 - **0.40.9** (2026-11-18) Tenké vodorovné čárky u okraje kulatých tlačítek (pauza a reproduktor, vlevo i vpravo; DeskMini s Radeonem 780M): GPU sklo teď samo počítá, jak rozmazaný kus obrázku za tlačítkem vzít, podle zvětšení čočky, místo odhadu grafické karty po čtveřicích pixelů, který na okraji skákal a kreslil jednotlivé řádky ostřeji nebo měkčeji
