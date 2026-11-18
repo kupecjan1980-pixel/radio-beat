@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.3"
+APP_VERSION = "0.40.4"
 
 import collections
 import ctypes
@@ -1325,6 +1325,20 @@ def g_restored(text: str) -> str:
     return DROPPED_G.sub(lambda m: m.group(1) + ("G" if m.group(1).isupper() else "g"), text)
 
 
+def sentence_case(text: str) -> str:
+    """'Metal Health (Bang Your Head)' -> 'Metal health (bang your head)': in Title Case the translation service
+    takes the words for a name and gives them back as they are ("Bang Your Head"); so cased it translates them
+    ("Zatřes hlavou"). Abbreviations (AC/DC, USA) and "I" stay."""
+    first = [True]
+
+    def word(m):
+        w = m.group(0)
+        out = w if first[0] or w == "I" or (len(w) > 1 and w.isupper()) else w.lower()
+        first[0] = False
+        return out
+    return re.sub(r"[^\W\d_][\w']*", word, text)
+
+
 TITLES_GOT = os.path.join(os.path.dirname(FACTS_CACHE), "titles-cs.json")  # what the service translated
 
 
@@ -1338,9 +1352,13 @@ def titles_got() -> dict:
         if not _titles_got.get("\0loaded"):
             try:
                 with open(TITLES_GOT, encoding="utf-8") as f:
-                    # (a name with a dropped g that came back with no Czech: asked again, now with the g)
+                    # (a name that came back with no Czech before the service was asked with the g put back
+                    # and, failing that, in sentence case: asked once more)
+                    again = not os.path.exists(TITLES_GOT + ".asked-again")
                     _titles_got.update({k: v for k, v in json.load(f).items()
-                                        if isinstance(v, str) and (v or not DROPPED_G.search(k))})
+                                        if isinstance(v, str) and (v or not again)})
+                    if again:
+                        open(TITLES_GOT + ".asked-again", "w").close()
             except (OSError, ValueError, AttributeError):
                 pass
             _titles_got["\0loaded"] = "1"
@@ -18567,6 +18585,13 @@ class App(Adw.Application):
                     time.sleep(600)
                     continue
                 answers = [r[0].strip() if r[1] == "EN" else "" for r in res]  # (a Czech name: left as it is)
+                # (given back unchanged, taken for a name: asked once more in sentence case)
+                redo = [i for i, (cs, (_, shown)) in enumerate(zip(answers, part))
+                        if cs and not name_translated(shown, cs) and sentence_case(shown) != shown]
+                res2 = deepl_many([sentence_case(g_restored(part[i][1])) for i in redo]) if redo else None
+                for i, r in zip(redo, res2 or []):
+                    if r[1] == "EN":
+                        answers[i] = r[0].strip()
             else:
                 part = self._title_queue[:1]
                 cs = czech_sentence(g_restored(part[0][1])).strip().rstrip(".")
