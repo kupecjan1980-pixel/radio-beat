@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.5"
+APP_VERSION = "0.40.6"
 
 import collections
 import ctypes
@@ -12072,13 +12072,16 @@ SKY_PICS = {"sun_annular": 'Annular eclipse "ring of fire".jpg', "sun_total": "2
             "meteors:Leonidy": "Leonid meteor (50627764111).jpg",
             "meteors:Geminidy": "Geminid meteor shower.jpg",
             "meteors:Ursidy": "Ursids meteor shower over a saguaro in Arizona, US.jpg",
-            # A big Moon over a city's skyline at night (the user: as in the TV show Moonlighting; the buildings
-            # show its size), another one each time: by the month's count, so two in a row differ.
-            "supermoon": ("DC Skyline in Full Moon.jpg", "Cleveland Supermoon (22793801378).jpg",
-                          "Moon Over Met Life Tower (51684206383).jpg", "Cleveland Supermoon (30671014010).jpg",
-                          "Full Moon Over Union Square (32003444404).jpg",
-                          "Melbourne skyline with full moon rising (24010510461).jpg",
-                          "Cleveland Supermoon (30884281051).jpg"),
+            # A big Moon right behind a city's towers at night (the user: as in the TV show Moonlighting, later "like
+            # this" with a photo of a huge Moon behind San Francisco's skyscrapers: taken from afar, the Moon as big
+            # as the buildings), another one each time: by the month's count, so two in a row differ.
+            "supermoon": ("Supermoon rises behind the Washington Monument (4).jpg", "The Mtarfa Clock Tower.jpg",
+                          "Nearly full moon rises over New Orleans (MAF 20210525 NOLAMoonrise1).jpg",
+                          "Місяць, що сходить, і вежа-кампаніла костелу.jpg",
+                          "Jul 9, 2009 - Full moon over 96th St.jpg", "Kiss of the moon - Dallas, Texas.jpg",
+                          "Fernsehturm Stuttgart and Full Moon Summer 2013 03.jpg", "Freedom Statue full moon.jpg",
+                          "Autumn Moon over Toronto - 2019 1.jpg",
+                          "القمر مكتملًا خلف أحد أبراج مركز الملك عبدالله المالي، 2026.jpg"),
             "sun_day": "Malapascua Island, Ethereal sunset over Visayan Sea, Philippines.jpg",  # (the Sun's day)
             "spring": "Equinox at Angkor 21st March 2012.JPG", "autumn": "Chichen-Itza-Serpent-Effect.jpg",
             "summer": "Stonehenge, sunrise June 21 2019.jpg",
