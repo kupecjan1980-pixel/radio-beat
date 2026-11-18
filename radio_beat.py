@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.8"
+APP_VERSION = "0.40.9"
 
 import collections
 import ctypes
@@ -5824,7 +5824,14 @@ void main() {
     float b = lo < depth ? pow(1.0 - lo / depth, curve) : 0.0;  // 1 at the edge, 0 from depth inwards
     vec2 s = vec2(mag + (rx - mag) * b, mag + (ry - mag) * b);
     vec2 c = size * 0.5;
-    color = texture(src, (c + (p - c) / s - box.xy) / box.zw);
+    // The blur level (mipmap) worked out from the lens's own magnification, not from the GPU's 2x2-pixel
+    // derivatives: those jump where the bend does (the rim, a button edge's 1 px straight piece), and the
+    // DeskMini's 780M then drew single rows a level sharper or softer: thin lines across the button's rim.
+    vec2 texels = vec2(textureSize(src, 0)) / box.zw;  // the picture's pixels per glass px
+    vec2 step = vec2(abs(dFdx(p.x)), abs(dFdy(p.y)));  // glass px per output pixel (even: p is linear in uv)
+    vec2 foot = step * texels / s;
+    float lod = log2(max(max(foot.x, foot.y), 1e-6));
+    color = textureLod(src, (c + (p - c) / s - box.xy) / box.zw, max(lod, 0.0));
 }"""
 
     RETRY_AFTER = 30  # s after a failure while drawing: the shader tried again (a driver hiccup needn't mean the
