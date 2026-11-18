@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.6"
+APP_VERSION = "0.40.7"
 
 import collections
 import ctypes
@@ -2279,6 +2279,8 @@ class Mpv:
         cmd = mpv_command(sock_dir)
         if not cmd:
             raise RuntimeError("Chybí mpv (balíček systému, nebo z Flathubu: flatpak install flathub io.mpv.Mpv)")
+        err_path = self.sock_path[:-5] + ".err"  # what mpv (or Flatpak) says when it won't start
+        err = open(err_path, "w")
         self.proc = subprocess.Popen(
             # --load-scripts=no: no MPRIS plugin, the app shows itself as the player (Mpris)
             [*cmd, "--idle=yes", "--no-video", "--load-scripts=no", "--no-terminal", "--force-window=no",
@@ -2287,13 +2289,33 @@ class Mpv:
              # let ffmpeg pick a dropped HTTP stream up again by itself
              "--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=5",
              *os.environ.get("RADIO_BEAT_MPV_ARGS", "").split()],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
             preexec_fn=_die_with_parent,
         )
-        for _ in range(300):  # a Flatpak mpv takes a few seconds the first time
-            if os.path.exists(self.sock_path) or self.proc.poll() is not None:
-                break
+        err.close()
+        self.err_path = err_path
+        # (the waiting below is connect(): in a thread, while mpv itself is started here, on the main thread:
+        # PR_SET_PDEATHSIG kills it when the *thread* that started it ends, not only the process)
+
+    def connect(self) -> None:
+        err_path = self.err_path
+        # a Flatpak mpv takes a few seconds the first time, and longer right after the computer starts (the
+        # DeskMini, Bazzite: the 15 s waited before ran out and the app only said "[Errno 2] … neexistuje")
+        end = time.monotonic() + 60
+        while not os.path.exists(self.sock_path) and self.proc.poll() is None and time.monotonic() < end:
             time.sleep(0.05)
+        if not os.path.exists(self.sock_path):
+            code = self.proc.poll()
+            if code is None:
+                self.proc.kill()
+            try:
+                with open(err_path, errors="replace") as f:
+                    said = " ".join(f.read().split())[-300:]
+            except OSError:
+                said = ""
+            raise RuntimeError(("mpv se nespustil" + (f" (skončil s kódem {code})" if code is not None
+                                                      else " (do minuty neodpověděl)"))
+                               + (f": {said}" if said else "") + "; zkusí se znovu")
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect(self.sock_path)
         self.lock = threading.Lock()
@@ -17804,15 +17826,54 @@ class App(Adw.Application):
             self.win.fill_quality()
 
     def start_mpv(self):
+        """mpv started in a thread (a Flatpak one can take many seconds after the computer starts: the window
+        doesn't wait for it); playback begins when it's up, unless paused meanwhile."""
+        if getattr(self, "_mpv_starting", False):
+            return
+        self._mpv_starting = True
+
         try:
-            self.mpv = Mpv(self.on_prop)
+            m = Mpv(self.on_prop)  # (started here, on the main thread; see connect())
+        except (OSError, RuntimeError) as e:
+            self._mpv_up(None, e)
+            return
+
+        def work():
+            try:
+                m.connect()
+                got, err = m, None
+            except (OSError, RuntimeError) as e:
+                got, err = None, e
+            GLib.idle_add(self._mpv_up, got, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _mpv_up(self, got, e) -> bool:
+        self._mpv_starting = False
+        if got:
+            if self.quitting:
+                got.proc.terminate()
+                return False
+            self.mpv = got
             self._vol_cur = self._vol_target = 100 if self.card_on() else self.settings["volume"]
             self.mpv.volume(self._vol_cur)
             if self.muted and not self.card_on():
                 self.mpv.mute(True)  # a restarted mpv stays muted
             self.error = None
-        except (OSError, RuntimeError) as e:
+            if not self.paused:
+                self._load()
+        else:
             self.mpv, self.error = None, str(e)
+            print(f"radio-beat: mpv: {e}", file=sys.stderr)
+            if not self.quitting and not getattr(self, "_mpv_retry", None):
+                self._mpv_retry = GLib.timeout_add_seconds(10, self._mpv_again)  # (not left silent: again)
+        self.update()
+        return False
+
+    def _mpv_again(self) -> bool:
+        self._mpv_retry = None
+        if not self.mpv and not self.quitting:
+            self._restart_mpv()
+        return False
 
     # playback
     def stream(self) -> tuple[str, str, str]:
@@ -17882,7 +17943,9 @@ class App(Adw.Application):
         url, what = found
         if not self.tmpv:
             try:
-                self.tmpv = Mpv(self._track_prop, "track")
+                m = Mpv(self._track_prop, "track")
+                m.connect()  # (here a wait is fine: mpv is up by now, the radio's started it)
+                self.tmpv = m
             except (RuntimeError, OSError) as e:
                 track.update(state="failed", note=str(e))
                 self._track_changed()
@@ -18235,10 +18298,7 @@ class App(Adw.Application):
         return False
 
     def _restart_mpv(self):
-        self.start_mpv()
-        if self.mpv and not self.paused:
-            self._load()
-        self.update()
+        self.start_mpv()  # (plays again when it's up)
         return False
 
     # programme: the week every 30 min, the host every 5, the card every minute
