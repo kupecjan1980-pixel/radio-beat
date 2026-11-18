@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.41.2"
+APP_VERSION = "0.41.3"
 
 import collections
 import ctypes
@@ -4454,9 +4454,32 @@ class Enhancer:
             n = self.cache_allowed / (self.cache_used / here)
             room = (f"; vešlo by se do nich asi {n / 1e6:.1f} milionu obrázků" if n >= 1e6 else
                     f"; vešlo by se do nich asi {round(n, -3 if n >= 1e4 else -2):,.0f} obrázků".replace(",", " "))
+            # and for how long, at the pace pictures have come so far (since the oldest one kept; the user, for
+            # fun: "good for thousands of years?" - at ~225 a day, decades; fewer new ones come as songs repeat)
+            age = (time.time() - self._cache_oldest()) / 86400
+            if age >= 3:
+                per_day = here / age
+                years = (n - here) / per_day / 365.25
+                left = (f"zhruba {round(years):.0f} let" if years >= 5 else f"zhruba {years:.1f} roku")
+                room += (f" a při dosavadním tempu (asi {round(per_day):.0f} nových obrázků denně) by stačilo na "
+                         f"{left}")
+        room = room.replace("zhruba 1 let", "zhruba rok")
         return (f"Mezipaměť: {pics}; zabírají {_size(self.cache_used)} z vyhrazených "
                 f"{self.cache_allowed / 2**30:.1f} GB (80 % volného místa na disku)".replace(".", ",")
                 + room.replace(".", ","))
+
+    def _cache_oldest(self) -> float:
+        """When the oldest picture kept came (a file's time), for the pace; remembered for 10 minutes."""
+        at, val = getattr(self, "_oldest", (0.0, 0.0))
+        if time.monotonic() - at < 600:
+            return val
+        try:
+            val = min((e.stat().st_mtime for e in os.scandir(UPSCALED_DIR) if e.name.endswith(".jpg")),
+                      default=time.time())
+        except OSError:
+            val = time.time()
+        self._oldest = (time.monotonic(), val)
+        return val
 
     def _trim(self) -> None:
         """When the cache is full: the least used pictures go first (shown the fewest times), and of those the
