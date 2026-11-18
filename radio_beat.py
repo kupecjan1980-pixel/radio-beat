@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.41.0"
+APP_VERSION = "0.41.1"
 
 import collections
 import ctypes
@@ -7506,7 +7506,23 @@ class GlassCard(Gtk.Box):
         if not self.frame:
             snap.pop()
             return
-        if self.concave:
+        if self.concave and self.radius >= min(w, h) / 2 - 1:
+            # A round dish (the buttons): the same shading as the inset shadows below, as circular gradients. The
+            # renderer draws an inset shadow in pieces, and on the DeskMini (Radeon 780M) the 1 px straight piece in
+            # the middle of each side of a not-quite-round shape was left out: one row unshaded, a light line
+            # across the rim 3 px below the middle (where the shadow, moved down, has its middle).
+            cx, cy, r0 = w / 2, h / 2, min(w, h) / 2
+            for color, dy, spread, blur in ((_rgba(0, 0, 0, 0.5), rim * 0.18, 0.0, rim * 0.35),
+                                            (_rgba(255, 255, 255, 0.32), -rim * 0.12, 0.0, rim * 0.3),
+                                            (_rgba(255, 255, 255, 0.55), 0.0, 1.0, 1.0)):
+                inner, outer = max(0.0, r0 - spread - blur), r0 - spread + blur  # clear inside, full beyond
+                clear = Gdk.RGBA()
+                clear.red, clear.green, clear.blue, clear.alpha = color.red, color.green, color.blue, 0.0
+                a, b = Gsk.ColorStop(), Gsk.ColorStop()
+                a.offset, a.color = inner / outer, clear
+                b.offset, b.color = 1.0, color
+                snap.append_radial_gradient(box, Graphene.Point().init(cx, cy + dy), outer, outer, 0.0, 1.0, [a, b])
+        elif self.concave:
             # A dish: the top inside edge in shade, light gathering along the bottom, a bright lip all round.
             snap.append_inset_shadow(rr, _rgba(0, 0, 0, 0.5), 0, rim * 0.18, 0, rim * 0.35)
             snap.append_inset_shadow(rr, _rgba(255, 255, 255, 0.32), 0, -rim * 0.12, 0, rim * 0.3)

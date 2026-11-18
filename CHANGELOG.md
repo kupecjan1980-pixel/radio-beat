@@ -4,6 +4,7 @@
 
 ## 0.41 — Drobné nápisy na obalech bez vymyšlených písmen
 
+- **0.41.1** (2026-11-18) Světlá čárka přes okraj tlačítka pauzy (DeskMini, Radeon 780M; oprava v 0.40.9 nepomohla): stín v misce tlačítka posunutý o 3 px dolů vykresloval ovladač po kouscích a jeden řádek uprostřed vynechal, takže zůstal nezastíněný. Kulatá tlačítka teď mají to samé stínování z kruhových přechodů, bez kousků; vypadají stejně
 - **0.41.0** (2026-11-18) AI zvětšování obalů občas překreslí drobné písmo na jiná písmena: u Eagles „hell freezes over“ zavřelo každé e do o („holl froozos ovor“). Aplikace teď obrázek od AI zmenší zpátky na původní velikost a porovná s originálem: kde se malá věc změnila (světlá mezera ztmavla nebo naopak), vrátí se tam původní, měkčí, ale správný obrázek. Zrnitost a textury, které AI jen dokreslí, to nechává být. Všechny obaly se podle toho jednou znovu prověří (sekunda práce procesoru u každého, až se zobrazí)
 
 ## 0.40 — Měsíc i latinsky a anglicky
