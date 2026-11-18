@@ -4,6 +4,7 @@
 
 ## 0.40 — Měsíc i latinsky a anglicky
 
+- **0.40.8** (2026-11-18) Překlad názvů na pozadí (celá historie přes DeepL) hned po startu spadl, když se do té doby žádný název nezobrazil (DeskMini od 0.39.0: „no attribute _title_cs“), a čekající názvy tak zůstaly bez českého překladu. Teď běží vždy
 - **0.40.7** (2026-11-18) Když se přehrávač mpv nespustí (DeskMini po zapnutí počítače: pod hlasitostí jen „[Errno 2] Adresář nebo soubor neexistuje“ a ticho), aplikace to každých 10 s zkouší znovu a sama začne hrát; na mpv z Flathubu čeká až minutu místo 15 s, a to na pozadí, takže okno mezitím nezamrzne. Pod hlasitostí je místo čísla chyby, co mpv (nebo Flatpak) řekl, a zapíše se to i do záznamu
 - **0.40.6** (2026-11-18) Nové fotky k superúplňku: obrovský Měsíc těsně za věžemi a mrakodrapy v noci, fotografovaný zdálky, takže je velký jako budovy (Washingtonův monument, hodinová věž v Mtarfě, New Orleans, kostelní zvonice, 96. ulice v New Yorku, Reunion Tower v Dallasu, televizní věž ve Stuttgartu, socha Svobody na Kapitolu, Toronto, Rijád). Dosavadní fotky ukazovaly Měsíc nad městem jen malý; střídá se jich deset
 - **0.40.5** (2026-11-18) Oprava 0.40.2: když se pod běžící aplikací nainstalovala nová verze, kontrola aktualizací při tom spadla (chyba „installing“), takže se aplikace sama nerestartovala a dál běžela stará verze. Teď se restartuje na novou do 5 minut

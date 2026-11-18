@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.7"
+APP_VERSION = "0.40.8"
 
 import collections
 import ctypes
@@ -18666,7 +18666,7 @@ class App(Adw.Application):
             del self._title_queue[:len(part)]
             for (key, shown), cs in zip(part, answers):
                 if cs and norm(cs) != norm(key) and name_translated(shown, cs):
-                    self._title_cs[key] = cs[:1].upper() + cs[1:]
+                    titles_got()[key] = cs[:1].upper() + cs[1:]
                     got = True
             titles_save({q[0] for q in self._title_queue})  # (kept, the names with no Czech too: asked once)
             if got and self.win and len(self._title_queue) % 400 < len(part):  # (now and then while many go)
