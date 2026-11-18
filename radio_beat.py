@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.2"
+APP_VERSION = "0.40.3"
 
 import collections
 import ctypes
@@ -1314,7 +1314,15 @@ try:
 except (OSError, ValueError):
     TITLES_CS = {}
 ENGLISH_HINT = re.compile(r"\b(the|of|for|you|your|and|with|is|it's|don't|can't|love|night|all|are|was|what|when|"
-                          r"this|that|heart|world|from|never|who|will|like|girl|blues|road|black|dream)\b")
+                          r"this|that|heart|world|from|never|who|will|like|girl|blues|road|black|dream)\b|"
+                          r"\b\w{2,}in'(?!\w)")
+# Words with their g dropped ("Kissin'", "Rockin'", "Nothin'"): the translation service takes a name with one
+# for a name and gives it back as it is ("Kissin' Dynamite"), so it is asked with the g ("Kissing Dynamite").
+DROPPED_G = re.compile(r"\b(\w{2,}in)'(?!\w)", re.I)
+
+
+def g_restored(text: str) -> str:
+    return DROPPED_G.sub(lambda m: m.group(1) + ("G" if m.group(1).isupper() else "g"), text)
 
 
 TITLES_GOT = os.path.join(os.path.dirname(FACTS_CACHE), "titles-cs.json")  # what the service translated
@@ -1330,7 +1338,9 @@ def titles_got() -> dict:
         if not _titles_got.get("\0loaded"):
             try:
                 with open(TITLES_GOT, encoding="utf-8") as f:
-                    _titles_got.update({k: v for k, v in json.load(f).items() if isinstance(v, str)})
+                    # (a name with a dropped g that came back with no Czech: asked again, now with the g)
+                    _titles_got.update({k: v for k, v in json.load(f).items()
+                                        if isinstance(v, str) and (v or not DROPPED_G.search(k))})
             except (OSError, ValueError, AttributeError):
                 pass
             _titles_got["\0loaded"] = "1"
@@ -18552,14 +18562,14 @@ class App(Adw.Application):
                 continue
             if DEEPL_KEY:
                 part = self._title_queue[:40]
-                res = deepl_many([shown for _, shown in part])
+                res = deepl_many([g_restored(shown) for _, shown in part])
                 if res is None:
                     time.sleep(600)
                     continue
                 answers = [r[0].strip() if r[1] == "EN" else "" for r in res]  # (a Czech name: left as it is)
             else:
                 part = self._title_queue[:1]
-                cs = czech_sentence(part[0][1]).strip().rstrip(".")
+                cs = czech_sentence(g_restored(part[0][1])).strip().rstrip(".")
                 if not cs:
                     time.sleep(3600)
                     continue
