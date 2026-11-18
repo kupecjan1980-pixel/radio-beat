@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.41.1"
+APP_VERSION = "0.41.2"
 
 import collections
 import ctypes
@@ -4447,8 +4447,16 @@ class Enhancer:
         pics = f"{obrazku(here)} na tomto počítači"
         for who, (there, total) in self.shared_counts.items():
             pics += f", {obrazku(there)} na počítači {who.rsplit('-', 1)[0]}, dohromady {obrazku(total)}"
+        # how many pictures the space set aside would hold, at this computer's own average size (the user:
+        # 2.2 GB for 4,700 pictures, so 1,371 GB free holds how many?)
+        room = ""
+        if here and self.cache_used > 0 and self.cache_allowed > 0:
+            n = self.cache_allowed / (self.cache_used / here)
+            room = (f"; vešlo by se do nich asi {n / 1e6:.1f} milionu obrázků" if n >= 1e6 else
+                    f"; vešlo by se do nich asi {round(n, -3 if n >= 1e4 else -2):,.0f} obrázků".replace(",", " "))
         return (f"Mezipaměť: {pics}; zabírají {_size(self.cache_used)} z vyhrazených "
-                f"{self.cache_allowed / 2**30:.1f} GB (80 % volného místa na disku)".replace(".", ","))
+                f"{self.cache_allowed / 2**30:.1f} GB (80 % volného místa na disku)".replace(".", ",")
+                + room.replace(".", ","))
 
     def _trim(self) -> None:
         """When the cache is full: the least used pictures go first (shown the fewest times), and of those the
