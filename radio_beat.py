@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.40.4"
+APP_VERSION = "0.40.5"
 
 import collections
 import ctypes
@@ -17416,6 +17416,7 @@ class App(Adw.Application):
         self.update_text = f"Verze {APP_VERSION} · zatím nezkontrolováno"
         self.update_ready = False
         self.update_busy = False
+        self.installing = False  # (an update being installed: no restart onto what is there meanwhile)
         for name, which in (("info", "info_water"), ("settings", "gear_water")):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", lambda *_, which=which: self.win and self.win.toggle_water(getattr(self.win, which)))
@@ -17749,7 +17750,7 @@ class App(Adw.Application):
         self.update_busy, self.update_ready, self.update_text = False, ready, text
         self.update()
         now = installed_commit()
-        if RUNNING_COMMIT and now and now != RUNNING_COMMIT and not ready and not self.installing:
+        if RUNNING_COMMIT and now and now != RUNNING_COMMIT and not ready and not getattr(self, "installing", False):
             # a newer version was installed under this running one (install.sh by hand, or another copy's
             # update): nothing to download, it's already there; the old one in memory quits and the new one starts
             print(f"Rádio Beat: nainstalovaná verze ({now[:7]}) je jiná než ta, co běží ({RUNNING_COMMIT[:7]}): "

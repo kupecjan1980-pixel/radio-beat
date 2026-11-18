@@ -4,6 +4,7 @@
 
 ## 0.40 — Měsíc i latinsky a anglicky
 
+- **0.40.5** (2026-11-18) Oprava 0.40.2: když se pod běžící aplikací nainstalovala nová verze, kontrola aktualizací při tom spadla (chyba „installing“), takže se aplikace sama nerestartovala a dál běžela stará verze. Teď se restartuje na novou do 5 minut
 - **0.40.4** (2026-11-18) Názvy psané s velkými písmeny na začátku slov („Bang Your Head“) překladač bral jako vlastní jméno a vracel je beze změny; teď se v tom případě zeptá ještě jednou s malými písmeny a přeloží je („Zatřes hlavou“, „Thunder Underground (Podzemní hrom)“). Ručně přeloženo „Metal Health (Metalové zdraví)“ místo chybného „Duševní zdraví“, „Metal Health (Bang Your Head) (Metalové zdraví (Zatřes hlavou))“ a kapela „Quiet Riot (Tichá vzpoura)“. Všechny názvy, které dřív zůstaly bez překladu, se jednou zeptají znovu
 - **0.40.3** (2026-11-18) Přeloží se i názvy se slovy bez koncového g („Kissin’ Dynamite (Líbající dynamit)“, „Rockin’…“, „Takin’…“): překladač je dosud vracel beze změny jako vlastní jméno, teď se ptá na plný tvar („Kissing Dynamite“). Takové názvy, které dřív zůstaly bez překladu, se zeptají znovu
 - **0.40.2** (2026-11-17) Když se nová verze nainstaluje jinak než přes vlastní aktualizaci aplikace (ručně skriptem install.sh), běžící aplikace to při nejbližší kontrole (do 5 minut) pozná a sama se restartuje na novou. Dosud kontrolovala jen soubory na disku proti GitHubu, ty už nové byly, a tak hlásila „aktuální“, i když v paměti pořád běžela stará verze
