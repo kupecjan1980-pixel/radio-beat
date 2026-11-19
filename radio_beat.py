@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.43.0"
+APP_VERSION = "0.43.1"
 
 import collections
 import ctypes
@@ -7671,7 +7671,8 @@ class GlassCard(Gtk.Box):
         if not self.frame:
             snap.pop()
             return
-        if self.concave and self.radius >= min(w, h) / 2 - 1:
+        if self.concave and self.radius >= min(w, h) / 2 - 1 and abs(w - h) < 2:  # (a circle only: on a pill (the
+            # quality's) the circle's gradients left only a round middle clear, the rest a pale gray veil)
             # A round dish (the buttons): the same shading as the inset shadows below, as circular gradients. The
             # renderer draws an inset shadow in pieces, and on the DeskMini (Radeon 780M) the 1 px straight piece in
             # the middle of each side of a not-quite-round shape was left out: one row unshaded, a light line

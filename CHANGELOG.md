@@ -4,6 +4,7 @@
 
 ## 0.43 — Předpověď počasí a okno o Rádiu Beat
 
+- **0.43.1** (2026-11-19) Tlačítko kvality vpravo dole („AAC 128 kbps“) bylo šedé místo skla s tmavým kolečkem uprostřed: od 0.41.1 dostávalo stínování kulatých tlačítek (kruhové přechody), které na protáhlé pilulce nechalo průhledný jen kruh uprostřed a zbytek zakrylo světlým závojem. Kruhové stínování teď jen pro opravdu kulatá tlačítka, pilulka je zase čiré sklo
 - **0.43.0** (2026-11-19) Dvě nová skleněná okna nad obalem, jako okno o Měsíci a Slunci. **Počasí** (najetím myší na počasí vedle loga a samo každou hodinu v :40): dnes s hodinami po třech, příštích 7 dní a výhled na měsíc po týdnech (Open-Meteo; za dva týdny průměr sezónní předpovědi), u každého dne fotka podle počasí a ročního období (podzimní slunce vypadá podzimně, zimní mlha s jinovatkou…; 19 vybraných fotek z Wikimedia Commons, vylepšených AI). **O Rádiu Beat** (najetím myší na logo a samo v :52): o stanici, kde ji naladíte (frekvence z okolí vybraného místa první), moderátoři a zprávaři z webu rádia s fotkami, kdy vysílají, kdo je právě ve vysílání, a jejich vlastní odpovědi. Obě jdou vypnout v nastavení
 
 ## 0.42 — Zvuk po startu počítače nikdy potichu
