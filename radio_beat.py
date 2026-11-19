@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.42.2"
+APP_VERSION = "0.42.3"
 
 import collections
 import ctypes
@@ -2511,6 +2511,15 @@ def spdif_card(sink: dict) -> str | None:
                                       p.get("device.product.name"), p.get("device.profile.name"),
                                       p.get("device.vendor.name")) if x)
     return p.get("device.name") if SPDIF_RE.search(words) and p.get("device.name") else None
+
+
+def sink_desc(sink: dict) -> str:
+    """Its name for people (pactl gives '(null)' for some cards, the X3's)."""
+    p = sink.get("properties", {})
+    for d in (sink.get("description"), p.get("device.description"), p.get("device.product.name")):
+        if d and d != "(null)":
+            return d
+    return sink.get("name", "zvuková karta")
 
 
 def sink_level(sink: dict) -> tuple[int, bool]:
@@ -17777,7 +17786,8 @@ class App(Adw.Application):
         self._started = True
         if first:
             self.play()
-            if "--hidden" not in args:  # (not after an update's restart: a mute meant then stays)
+            if "--hidden" not in args and "--restarted" not in args:  # (not after an update's restart: a mute
+                # meant then stays, and the optical output isn't woken again)
                 threading.Thread(target=self._sound_at_start, args=("--autostart" in args,), daemon=True).start()
         if first and ("--hidden" in args or ("--autostart" in args and not self.settings.get("autostart_full", False))):
             return 0  # (started at login: as the tray icon only, unless set to open in full screen)
@@ -18039,7 +18049,7 @@ class App(Adw.Application):
         # the shared server too, on the computer running it (nothing happens elsewhere)
         subprocess.Popen(["systemctl", "--user", "try-restart", "radio-beat-hub.service"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.Popen(["sh", "-c", f"sleep 2; exec {launcher()}{'' if shown else ' --hidden'}"],
+        subprocess.Popen(["sh", "-c", f"sleep 2; exec {launcher()}{' --restarted' if shown else ' --hidden'}"],
                          start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.quit_all()
@@ -18452,7 +18462,7 @@ class App(Adw.Application):
         if not sink:
             self._say("žádný zvukový výstup ani po 40 s")
             return
-        name, desc = sink.get("name", ""), sink.get("description", "")
+        name, desc = sink.get("name", ""), sink_desc(sink)
         vol, mute = sink_level(sink)
         if mute or vol < 1:
             try:
@@ -18507,9 +18517,9 @@ class App(Adw.Application):
         sink = output_sink()
         card = spdif_card(sink) if sink else None
         if not card:
-            return False, f"Nejde: {sink.get('description', 'tento výstup') if sink else 'žádný výstup'} není optický " \
+            return False, f"Nejde: {sink_desc(sink) if sink else 'žádný výstup'} není optický " \
                           "ani Sound Blaster"
-        return True, sink.get("description", card)
+        return True, sink_desc(sink)
 
     def wake_optical_now(self, wait: bool = False, otherwise=None) -> None:
         """Like pressing the Sound Blaster's SXFI / line out button: the optical signal off and on again.
@@ -18529,7 +18539,7 @@ class App(Adw.Application):
                         self._say("optický výstup nenalezen, neprobouzí se")
                     return
                 ok = wake_optical(card, sink["name"], lambda on: GLib.idle_add(self._optical_pause, on), self._say)
-                self._say(f"optický výstup {sink.get('description')} probuzen (profil vypnut a zapnut)" if ok
+                self._say(f"optický výstup {sink_desc(sink)} probuzen (profil vypnut a zapnut)" if ok
                           else "optický výstup se nepodařilo probudit")
             finally:
                 self._waking = False
@@ -18575,7 +18585,7 @@ class App(Adw.Application):
                 return
             win = getattr(self, "win", None)
             shown = win is not None and win.get_visible()
-            subprocess.Popen(["sh", "-c", f"sleep 4; exec {launcher()}{'' if shown else ' --hidden'}"],
+            subprocess.Popen(["sh", "-c", f"sleep 4; exec {launcher()}{' --restarted' if shown else ' --hidden'}"],
                              start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             GLib.idle_add(lambda: (self.quit_all(), False)[1])
