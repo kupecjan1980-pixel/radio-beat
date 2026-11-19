@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.43.1"
+APP_VERSION = "0.43.2"
 
 import collections
 import ctypes
@@ -15149,6 +15149,15 @@ class Window(Adw.ApplicationWindow):
         wheel.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)  # first, before anything under the mouse
         wheel.connect("scroll", self.on_wheel)
         self.add_controller(wheel)
+        # where the mouse is in the window (None: outside it, e.g. over a menu or box, which are surfaces of their
+        # own): what's under it decides whether the wheel is the volume (_wheel_wanted)
+        self._ptr = None
+        ptr = Gtk.EventControllerMotion()
+        ptr.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        ptr.connect("enter", lambda _c, x, y: setattr(self, "_ptr", (x, y)))
+        ptr.connect("motion", lambda _c, x, y: setattr(self, "_ptr", (x, y)))
+        ptr.connect("leave", lambda *_: setattr(self, "_ptr", None))
+        self.add_controller(ptr)
 
         scrim = self.scrim = StillBox(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
                                       margin_top=0)
@@ -17980,16 +17989,19 @@ class Window(Adw.ApplicationWindow):
         return True
 
     def _wheel_wanted(self, ctl) -> bool:
-        try:
-            ev = ctl.get_current_event()
-            native = Gtk.Native.get_for_surface(ev.get_surface())
-            ok, x, y = ev.get_position()
-            if not native or not ok:
-                return False
-            tx, ty = native.get_surface_transform()
-            w = native.pick(x - tx, y - ty, Gtk.PickFlags.DEFAULT)
-        except (AttributeError, TypeError):
-            return False
+        if self._ptr is None:  # (over a menu or box of its own surface, or outside: not the window's)
+            return True
+        px, py = self._ptr
+        w = self.pick(px, py, Gtk.PickFlags.DEFAULT)
+        for water in getattr(self, "waters", []):  # an open glass panel (⚙ menu, ⓘ panel) under the mouse
+            if not water.open:                     # scrolls itself (picked or not: its parts may not take events)
+                continue
+            if water.contains(w):
+                return True
+            for part in (water.body, water.neck):
+                ok, b = part.compute_bounds(self) if part.get_mapped() else (False, None)
+                if ok and b.get_x() <= px < b.get_x() + b.get_width() and b.get_y() <= py < b.get_y() + b.get_height():
+                    return True
         puddle = getattr(self, "puddle", None)
         while w is not None and w is not self:
             if isinstance(w, Gtk.Popover) or w is puddle:
