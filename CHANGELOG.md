@@ -4,6 +4,7 @@
 
 ## 0.42 — Zvuk po startu počítače nikdy potichu
 
+- **0.42.4** (2026-11-19) Totéž v nastavení u hlasitosti zvukové karty: „hlasitost karty Sound Blaster X3“ místo „(null)“
 - **0.42.3** (2026-11-19) Kontrola zvuku a probuzení optického výstupu se nespouští po restartu kvůli aktualizaci, když bylo okno otevřené (jen po zapnutí počítače a ručním spuštění); název karty Sound Blaster X3 v logu místo „(null)“
 - **0.42.2** (2026-11-19) Kolečko myši mění hlasitost opravdu kdekoli v okně (po 5 %): i nad obalem s textem pořadu, nad posuvníkem a nad tlačítky. Svoje kolečko si nechávají jen seznamy a okénka, která mají co posouvat (boční panel HRÁLO, otevřená nabídka)
 - **0.42.1** (2026-11-19) Probudit optický výstup jde i stiskem kolečka myši (prostřední tlačítko) kdekoli v okně nebo na ikoně v liště, bez hledání v nastavení. Kde výstup optický není, prostřední klik na ikoně dál pozastaví rádio

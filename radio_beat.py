@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.42.3"
+APP_VERSION = "0.42.4"
 
 import collections
 import ctypes
@@ -2443,7 +2443,7 @@ class CardVolume:
             return None
         self.sink = str(sink["index"]) if mine else None
         vols = [int(c["value_percent"].rstrip("%")) for c in sink["volume"].values()] or [0]
-        return round(sum(vols) / len(vols)), sink.get("description", "")  # muted or not: the volume it's set to
+        return round(sum(vols) / len(vols)), sink_desc(sink)  # muted or not: the volume it's set to
 
     def _reader(self) -> None:
         last = None
