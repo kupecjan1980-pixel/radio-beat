@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.43.2"
+APP_VERSION = "0.43.3"
 
 import collections
 import ctypes
@@ -2530,7 +2530,7 @@ def sink_level(sink: dict) -> tuple[int, bool]:
 SPDIF_SWITCH_RE = re.compile(r"^(?:SPDIF|IEC958)[- ]Out(?:put)? Playback Switch$|^IEC958 Playback Switch$", re.I)
 
 
-def wake_spdif(alsa_card, say) -> bool | None:
+def wake_spdif(alsa_card, say, during=None) -> bool | None:
     """The card's own optical output switch (the X3: 'SPDIF-Out Playback Switch') off for a moment and on: the
     optical transmitter itself stops and starts, which the card's profile going off didn't do (the X3 kept its
     optical signal running, the receiver stayed silent). None when the card has no such switch (or no amixer)."""
@@ -2549,12 +2549,76 @@ def wake_spdif(alsa_card, say) -> bool | None:
         if r.returncode:
             say(f"přepínač {sw} nejde vypnout: {r.stderr.strip()}")
             return None
+        if during:
+            during.start()
         time.sleep(2.0)  # the receiver notices the signal is gone
+        if during:
+            during.stop()
+            time.sleep(0.5)
         cset("on")
         return True
     except (OSError, subprocess.SubprocessError) as e:
         say(f"přepínač optického výstupu: {e}")
         return None
+
+
+def _pw_setting(key: str) -> str | None:
+    try:
+        out = subprocess.run(["pw-metadata", "-n", "settings", "0", key], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"key:'%s' value:'([^']*)'" % re.escape(key), out)
+    return m.group(1) if m else None
+
+
+def card_rates(alsa_card) -> list[int]:
+    """The playback rates the (USB) card takes, from /proc/asound/cardN/stream0."""
+    try:
+        with open(f"/proc/asound/card{alsa_card}/stream0") as f:
+            text = f.read()
+    except OSError:
+        return []
+    play = text.split("Capture:")[0]
+    return sorted({int(r) for line in re.findall(r"Rates:\s*([\d, ]+)", play) for r in re.findall(r"\d+", line)})
+
+
+class RateBounce:
+    """The sound sent to the card at another sample rate for a while (44.1 kHz instead of 48), then back: what
+    goes out of its optical output changes, so the receiver has to detect it anew (like the SXFI button, which
+    changes the signal; the receiver stayed silent through the optical switch and the card going off). PipeWire's
+    own settings (allowed rates, forced rate), put back as they were."""
+
+    def __init__(self, alsa_card, say):
+        self.say, self.saved, self.rate = say, None, None
+        rates = card_rates(alsa_card) if alsa_card is not None else []
+        self.rate = next((r for r in (44100, 96000, 32000) if r in rates), None)
+        if not shutil.which("pw-metadata"):
+            self.rate = None
+
+    def start(self) -> bool:
+        if not self.rate:
+            return False
+        self.saved = (_pw_setting("clock.allowed-rates"), _pw_setting("clock.force-rate"))
+        try:
+            subprocess.run(["pw-metadata", "-n", "settings", "0", "clock.allowed-rates", f"[ {self.rate} 48000 ]"],
+                           capture_output=True, timeout=5)
+            subprocess.run(["pw-metadata", "-n", "settings", "0", "clock.force-rate", str(self.rate)],
+                           capture_output=True, timeout=5)
+            return True
+        except (OSError, subprocess.SubprocessError) as e:
+            self.say(f"vzorkovací frekvence: {e}")
+            return False
+
+    def stop(self) -> None:
+        allowed, force = self.saved or (None, None)
+        try:
+            subprocess.run(["pw-metadata", "-n", "settings", "0", "clock.force-rate", force or "0"],
+                           capture_output=True, timeout=5)
+            subprocess.run(["pw-metadata", "-n", "settings", "0", "clock.allowed-rates", allowed or "[ 48000 ]"],
+                           capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def wake_optical(card: str, sink_name: str, pause_cb, say) -> bool:
@@ -19186,8 +19250,15 @@ class App(Adw.Application):
                         self._say("optický výstup nenalezen, neprobouzí se")
                     return
                 n = sink.get("properties", {}).get("alsa.card")
-                if wake_spdif(n, self._say):
-                    self._say(f"optický výstup {sink_desc(sink)} probuzen (jeho přepínač SPDIF vypnut a zapnut)")
+                bounce = RateBounce(n, self._say)
+                how = f", zvuk na 2 s v {bounce.rate} Hz" if bounce.rate else ""
+                if wake_spdif(n, self._say, bounce):
+                    self._say(f"optický výstup {sink_desc(sink)} probuzen (přepínač SPDIF vypnut a zapnut{how})")
+                    return
+                if bounce.start():
+                    time.sleep(2.0)
+                    bounce.stop()
+                    self._say(f"optický výstup {sink_desc(sink)}: zvuk na 2 s v {bounce.rate} Hz a zpět")
                     return
                 ok = wake_optical(card, sink["name"], lambda on: GLib.idle_add(self._optical_pause, on), self._say)
                 self._say(f"optický výstup {sink_desc(sink)} probuzen (profil vypnut a zapnut)" if ok
