@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.42.0"
+APP_VERSION = "0.42.1"
 
 import collections
 import ctypes
@@ -2716,7 +2716,7 @@ class Mpris:
 
 
 class Tray:
-    """Tray icon: click shows / hides the window, middle click pauses,
+    """Tray icon: click shows / hides the window, middle click wakes an optical output (else pauses), right click pauses,
     scrolling changes the volume. Registers again when the bar restarts."""
 
     PATH = "/StatusNotifierItem"
@@ -2774,7 +2774,9 @@ class Tray:
     def _call(self, _conn, _sender, _path, _iface, method, params, invocation):
         if method == "Activate":
             self.app.toggle_window()
-        elif method in ("SecondaryActivate", "ContextMenu"):
+        elif method == "SecondaryActivate":  # middle click: wakes the optical output (DeskMini), else pause
+            self.app.wake_optical_now(otherwise=self.app.toggle_pause)
+        elif method == "ContextMenu":
             self.app.toggle_pause()
         elif method == "Scroll":
             delta, orient = params.unpack()
@@ -14752,6 +14754,11 @@ class Window(Adw.ApplicationWindow):
         right = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
         right.connect("pressed", lambda *_: app.toggle_mute())
         self.add_controller(right)
+        # The middle button (wheel press) anywhere: wakes the optical output (the Sound Blaster → receiver), like
+        # its SXFI button, so nobody has to find it in the settings.
+        middle = Gtk.GestureClick(button=Gdk.BUTTON_MIDDLE)
+        middle.connect("pressed", lambda *_: app.wake_optical_now())
+        self.add_controller(middle)
         # The mouse wheel anywhere: volume (the slider itself, and the open menu, scroll their own way).
         wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL
                                           | Gtk.EventControllerScrollFlags.DISCRETE)
@@ -15064,7 +15071,8 @@ class Window(Adw.ApplicationWindow):
         wake_auto.connect("notify::active", lambda r, _: self.app.set_look(optical_wake=r.get_active()))
         group.add(wake_auto)
         wake_row = Adw.ActionRow(title="Probudit optický výstup teď",
-                                 subtitle="Když z receiveru nejde zvuk: zkuste klidně několikrát, jako to tlačítko"
+                                 subtitle="Když z receiveru nejde zvuk: zkuste klidně několikrát, jako to tlačítko. "
+                                          "Stejně funguje stisk kolečka myši kdekoli v okně nebo na ikoně v liště"
                                  if can else what, subtitle_lines=0, sensitive=can)
         wake_btn = Gtk.Button(label="Probudit", valign=Gtk.Align.CENTER)
         wake_btn.connect("clicked", lambda _b: self.app.wake_optical_now())
@@ -18477,8 +18485,9 @@ class App(Adw.Application):
                           "ani Sound Blaster"
         return True, sink.get("description", card)
 
-    def wake_optical_now(self, wait: bool = False) -> None:
-        """Like pressing the Sound Blaster's SXFI / line out button: the optical signal off and on again."""
+    def wake_optical_now(self, wait: bool = False, otherwise=None) -> None:
+        """Like pressing the Sound Blaster's SXFI / line out button: the optical signal off and on again.
+        otherwise(): called (on the main loop) instead when the output isn't optical."""
         if getattr(self, "_waking", False):
             return
 
@@ -18488,7 +18497,10 @@ class App(Adw.Application):
                 sink = output_sink()
                 card = spdif_card(sink) if sink else None
                 if not card:
-                    self._say("optický výstup nenalezen, neprobouzí se")
+                    if otherwise:
+                        GLib.idle_add(lambda: (otherwise(), False)[1])
+                    else:
+                        self._say("optický výstup nenalezen, neprobouzí se")
                     return
                 ok = wake_optical(card, sink["name"], lambda on: GLib.idle_add(self._optical_pause, on), self._say)
                 self._say(f"optický výstup {sink.get('description')} probuzen (profil vypnut a zapnut)" if ok

@@ -4,6 +4,7 @@
 
 ## 0.42 — Zvuk po startu počítače nikdy potichu
 
+- **0.42.1** (2026-11-19) Probudit optický výstup jde i stiskem kolečka myši (prostřední tlačítko) kdekoli v okně nebo na ikoně v liště, bez hledání v nastavení. Kde výstup optický není, prostřední klik na ikoně dál pozastaví rádio
 - **0.42.0** (2026-11-19) Po zapnutí počítače Rádio Beat zkontroluje zvukovou kartu: když zůstala ztlumená nebo na 0 %, zapne ji na 30 % (stejně vlastní hlasitost, když byla na 0). Na DeskMini (Sound Blaster X3 optickým kabelem do starého receiveru Sony) navíc jednou vypne a zapne optický signál, jako stisk tlačítka SXFI / line out, aby se receiver znovu chytil. V nastavení jde vypnout a je tam tlačítko „Probudit“ pro další pokus. Do logu píše, co karta nabízí
 
 ## 0.41 — Drobné nápisy na obalech bez vymyšlených písmen
