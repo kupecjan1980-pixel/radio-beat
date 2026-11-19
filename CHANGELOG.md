@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.43 — Předpověď počasí a okno o Rádiu Beat
+
+- **0.43.0** (2026-11-19) Dvě nová skleněná okna nad obalem, jako okno o Měsíci a Slunci. **Počasí** (najetím myší na počasí vedle loga a samo každou hodinu v :40): dnes s hodinami po třech, příštích 7 dní a výhled na měsíc po týdnech (Open-Meteo; za dva týdny průměr sezónní předpovědi), u každého dne fotka podle počasí a ročního období (podzimní slunce vypadá podzimně, zimní mlha s jinovatkou…; 19 vybraných fotek z Wikimedia Commons, vylepšených AI). **O Rádiu Beat** (najetím myší na logo a samo v :52): o stanici, kde ji naladíte (frekvence z okolí vybraného místa první), moderátoři a zprávaři z webu rádia s fotkami, kdy vysílají, kdo je právě ve vysílání, a jejich vlastní odpovědi. Obě jdou vypnout v nastavení
+
 ## 0.42 — Zvuk po startu počítače nikdy potichu
 
 - **0.42.5** (2026-11-19) Probuzení optického výstupu jinak: vypnutí a zapnutí celé karty receiver Sony neprobudilo (Sound Blaster X3 svůj optický signál držel dál). Teď se na 2 s vypne vlastní přepínač optického výstupu karty („SPDIF-Out“) a zase zapne; kde ho karta nemá, zůstává to staré

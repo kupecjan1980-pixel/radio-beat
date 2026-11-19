@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.42.5"
+APP_VERSION = "0.43.0"
 
 import collections
 import ctypes
@@ -11733,6 +11733,350 @@ def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
             "moon": moon, "place": place}
 
 
+# --- the weather box: today hour by hour, the next 7 days, the month ahead; photos by the weather and season ------
+# Photos from Wikimedia Commons ("Quality images"), picked by eye for each kind of weather in each season (the user:
+# sunny autumn looks like autumn); AI-enhanced like the other boxes' photos.
+WX_PICS = {"clear-spring": "Meadow orchards - Hohenwettersbach 04.jpg",
+           "clear-summer": "Oak in the middle of the meadow. Kozachij island in the Dnipro river. Ukraine.jpg",
+           "clear-autumn": "Weg auf der Ostseite des Galgenfeldsees bei Haßfurt.jpg",
+           "clear-winter": "Dülmen, Umland, Sonnenaufgang im Winter -- 2013 -- 9899.jpg",
+           "partly-spring": "Radovljica Gradiška pot SW-Blick auf Save und Julische Alpen 10042017 7434.jpg",
+           "partly-summer": "Strassburg Sankt Peter ob Gurk Landschaft mit Wiesen und Wäldern 19072017 0247.jpg",
+           "partly-autumn": "Poplar Sunset Douar Chiker Morocco Nov25 A7CR 09360.jpg",
+           "partly-winter": "Winter auf dem Himmeldunkberg.jpg",
+           "cloudy-green": "Borkum, Oldmann's Olde Düne -- 2020 -- 2749.jpg",
+           "cloudy-autumn": "Schloss Marienburg im herbstlichen Abendlicht.jpg",
+           "cloudy-winter": "Viru Bog at winter.jpg",
+           "fog-spring": "Hommikune udu Kakerdaja rabas.jpg",
+           "fog-autumn": "Morning fog over Keravanjoki river in Vantaa, Finland, 2021 October.jpg",
+           "fog-winter": "Vitoria - Parque de Olárizu - Niebla y cencellada -BT- 01.jpg",
+           "rain-summer": "Rain over Beinn Eich, Luss Hills, Scotland.jpg",
+           "rain-autumn": "Rain in Malta 06.jpg",
+           "snow": "Forest Fairy Tale.jpg",
+           "storm": "2013-08-07 04-23-26-foudre-belfort.jpg",
+           "night": "Llyn Ogwen Milky Way.jpg"}
+
+
+def wx_season(t) -> str:
+    md = (t.tm_mon, t.tm_mday)
+    if (3, 20) <= md < (6, 21):
+        return "spring"
+    if (6, 21) <= md < (9, 23):
+        return "summer"
+    if (9, 23) <= md < (12, 21):
+        return "autumn"
+    return "winter"
+
+
+def wx_pic_key(code: int, t, night: bool = False) -> str:
+    """Which photo for a weather code on a day (time.struct_time): the season's look of that weather."""
+    kind = WMO.get(code, ("cloudy", ""))[0]
+    s = wx_season(t)
+    green = s in ("spring", "summer")
+    if kind in ("clear", "few", "partly"):
+        return "night" if night else ("clear-" if kind != "partly" else "partly-") + s
+    if kind == "cloudy":
+        return "cloudy-green" if green else "cloudy-" + s
+    if kind in ("fog", "rime"):
+        return "fog-winter" if s == "winter" or kind == "rime" else ("fog-autumn" if s == "autumn" else "fog-spring")
+    if kind == "snow":
+        return "snow"
+    if kind in ("thunder", "hail"):
+        return "storm"
+    return "rain-summer" if green else "rain-autumn"
+
+
+def wx_pic(key: str) -> str:
+    name = WX_PICS.get(key)
+    return ("https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote(name) + "?width=1200"
+            if name else "")
+
+
+def weather_forecast(lat: float, lon: float) -> dict:
+    """Open-Meteo: the next 24 hours, 16 days, and the seasonal forecast's next 45 days (the mean of its 51 runs)
+    for the month's weeks past the 16 days; {} parts when they don't come."""
+    url = ("https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&timezone=auto&forecast_days=16"
+           "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,"
+           "precipitation_probability_max,wind_speed_10m_max,sunrise,sunset"
+           "&hourly=temperature_2m,weather_code,precipitation_probability,is_day&forecast_hours=25" % (lat, lon))
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=15) as r:
+        d = json.loads(r.read().decode())
+    out = {"hourly": d.get("hourly", {}), "daily": d.get("daily", {}), "seasonal": {}}
+    try:
+        url = ("https://seasonal-api.open-meteo.com/v1/seasonal?latitude=%.4f&longitude=%.4f&timezone=auto"
+               "&forecast_days=45&daily=temperature_2m_max,temperature_2m_min,precipitation_sum" % (lat, lon))
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=15) as r:
+            s = json.loads(r.read().decode()).get("daily", {})
+
+        def mean(prefix, i):
+            vals = [v[i] for k, v in s.items() if k.startswith(prefix) and v[i] is not None]
+            return sum(vals) / len(vals) if vals else None
+        out["seasonal"] = {t: (mean("temperature_2m_max", i), mean("temperature_2m_min", i),
+                               mean("precipitation_sum", i)) for i, t in enumerate(s.get("time", []))}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return out
+
+
+def _wx_t(v) -> str:
+    return f"<span foreground='{_temp_color(v)}'>{round(v)} °C</span>"
+
+
+def _wx_day(date: str, now: float, short: bool = False) -> str:
+    y, m, d = (int(x) for x in date.split("-"))
+    return _sky_date(time.mktime((y, m, d, 12, 0, 0, 0, 0, -1)), now, short)
+
+
+def _wx_hm(iso: str) -> str:
+    return iso[11:16].lstrip("0") if len(iso) >= 16 else ""
+
+
+def weather_parts(fc: dict, place: str, now: float = None) -> list:
+    """The weather box: [(heading, [(markup paragraph, photo key or '')])] — today (with the coming hours), the
+    next 7 days, the month ahead by weeks."""
+    now = now or time.time()
+    esc = GLib.markup_escape_text
+    day = fc.get("daily") or {}
+    dates = day.get("time") or []
+    parts = []
+    if not dates:
+        return parts
+
+    def at(key, i, default=None):
+        v = (day.get(key) or [])
+        return v[i] if i < len(v) and v[i] is not None else default
+
+    def struct(date):
+        y, m, d = (int(x) for x in date.split("-"))
+        return time.localtime(time.mktime((y, m, d, 12, 0, 0, 0, 0, -1)))
+
+    # today
+    hr = fc.get("hourly") or {}
+    code = int(at("weather_code", 0, 3))
+    night = False
+    if hr.get("is_day"):
+        night = not hr["is_day"][0]
+    rain, prob, wind = at("precipitation_sum", 0, 0), at("precipitation_probability_max", 0), at("wind_speed_10m_max", 0)
+    text = (f"<b>{esc(_wx_day(dates[0], now).capitalize())}, {esc(DAYS[struct(dates[0]).tm_wday])}:</b> "
+            f"{esc(WMO.get(code, ('', 'proměnlivo'))[1])}, přes den až {_wx_t(at('temperature_2m_max', 0, 0))}, "
+            f"v noci {_wx_t(at('temperature_2m_min', 0, 0))}.")
+    if rain >= 0.1:
+        text += f" Srážky {rain:.1f} mm".replace(".", ",") + (f" (pravděpodobnost {prob} %)." if prob is not None else ".")
+    else:
+        text += " Bez srážek."
+    if wind:
+        text += f" Vítr až {round(wind)} km/h."
+    if at("sunrise", 0):
+        text += f" Slunce vyjde v {_wx_hm(at('sunrise', 0))}, zapadne v {_wx_hm(at('sunset', 0))}."
+    today = [(text, wx_pic_key(code, struct(dates[0]), night))]
+    # the coming hours, every 3 hours
+    hours = []
+    times = hr.get("time") or []
+    for i in range(1, min(len(times), 25), 3):
+        c = int((hr.get("weather_code") or [3] * 25)[i] or 3)
+        t = (hr.get("temperature_2m") or [0] * 25)[i]
+        p = (hr.get("precipitation_probability") or [0] * 25)[i] or 0
+        hours.append(f"<b>{esc(_wx_hm(times[i]))}</b> {_wx_t(t)} {esc(WMO.get(c, ('', ''))[1])}"
+                     + (f", srážky {p} %" if p >= 20 else ""))
+    if hours:
+        today.append(("Příští hodiny: " + " · ".join(hours), ""))
+    parts.append((f"Počasí dnes – {place}", today))
+    # the next 7 days
+    week = []
+    for i in range(1, min(8, len(dates))):
+        c = int(at("weather_code", i, 3))
+        rain, prob = at("precipitation_sum", i, 0), at("precipitation_probability_max", i)
+        text = (f"<b>{esc(_wx_day(dates[i], now).capitalize())}</b>"
+                + (f" ({esc(DAYS[struct(dates[i]).tm_wday])})" if i == 1 else "")
+                + f": {esc(WMO.get(c, ('', 'proměnlivo'))[1])}, {_wx_t(at('temperature_2m_max', i, 0))} přes den, "
+                f"{_wx_t(at('temperature_2m_min', i, 0))} v noci")
+        if rain >= 0.1:
+            text += ", srážky " + f"{rain:.1f}".replace(".", ",") + " mm" + (f" ({prob} %)" if prob is not None else "")
+        week.append((text + ".", wx_pic_key(c, struct(dates[i]))))
+    if week:
+        parts.append(("Příštích 7 dní", week))
+    # the month ahead: four weeks after these 7 days (the 16 days' forecast, then the seasonal one's mean)
+    seas = fc.get("seasonal") or {}
+    month = []
+    start = datetime.date.fromisoformat(dates[0]) + datetime.timedelta(days=8)
+    for w in range(4):
+        days = [start + datetime.timedelta(days=w * 7 + k) for k in range(7)]
+        his, los, rains, codes = [], [], [], []
+        for dd in days:
+            iso = dd.isoformat()
+            if iso in dates:
+                i = dates.index(iso)
+                his.append(at("temperature_2m_max", i))
+                los.append(at("temperature_2m_min", i))
+                rains.append(at("precipitation_sum", i, 0))
+                codes.append(int(at("weather_code", i, 3)))
+            elif iso in seas:
+                hi, lo, pr = seas[iso]
+                his.append(hi)
+                los.append(lo)
+                rains.append(pr or 0)
+        his, los = [v for v in his if v is not None], [v for v in los if v is not None]
+        if not his or not los:
+            continue
+        hi, lo, rain = sum(his) / len(his), sum(los) / len(los), sum(rains)
+        if rain >= 12:
+            what, code = ("spíš deštivo", 63) if hi > 3 else ("spíš se sněhem", 73)
+        elif rain >= 4:
+            what, code = "proměnlivo, občas srážky", 3
+        else:
+            what, code = "spíš suše", 2
+        if codes and w == 0:  # (the 16 days' forecast: its own most frequent weather that week)
+            code = max(set(codes), key=codes.count)
+        mid = time.localtime(time.mktime((days[3].year, days[3].month, days[3].day, 12, 0, 0, 0, 0, -1)))
+        text = (f"<b>{days[0].day}. {days[0].month}. – {days[-1].day}. {days[-1].month}.</b>: {esc(what)}, přes den "
+                f"kolem {_wx_t(hi)}, v noci kolem {_wx_t(lo)}, srážky asi {round(rain)} mm za týden.")
+        month.append((text, wx_pic_key(code, mid)))
+    if month:
+        month.append(("<span alpha='70%'>Výhled na víc než dva týdny je jen odhad: průměr 51 výpočtů sezónní "
+                      "předpovědi (Open-Meteo, ECMWF).</span>", ""))
+        parts.append(("Výhled na měsíc", month))
+    return parts
+
+
+# --- the station's box: about Rádio Beat, its hosts (from its web: who, when on air, their own answers, photo) -----
+STATION_PEOPLE = os.path.join(os.path.dirname(FACTS_CACHE), "station-people.json")
+STATION_DAYS = {"po": 0, "út": 1, "ut": 1, "st": 2, "čt": 3, "ct": 3, "pá": 4, "pa": 4, "so": 5, "ne": 6}
+
+
+def _fold(s: str) -> str:
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", s.lower()) if not unicodedata.combining(c))
+
+
+def station_hours(hours: str):
+    """'(po-pá 6-9h)' → ({0..4}, 6, 9); None when it can't be read."""
+    m = re.search(r"([a-zčúá]{2})(?:\s*([-+])\s*([a-zčúá]{2}))?\s+(\d{1,2})\s*-\s*(\d{1,2})", hours.lower())
+    if not m or m.group(1) not in STATION_DAYS:
+        return None
+    a = STATION_DAYS[m.group(1)]
+    b = STATION_DAYS.get(m.group(3) or "", a)
+    days = set(range(a, b + 1)) if m.group(2) == "-" else {a, b}
+    return days, int(m.group(4)), int(m.group(5))
+
+
+def station_on_air(hours: str, t=None) -> bool:
+    h = station_hours(hours)
+    t = t or time.localtime()
+    return bool(h) and t.tm_wday in h[0] and h[1] <= t.tm_hour < h[2]
+
+
+def station_people(force: bool = False) -> dict:
+    """{"people": [{name, role, hours, url, photo, qa: [(question, answer)]}], "freq": [(place, MHz)], "at"}:
+    from radiobeat.cz (its people page, each host's page), kept for a week."""
+    try:
+        with open(STATION_PEOPLE) as f:
+            got = json.load(f)
+        if not force and time.time() - got.get("at", 0) < 7 * 86400 and got.get("people"):
+            return got
+    except (OSError, ValueError):
+        got = {}
+    import html as _html
+    txt = lambda s: re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", s))).strip()
+    page = fetch(SITE + "/cs/34/lide/")
+    home = fetch(SITE + "/")
+    if not page:
+        return got
+    page = page.decode("utf-8", "replace")
+    links = re.findall(r'href="(?:https://www\.radiobeat\.cz)?(/cs/\d+/([a-z0-9-]+)/)"', (home or b"").decode(
+        "utf-8", "replace") + page)
+    people = []
+    i = page.find("Moderátoři")
+    for cell in re.findall(r"<td[^>]*>(.*?)</td>", page[i:] if i >= 0 else "", re.S):
+        ps = [txt(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", cell, re.S)]
+        ps = [p for p in ps if p]
+        if len(ps) < 2 or not re.search(r"moderátor|zprávař", " ".join(ps), re.I):
+            continue
+        name = re.sub(r'\s+', ' ', re.sub(r'"([^"]+)"\s*', r' „\1“ ', ps[0])).strip()
+        role = next((p for p in ps[1:] if re.search(r"moderátor|zprávař", p, re.I)), "")
+        hours = next((p.strip("()") for p in ps if p.startswith("(")), "")
+        surname = _fold(re.sub(r'["„“]', " ", name).split()[-1])
+        url = next((SITE + u for u, slug in links if surname and surname in slug.split("-")), None)
+        people.append({"name": name, "role": role, "hours": hours, "url": url, "photo": None, "qa": []})
+    for p in people:
+        if not p["url"]:
+            continue
+        body = fetch(p["url"])
+        if not body:
+            continue
+        body = body.decode("utf-8", "replace")
+        m = re.search(r'data-src="(/media/600/[^"]+\.(?:jpe?g|png))"', body, re.I)
+        if m:
+            p["photo"] = SITE + m.group(1)
+        art = body[body.find("article__body"):]
+        art = art[:art.find("</div>")] if "</div>" in art else art
+        # questions in bold, each answer what follows till the next (in their own paragraphs or after a <br>)
+        bits = re.split(r"<strong>(.*?)</strong>", art, flags=re.S)
+        qa = []
+        for k in range(1, len(bits) - 1, 2):
+            q = txt(bits[k]).strip(" :")
+            a = re.sub(r"\?{3,}", "", txt(bits[k + 1])).strip(" :")
+            if q and a and len(a) > 1:
+                qa.append((q, a))
+            if len(qa) >= 4:
+                break
+        p["qa"] = qa
+    freq = []
+    for place, mhz in re.findall(r'frequencies-list__name">(.*?)</span>\s*<strong[^>]*>\s*([\d,]+)\s*FM',
+                                 (home or b"").decode("utf-8", "replace"), re.S):
+        freq.append((txt(place), mhz))
+    got = {"people": people, "freq": freq, "at": time.time()}
+    try:
+        os.makedirs(os.path.dirname(STATION_PEOPLE), exist_ok=True)
+        with open(STATION_PEOPLE + ".tmp", "w") as f:
+            json.dump(got, f, ensure_ascii=False)
+        os.replace(STATION_PEOPLE + ".tmp", STATION_PEOPLE)
+    except OSError:
+        pass
+    return got
+
+
+def _short(text: str, most: int) -> str:
+    """At most about `most` characters, cut after a sentence (or a word) with … when cut."""
+    if len(text) <= most:
+        return text
+    cut = text[:most]
+    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    return cut[:end + 1] if end > most // 2 else cut.rsplit(" ", 1)[0] + "…"
+
+
+def station_parts(about: str, data: dict, place: str = "", now=None) -> list:
+    """The station box: [(heading, [(markup, photo url or '')])]."""
+    esc = GLib.markup_escape_text
+    t = now or time.localtime()
+    parts = []
+    intro = [(esc(about) if about else "<b>Rádio Beat</b> – classic rock, od šedesátých let po dnešek.", "")]
+    freq = data.get("freq") or []
+    if freq:
+        words = {_fold(w) for w in re.findall(r"\w{4,}", place)}
+        near = [f for f in freq if words & {_fold(w) for w in re.findall(r"\w{4,}", f[0])}]
+        near += [f for f in freq if f not in near and re.search(r"ostrava|opava|nový jičín|frýdek|bruntál|praha",
+                                                                  f[0], re.I)]
+        rest = [f for f in freq if f not in near]
+        line = " · ".join(f"<b>{esc(p)}</b> {esc(m)} FM" for p, m in near[:6])
+        intro.append((("Naladíte nás: " + line + (" · " if line and rest else "") + " · ".join(
+            f"{esc(p)} {esc(m)}" for p, m in rest)), ""))
+    parts.append(("Rádio Beat", intro))
+    people = data.get("people") or []
+    rows = []
+    for p in sorted(people, key=lambda p: not station_on_air(p["hours"], t)):
+        head = f"<b>{esc(p['name'])}</b>"
+        bits = [b for b in (p.get("role"), p.get("hours")) if b]
+        if bits:
+            head += f" <span alpha='70%'>({esc(', '.join(bits))})</span>"
+        if station_on_air(p["hours"], t):
+            head += " – <span foreground='#ff6b5a'><b>teď ve vysílání</b></span>"
+        lines = [head] + [f"<i>{esc(q)}</i> {esc(_short(a, 260))}" for q, a in p.get("qa", [])[:3]]
+        rows.append(("\n".join(lines), p.get("photo") or ""))
+    if rows:
+        parts.append(("Moderátoři a zprávaři", rows))
+    return parts
+
+
 class WeatherView(Gtk.Widget):
     """The weather beside the logo, in one row, pictures and numbers only: the sky (the sun, clouds, rain… as
     colored emoji; on a clear night the moon, drawn as it is in the sky there), the temperature, the day's
@@ -14420,7 +14764,7 @@ class OpenProfile:
             if node is not None:  # (nothing while the window's changing: the boxes below still are)
                 node.write_to_file(flag + ".node")
                 print("Otevření: uloženo", flag + ".node", file=sys.stderr)
-            for name in ("day_pop", "names_pop", "song_pop", "sky_pop", "quality_pop"):  # a box open just now: what it draws
+            for name in ("day_pop", "names_pop", "song_pop", "sky_pop", "wx_pop", "st_pop", "quality_pop"):  # a box open just now: what it draws
                 pop = getattr(widget, name, None)
                 kid = pop.get_child() if pop is not None and pop.get_mapped() else None
                 if kid is not None:
@@ -15033,7 +15377,16 @@ class Window(Adw.ApplicationWindow):
         self._sky_on = False  # the mouse is on the Moon
         self.sky_pop.connect("closed", lambda *_: setattr(self, "_sky_on", False))  # (put away by something
         # else, a menu opening: the mouse moving on the Moon again brings it back)
-        for pop in (self.day_pop, self.names_pop, self.song_pop, self.sky_pop):
+        self.wx_pop, self.wx_list, self.wx_scroll, self.wx_pager = self._info_box()
+        self.st_pop, self.st_list, self.st_scroll, self.st_pager = self._info_box()
+        self._wx_on = self._st_on = False  # the mouse on the weather / on the logo
+        self.wx_pop.connect("closed", lambda *_: setattr(self, "_wx_on", False))
+        self.st_pop.connect("closed", lambda *_: setattr(self, "_st_on", False))
+        logo_hover = Gtk.EventControllerMotion()  # the mouse on the logo: about the station
+        logo_hover.connect("enter", lambda *_: self._st_hover(True))
+        logo_hover.connect("leave", lambda *_: self._st_hover(False))
+        self.logo.add_controller(logo_hover)
+        for pop in (self.day_pop, self.names_pop, self.song_pop, self.sky_pop, self.wx_pop, self.st_pop):
             self._quiet_pop(pop)
         over = Gtk.EventControllerMotion()
         over.connect("enter", lambda *_: self.song_pop.get_visible() or self.song_show())
@@ -15220,6 +15573,20 @@ class Window(Adw.ApplicationWindow):
         sky_box.connect("notify::active", lambda r, _: (self.app.set_look(sky_box=r.get_active()),
                                                         r.get_active() or self.sky_pop.popdown()))
         group.add(sky_box)
+        for key, title, sub in (("wx_box", "Okno s předpovědí počasí",
+                                 "Najetím myší na počasí vedle loga, a samo každou hodinu v :40: počasí dnes a po "
+                                 "hodinách, příštích 7 dní a výhled na měsíc po týdnech, s fotkami podle počasí a "
+                                 "ročního období (vylepšenými AI) pro vybrané místo"),
+                                ("st_box", "Okno o Rádiu Beat",
+                                 "Najetím myší na logo, a samo každou hodinu v :52: o stanici, kde ji naladíte, a "
+                                 "její moderátoři a zprávaři s fotkami, kdy vysílají (kdo je právě ve vysílání) a "
+                                 "jejich vlastní odpovědi z webu rádia")):
+            row = Adw.SwitchRow(title=title, subtitle=sub, subtitle_lines=0)
+            row.set_active(self.app.settings.get(key, True))
+            pop = "wx_pop" if key == "wx_box" else "st_pop"  # (made later than the settings)
+            row.connect("notify::active", lambda r, _, key=key, pop=pop: (self.app.set_look(**{key: r.get_active()}),
+                                                                         r.get_active() or getattr(self, pop).popdown()))
+            group.add(row)
         auto_up = Adw.SwitchRow(title="Automatické aktualizace",
                                 subtitle="Každých 5 minut zkontroluje novou verzi, nainstaluje ji a spustí se znovu",
                                 subtitle_lines=0)
@@ -15501,7 +15868,7 @@ class Window(Adw.ApplicationWindow):
             return
         if (not self.get_visible() or not self.names.get_visible() or self._tour is not None
                 or any(w.open for w in self.waters) or self._day_on or self.quality_pop.get_visible()
-                or self.names_pop.get_visible() or self.sky_pop.get_visible()):
+                or any(p.get_visible() for p in self._boxes())):
             return
         if not self.names_ready():  # nothing to show yet (photos on their way): a little later, not an empty box
             if tries > 0:
@@ -15608,9 +15975,9 @@ class Window(Adw.ApplicationWindow):
         if self.compact or self._menu_open():
             return
         OPEN_PROFILE.start("okna jmenin", self)
-        self.day_pop.popdown()
-        self.song_pop.popdown()
-        self.sky_pop.popdown()
+        for p in self._boxes():
+            if p is not self.names_pop:
+                p.popdown()
         area = self._day_area()
         if area and getattr(self, "_day_text_f", None) is None:  # (the day's box's text size, worked out once)
             self._day_fill()
@@ -15666,7 +16033,7 @@ class Window(Adw.ApplicationWindow):
     def _song_auto(self) -> bool:
         if (hasattr(self, "_tour") and self.get_visible() and self._tour is None and not any(w.open for w in self.waters)
                 and not self._day_on and not self.quality_pop.get_visible() and not self.names_pop.get_visible()
-                and not self.sky_pop.get_visible() and not self.song_pop.get_visible() and self._song_parts() and self._settled(self._song_auto)):
+                and not any(p.get_visible() for p in self._boxes()) and self._song_parts() and self._settled(self._song_auto)):
             self.song_show(auto=True)
             shown = self._song_shown = object()
             GLib.timeout_add_seconds(self.SONG_AUTO[1], lambda: (self._song_shown is shown and self.song_pop.popdown(),
@@ -15878,8 +16245,9 @@ class Window(Adw.ApplicationWindow):
         if not area:
             return
         OPEN_PROFILE.start("okna Měsíce a Slunce", self)
-        for pop in (self.day_pop, self.names_pop, self.song_pop):
-            pop.popdown()
+        for pop in self._boxes():
+            if pop is not self.sky_pop:
+                pop.popdown()
         self.app.sky_tick()
         if getattr(self, "_day_text_f", None) is None:
             self._day_fill()
@@ -15922,7 +16290,7 @@ class Window(Adw.ApplicationWindow):
         if not hasattr(self, "quality_pop") or not hasattr(self, "_tour"):
             return
         if (not self.get_visible() or self._tour is not None or self._menu_open() or self._day_on or self._sky_on
-                or any(p.get_visible() for p in (self.day_pop, self.names_pop, self.song_pop, self.sky_pop))
+                or self._wx_on or self._st_on or any(p.get_visible() for p in self._boxes())
                 or not self.app.settings.get("sky_box", True) or not self.app.sky):
             return
         if not self._settled(self._sky_auto):
@@ -15944,6 +16312,163 @@ class Window(Adw.ApplicationWindow):
             GLib.timeout_add_seconds(max(self.SKY_AUTO[1], pages * self.SKY_AUTO[2]) - 2, close)
             return False
         GLib.timeout_add_seconds(2, timed)
+
+    # --- the weather's box ("wx": the mouse on the weather beside the logo; by itself at :40) and the station's
+    # ("st": the mouse on the logo; by itself at :52): like the Moon and Sun box, over the cover, paged, with photos
+    WX_AUTO = (40, 30, 20)  # at :40 (away from :00, :10, :20, :30 and :45), 30 s at least, 20 s a page
+    ST_AUTO = (52, 30, 20)
+    BOX_NAMES = {"wx": "okna počasí", "st": "okna o Rádiu Beat"}
+
+    def _info_box(self):
+        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=6, margin_bottom=6)
+        g = MenuGlass(self, [(self.backdrop, 0.45), (self.cover, 0.0)])
+        g.radius = 16.0
+        g.curve, g.wall, g.reach, g.shine = 3.0, 2.8, 0.9, True
+        g.edge_mirror = True
+        sc = Gtk.ScrolledWindow(child=lst, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                vscrollbar_policy=Gtk.PolicyType.EXTERNAL, hexpand=True, vexpand=True)
+        g.append(sc)
+        pop = Gtk.Popover(child=g, has_arrow=False, position=Gtk.PositionType.BOTTOM, autohide=False, can_focus=False)
+        pop.add_css_class("glass-menu")
+        pop.set_parent(self.clock)
+        pop.set_can_target(False)
+        return pop, lst, sc, Pager(pop, sc)
+
+    def _boxes(self) -> list:
+        """Every box that comes over the cover (one at a time)."""
+        return [p for p in (getattr(self, n, None) for n in ("day_pop", "names_pop", "song_pop", "sky_pop",
+                                                              "wx_pop", "st_pop")) if p is not None]
+
+    def _box_parts(self, which: str) -> list:
+        return (self.app.wx_parts if which == "wx" else self.app.st_parts) or []
+
+    def box_refresh(self, which: str) -> None:
+        if getattr(self, f"{which}_pop").get_visible():
+            self._box_fill(which)
+            self.box_pics(which)
+
+    def _box_fill(self, which: str) -> None:
+        a = self.app
+        parts = self._box_parts(which)
+        box = getattr(self, f"{which}_list")
+        f = getattr(self, "_day_text_f", None) or 0.7
+        filled = (id(parts), f, self._scale)
+        if parts and box.get_first_child() is not None and getattr(self, f"_{which}_filled", None) == filled:
+            return
+        setattr(self, f"_{which}_filled", filled)
+        while (c := box.get_first_child()) is not None:
+            box.remove(c)
+        pics = []
+        setattr(self, f"_{which}_pics", pics)
+        px = round(TEXT_PT["pic"] * 1.5 * max(1.0, self._scale))
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_scale_new(f))
+        if not parts:
+            box.append(Gtk.Label(label="Načítá se…", xalign=0, attributes=attrs))
+            return
+        for i, (name, rows) in enumerate(parts):
+            h = Gtk.Label(label=GLib.markup_escape_text(name), use_markup=True, halign=Gtk.Align.START, xalign=0,
+                          attributes=attrs, margin_top=6 if i else 0)  # (short: wrapped, it broke after each word)
+            h.add_css_class("day-head")
+            box.append(h)
+            for text, ref in rows:
+                lab = Gtk.Label(label=text, use_markup=True, xalign=0, wrap=True, attributes=attrs)
+                url = (wx_pic(ref) if which == "wx" else ref) if ref else ""
+                if not url:
+                    box.append(lab)
+                    continue
+                a.want_name_pic(url)  # (downloaded once, AI-enhanced like the other boxes' photos)
+                row = Gtk.Box(spacing=14)
+                pic = SquarePic(px, 10 * max(1.0, self._scale), valign=Gtk.Align.START)
+                pic.set_paintable(a.show_pics.get(url))
+                pics.append((pic, url))
+                row.append(pic)
+                lab.set_hexpand(True)
+                lab.set_valign(Gtk.Align.CENTER)
+                row.append(lab)
+                box.append(row)
+
+    def box_pics(self, which: str) -> None:
+        for pic, url in getattr(self, f"_{which}_pics", ()):
+            tex = self.app.show_pics.get(url)
+            if tex is not None and pic.get_paintable() is not tex:
+                pic.set_paintable(tex)
+
+    def box_show(self, which: str, auto: bool = False) -> None:
+        pop, scroll, pager = (getattr(self, f"{which}_{n}") for n in ("pop", "scroll", "pager"))
+        if self.compact or self._menu_open() or not self.app.settings.get(f"{which}_box", True):
+            return
+        area = self._day_area()
+        if not area:
+            return
+        OPEN_PROFILE.start(self.BOX_NAMES[which], self)
+        for p in self._boxes():
+            if p is not pop:
+                p.popdown()
+        self.app.forecast_tick() if which == "wx" else self.app.station_tick()
+        if getattr(self, "_day_text_f", None) is None:
+            self._day_fill()
+            self._day_fit(round(area[2]), round(area[3]))
+        self._box_fill(which)
+        self.box_pics(which)
+        glass = pop.get_child()
+        x, y, w, h = (round(v) for v in area)
+        glass.set_size_request(w, h)
+        glass.radius = 28 * max(1.0, self._scale)
+        r = int(glass.radius)
+        for setm in (scroll.set_margin_top, scroll.set_margin_bottom, scroll.set_margin_start, scroll.set_margin_end):
+            setm(r)
+        scroll.set_size_request(w - 2 * r, h - 2 * r)
+        ok, at = self.compute_point(self.clock, Graphene.Point().init(x, y))
+        if ok:
+            rect = Gdk.Rectangle()
+            rect.x, rect.y, rect.width, rect.height = round(at.x), round(at.y) - 1, w, 1
+            pop.set_pointing_to(rect)
+        pager.start((which, tuple(n for n, _r in self._box_parts(which))), top=not auto)
+        glass.staged()
+        glass.fresh_if_changed()
+        pop.popup()
+        GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
+        GLib.idle_add(self._day_true, area, pop)
+
+    def _box_auto(self, which: str) -> None:
+        """Once an hour by itself, like the Moon and Sun box: 20 s a page (4 pages at most), 30 s at least."""
+        if not hasattr(self, "quality_pop") or not hasattr(self, "_tour"):
+            return
+        pop, scroll = getattr(self, f"{which}_pop"), getattr(self, f"{which}_scroll")
+        if (not self.get_visible() or self._tour is not None or self._menu_open() or self._day_on or self._sky_on
+                or self._wx_on or self._st_on or any(p.get_visible() for p in self._boxes())
+                or not self.app.settings.get(f"{which}_box", True) or not self._box_parts(which)):
+            return
+        if not self._settled(lambda: self._box_auto(which)):
+            return
+        self.box_show(which, auto=True)
+        if not pop.get_visible():
+            return
+        shown = object()
+        setattr(self, f"_{which}_shown", shown)
+        spec = self.WX_AUTO if which == "wx" else self.ST_AUTO
+
+        def close() -> bool:
+            if getattr(self, f"_{which}_shown", None) is shown and not getattr(self, f"_{which}_on"):
+                pop.popdown()
+            return False
+
+        def timed() -> bool:
+            adj = scroll.get_vadjustment()
+            page = max(1.0, adj.get_page_size())
+            pages = min(self.SKY_AUTO_PAGES, 1 + math.ceil(max(0.0, adj.get_upper() - page) / (page * 0.9)))
+            GLib.timeout_add_seconds(max(spec[1], pages * spec[2]) - 2, close)
+            return False
+        GLib.timeout_add_seconds(2, timed)
+
+    def _st_hover(self, on: bool) -> None:
+        if on != self._st_on:
+            self._st_on = on
+            if on:
+                self.st_pop.get_visible() or self.box_show("st")
+            else:
+                self.st_pop.popdown()
 
     def _names_wheel(self, _ctl, _dx, dy) -> bool:
         adj = self.names_scroll.get_vadjustment()
@@ -16046,9 +16571,9 @@ class Window(Adw.ApplicationWindow):
             return
         if not self.day_pop.get_visible():
             OPEN_PROFILE.start("okna dne", self)
-        self.names_pop.popdown()
-        self.song_pop.popdown()
-        self.sky_pop.popdown()
+        for p in self._boxes():
+            if p is not self.day_pop:
+                p.popdown()
         self._day_fill()
         area = self._day_area()
         glass = self.day_pop.get_child()
@@ -16162,6 +16687,10 @@ class Window(Adw.ApplicationWindow):
         if now.tm_min == self.NAMES_AUTO[0] and getattr(self, "_names_auto_hour", None) != hour:
             self._names_auto_hour = hour
             self._names_auto()
+        for which, spec in (("wx", self.WX_AUTO), ("st", self.ST_AUTO)):
+            if now.tm_min == spec[0] and getattr(self, f"_{which}_auto_hour", None) != hour:
+                setattr(self, f"_{which}_auto_hour", hour)
+                self._box_auto(which)
         return GLib.SOURCE_CONTINUE
 
     compact = False
@@ -16176,7 +16705,7 @@ class Window(Adw.ApplicationWindow):
         if c:
             for w in self.waters:
                 w.hide()
-            for pop in (self.day_pop, self.names_pop, self.song_pop, self.sky_pop):
+            for pop in self._boxes():
                 pop.popdown()
             for v in (self.clock, self.names, self.weather_view, self.weather_drop, self.moon_view, self.status_view):
                 v.set_visible(False)
@@ -16612,7 +17141,8 @@ class Window(Adw.ApplicationWindow):
     def quiet_sync(self) -> None:
         """The picture enhancing waits while any menu, panel or box is open (smooth glass), and goes on once the
         last one is closed."""
-        pops = (getattr(self, n, None) for n in ("day_pop", "names_pop", "song_pop", "sky_pop", "quality_pop"))
+        pops = (getattr(self, n, None) for n in ("day_pop", "names_pop", "song_pop", "sky_pop", "wx_pop", "st_pop",
+                                                  "quality_pop"))
         on = any(w.open for w in getattr(self, "waters", [])) or any(p is not None and p.get_visible() for p in pops)
         self.app.enhancer.set_quiet(on)
         if not on:
@@ -16628,7 +17158,7 @@ class Window(Adw.ApplicationWindow):
         for w in getattr(self, "waters", []):
             if w is not keep:
                 w.hide()
-        for pop in (getattr(self, "quality_pop", None), self.day_pop, self.names_pop, self.song_pop, self.sky_pop):
+        for pop in [getattr(self, "quality_pop", None)] + self._boxes():
             if pop is not None and pop is not keep:
                 pop.popdown()
 
@@ -16806,6 +17336,13 @@ class Window(Adw.ApplicationWindow):
                 self.sky_pop.get_visible() or self.sky_show()
             else:
                 self.sky_pop.popdown()
+        wx = at is self.weather_view and not on and not self.weather_view.off  # the weather itself: its forecast
+        if wx != self._wx_on:
+            self._wx_on = wx
+            if wx:
+                self.wx_pop.get_visible() or self.box_show("wx")
+            else:
+                self.wx_pop.popdown()
         if (at is not None) != getattr(self, "_sky_pointing", False):
             self._sky_pointing = at is not None
             self.set_cursor_from_name("pointer" if at is not None else None)
@@ -17649,6 +18186,7 @@ class App(Adw.Application):
         self.host_info: dict[str, str] = {}  # every host seen -> what Wikipedia says (Czech)
         self._last_lead = ""
         self.station_about = ""
+        self.wx_parts, self.st_parts = [], []  # the weather's box and the station's (weather_parts, station_parts)
         self.band_about = self.host_about = ""  # 'Did you know?' about the artist, about who's on air
         self.cover_tex = None
         self.logo_tex = None
@@ -17719,6 +18257,8 @@ class App(Adw.Application):
                                 ("box-day", "day_pop", lambda w: w._day_show(w.clock)),
                                 ("box-names", "names_pop", lambda w: w.names_show()),
                                 ("box-sky", "sky_pop", lambda w: w.sky_show()),
+                                ("box-weather", "wx_pop", lambda w: w.box_show("wx")),
+                                ("box-station", "st_pop", lambda w: w.box_show("st")),
                                 ("box-quality", "quality_pop", lambda w: w.quality_pop.popup())):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", lambda *_, pop=pop, show=show: self.win and (
@@ -17977,11 +18517,75 @@ class App(Adw.Application):
             return False
         threading.Thread(target=work, daemon=True).start()
 
+    def forecast_tick(self) -> None:
+        """The weather box's forecast fetched anew (in a thread) every half hour and for another place; its photos
+        made ready (downloaded and enhanced) before the box opens."""
+        spot = weather_spot(self.settings.get("weather_place", "oprechtice"))
+        key = (spot[0], int(time.time() // 1800))
+        if not self.settings.get("wx_box", True) or key == getattr(self, "_wx_key", None) or getattr(
+                self, "_wx_busy", False):
+            return
+        self._wx_busy = True
+
+        def work():
+            parts = None
+            try:
+                parts = weather_parts(weather_forecast(spot[2], spot[3]), spot[1])
+            except Exception as e:  # (never the app's trouble: the box says it's loading then)
+                print("Rádio Beat: předpověď počasí:", repr(e), file=sys.stderr)
+            GLib.idle_add(done, parts)
+
+        def done(parts):
+            self._wx_busy = False
+            if parts:
+                self.wx_parts, self._wx_key = parts, key
+                for _h, rows in parts:
+                    for _t, ref in rows:
+                        if ref:
+                            self.want_name_pic(wx_pic(ref))
+                if self.win:
+                    self.win.box_refresh("wx")
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def station_tick(self) -> None:
+        """The station box: its people from radiobeat.cz (kept a week), worked out anew every 10 minutes (who's on
+        air now)."""
+        key = (int(time.time() // 600), bool(self.station_about))
+        if not self.settings.get("st_box", True) or key == getattr(self, "_st_key", None) or getattr(
+                self, "_st_busy", False):
+            return
+        self._st_busy = True
+        about, place = self.station_about, weather_spot(self.settings.get("weather_place", "oprechtice"))[1]
+
+        def work():
+            parts = None
+            try:
+                parts = station_parts(about, station_people(), place)
+            except Exception as e:
+                print("Rádio Beat: o stanici:", repr(e), file=sys.stderr)
+            GLib.idle_add(done, parts)
+
+        def done(parts):
+            self._st_busy = False
+            if parts:
+                self.st_parts, self._st_key = parts, key
+                for _h, rows in parts:
+                    for _t, ref in rows:
+                        if ref:
+                            self.want_name_pic(ref)
+                if self.win:
+                    self.win.box_refresh("st")
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
     def weather_tick(self) -> None:
         """The weather fetched anew (in a thread), then shown beside the logo; the moon (now, and its next phase)
         worked out for the same place."""
         spot = weather_spot(self.settings.get("weather_place", "oprechtice"))
         self.sky_tick()
+        self.forecast_tick()
+        self.station_tick()
         if self.win:  # (off too: its faint picture under the mouse, and on again at once)
             when, nxt = moon_next(spot[2], spot[3])
             self.win.show_moon(moon_sky(spot[2], spot[3]), nxt, when)
@@ -19266,6 +19870,10 @@ class App(Adw.Application):
             self.win.names_pics()
         if self.win and self.win.sky_pop.get_visible():
             self.win.sky_pics()
+        if self.win:
+            for which in ("wx", "st"):
+                if getattr(self.win, f"{which}_pop").get_visible():
+                    self.win.box_pics(which)
         return False
 
     def _enhance_small(self, url: str, data: bytes) -> None:
@@ -19297,6 +19905,10 @@ class App(Adw.Application):
                 self.win.names_pics()
             if self.win and self.win.sky_pop.get_visible():
                 self.win.sky_pics()
+            if self.win:
+                for which in ("wx", "st"):
+                    if getattr(self.win, f"{which}_pop").get_visible():
+                        self.win.box_pics(which)
         self.enhancer.request(f"pic:{url}", url, data, (w, h), size, done, screen=px, first=True)
 
     def enhance_small_full(self) -> None:
