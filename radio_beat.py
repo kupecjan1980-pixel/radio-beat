@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.42.4"
+APP_VERSION = "0.42.5"
 
 import collections
 import ctypes
@@ -2525,6 +2525,36 @@ def sink_desc(sink: dict) -> str:
 def sink_level(sink: dict) -> tuple[int, bool]:
     vols = [int(c["value_percent"].rstrip("%")) for c in sink.get("volume", {}).values()] or [0]
     return round(sum(vols) / len(vols)), bool(sink.get("mute"))
+
+
+SPDIF_SWITCH_RE = re.compile(r"^(?:SPDIF|IEC958)[- ]Out(?:put)? Playback Switch$|^IEC958 Playback Switch$", re.I)
+
+
+def wake_spdif(alsa_card, say) -> bool | None:
+    """The card's own optical output switch (the X3: 'SPDIF-Out Playback Switch') off for a moment and on: the
+    optical transmitter itself stops and starts, which the card's profile going off didn't do (the X3 kept its
+    optical signal running, the receiver stayed silent). None when the card has no such switch (or no amixer)."""
+    if alsa_card is None or not shutil.which("amixer"):
+        return None
+    n = str(alsa_card)
+    try:
+        out = subprocess.run(["amixer", "-c", n, "controls"], capture_output=True, text=True, timeout=5).stdout
+        names = [m.group(1) for m in re.finditer(r"name='([^']*)'", out)]
+        sw = next((x for x in names if SPDIF_SWITCH_RE.match(x)), None)
+        if not sw:
+            return None
+        cset = lambda v: subprocess.run(["amixer", "-q", "-c", n, "cset", f"name={sw}", v], capture_output=True,
+                                        text=True, timeout=5)
+        r = cset("off")
+        if r.returncode:
+            say(f"přepínač {sw} nejde vypnout: {r.stderr.strip()}")
+            return None
+        time.sleep(2.0)  # the receiver notices the signal is gone
+        cset("on")
+        return True
+    except (OSError, subprocess.SubprocessError) as e:
+        say(f"přepínač optického výstupu: {e}")
+        return None
 
 
 def wake_optical(card: str, sink_name: str, pause_cb, say) -> bool:
@@ -18537,6 +18567,10 @@ class App(Adw.Application):
                         GLib.idle_add(lambda: (otherwise(), False)[1])
                     else:
                         self._say("optický výstup nenalezen, neprobouzí se")
+                    return
+                n = sink.get("properties", {}).get("alsa.card")
+                if wake_spdif(n, self._say):
+                    self._say(f"optický výstup {sink_desc(sink)} probuzen (jeho přepínač SPDIF vypnut a zapnut)")
                     return
                 ok = wake_optical(card, sink["name"], lambda on: GLib.idle_add(self._optical_pause, on), self._say)
                 self._say(f"optický výstup {sink_desc(sink)} probuzen (profil vypnut a zapnut)" if ok

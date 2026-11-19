@@ -4,6 +4,7 @@
 
 ## 0.42 — Zvuk po startu počítače nikdy potichu
 
+- **0.42.5** (2026-11-19) Probuzení optického výstupu jinak: vypnutí a zapnutí celé karty receiver Sony neprobudilo (Sound Blaster X3 svůj optický signál držel dál). Teď se na 2 s vypne vlastní přepínač optického výstupu karty („SPDIF-Out“) a zase zapne; kde ho karta nemá, zůstává to staré
 - **0.42.4** (2026-11-19) Totéž v nastavení u hlasitosti zvukové karty: „hlasitost karty Sound Blaster X3“ místo „(null)“
 - **0.42.3** (2026-11-19) Kontrola zvuku a probuzení optického výstupu se nespouští po restartu kvůli aktualizaci, když bylo okno otevřené (jen po zapnutí počítače a ručním spuštění); název karty Sound Blaster X3 v logu místo „(null)“
 - **0.42.2** (2026-11-19) Kolečko myši mění hlasitost opravdu kdekoli v okně (po 5 %): i nad obalem s textem pořadu, nad posuvníkem a nad tlačítky. Svoje kolečko si nechávají jen seznamy a okénka, která mají co posouvat (boční panel HRÁLO, otevřená nabídka)
