@@ -4,6 +4,7 @@
 
 ## 0.43 — Předpověď počasí a okno o Rádiu Beat
 
+- **0.43.4** (2026-11-19) Probouzení optického výstupu vypnuto: receiver Sony u DeskMini neprobudilo nic z toho, co jde udělat z počítače (vypnutí karty, přepínač SPDIF, změna vzorkovací frekvence), pomáhá jen dvojí stisk SXFI na Sound Blasteru. Po startu se už neprobouzí (jde zapnout v nastavení), stisk kolečka myši už nic nedělá a na ikoně v liště zase pozastaví rádio. Kontrola hlasitosti po startu (ztlumeno / 0 % → 30 %) zůstává
 - **0.43.3** (2026-11-19) Probuzení optického výstupu napotřetí: ani vypnutí přepínače SPDIF receiver Sony neprobudilo. Tlačítko SXFI mění signál, který jde kabelem, a tak teď aplikace během vypnutého přepínače pošle zvuk na 2 s v jiné vzorkovací frekvenci (44,1 kHz místo 48) a pak zpět, aby receiver musel signál rozpoznat znovu. Nastavení PipeWire vrací, jak bylo
 - **0.43.2** (2026-11-19) Kolečko myši nad otevřenou nabídkou ⚙ (a panelem ⓘ) zase posouvá nabídku, ne hlasitost: od 0.42.2 se poloha myši brala z události kolečka, což nefungovalo, a nabídka ⚙ (skleněný panel, ne vyskakovací okno) se nepoznala. Teď okno sleduje polohu myši samo; hlasitost kolečkem jde jen tam, kde není nic k posouvání
 - **0.43.1** (2026-11-19) Tlačítko kvality vpravo dole („AAC 128 kbps“) bylo šedé místo skla s tmavým kolečkem uprostřed: od 0.41.1 dostávalo stínování kulatých tlačítek (kruhové přechody), které na protáhlé pilulce nechalo průhledný jen kruh uprostřed a zbytek zakrylo světlým závojem. Kruhové stínování teď jen pro opravdu kulatá tlačítka, pilulka je zase čiré sklo

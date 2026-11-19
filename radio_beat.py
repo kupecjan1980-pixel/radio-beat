@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.43.3"
+APP_VERSION = "0.43.4"
 
 import collections
 import ctypes
@@ -2877,9 +2877,7 @@ class Tray:
     def _call(self, _conn, _sender, _path, _iface, method, params, invocation):
         if method == "Activate":
             self.app.toggle_window()
-        elif method == "SecondaryActivate":  # middle click: wakes the optical output (DeskMini), else pause
-            self.app.wake_optical_now(otherwise=self.app.toggle_pause)
-        elif method == "ContextMenu":
+        elif method in ("SecondaryActivate", "ContextMenu"):
             self.app.toggle_pause()
         elif method == "Scroll":
             delta, orient = params.unpack()
@@ -15202,11 +15200,6 @@ class Window(Adw.ApplicationWindow):
         right = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
         right.connect("pressed", lambda *_: app.toggle_mute())
         self.add_controller(right)
-        # The middle button (wheel press) anywhere: wakes the optical output (the Sound Blaster → receiver), like
-        # its SXFI button, so nobody has to find it in the settings.
-        middle = Gtk.GestureClick(button=Gdk.BUTTON_MIDDLE)
-        middle.connect("pressed", lambda *_: app.wake_optical_now())
-        self.add_controller(middle)
         # The mouse wheel anywhere: volume (the slider itself, and the open menu, scroll their own way).
         wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL
                                           | Gtk.EventControllerScrollFlags.DISCRETE)
@@ -15531,15 +15524,16 @@ class Window(Adw.ApplicationWindow):
         group.add(self.card_row)
         can, what = self.app.optical_state()
         wake_auto = Adw.SwitchRow(title="Probudit optický výstup po startu",
-                                  subtitle="Po zapnutí počítače optický signál jednou vypne a zapne (jako stisk "
-                                           "tlačítka SXFI na Sound Blasteru), aby se k němu starý receiver "
-                                           f"znovu připojil. {'Výstup: ' + what if can else what}", subtitle_lines=0)
-        wake_auto.set_active(self.app.settings.get("optical_wake", True))
+                                  subtitle="Po zapnutí počítače optický signál jednou vypne a zapne. Vypnuto: "
+                                           "receiveru Sony u DeskMini to nepomohlo (ani vypnutí karty, přepínače "
+                                           "SPDIF či změna frekvence), pomáhá jen dvojí stisk tlačítka SXFI na "
+                                           f"Sound Blasteru. {'Výstup: ' + what if can else what}", subtitle_lines=0)
+        wake_auto.set_active(self.app.settings.get("optical_wake", False))
         wake_auto.connect("notify::active", lambda r, _: self.app.set_look(optical_wake=r.get_active()))
         group.add(wake_auto)
         wake_row = Adw.ActionRow(title="Probudit optický výstup teď",
-                                 subtitle="Když z receiveru nejde zvuk: zkuste klidně několikrát, jako to tlačítko. "
-                                          "Stejně funguje stisk kolečka myši kdekoli v okně nebo na ikoně v liště"
+                                 subtitle="Zkouška: optický signál na 2 s vypne a zapne (receiver Sony u DeskMini "
+                                          "to neprobudilo)"
                                  if can else what, subtitle_lines=0, sensitive=can)
         wake_btn = Gtk.Button(label="Probudit", valign=Gtk.Align.CENTER)
         wake_btn.connect("clicked", lambda _b: self.app.wake_optical_now())
@@ -19187,7 +19181,7 @@ class App(Adw.Application):
         GLib.idle_add(self._own_volume_at_start)
         card = spdif_card(sink)
         self._log_card(sink, card)
-        if not (boot and card and self.settings.get("optical_wake", True)):
+        if not (boot and card and self.settings.get("optical_wake", False)):
             return
         for _ in range(30):  # the radio playing first (the receiver then locks on real sound)
             if any(i.get("properties", {}).get("application.name") == CLIENT_NAME for i in _pactl_json("sink-inputs")):
