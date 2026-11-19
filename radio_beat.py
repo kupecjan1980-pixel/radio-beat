@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.42.1"
+APP_VERSION = "0.42.2"
 
 import collections
 import ctypes
@@ -14762,6 +14762,7 @@ class Window(Adw.ApplicationWindow):
         # The mouse wheel anywhere: volume (the slider itself, and the open menu, scroll their own way).
         wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL
                                           | Gtk.EventControllerScrollFlags.DISCRETE)
+        wheel.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)  # first, before anything under the mouse
         wheel.connect("scroll", self.on_wheel)
         self.add_controller(wheel)
 
@@ -17392,11 +17393,36 @@ class Window(Adw.ApplicationWindow):
             w = w.get_parent()
         self.toggle_full()
 
-    def on_wheel(self, _ctl, _dx, dy) -> bool:
-        if not dy:
+    def on_wheel(self, ctl, _dx, dy) -> bool:
+        """The wheel anywhere is the volume (5 % a notch), the slider included: taken before what's under the
+        mouse. Only lists and boxes with something to scroll keep it (the side panel, an open menu or box, a
+        text longer than its place); the show's text, which scrolls by itself, doesn't."""
+        if not dy or self._wheel_wanted(ctl):
             return False
         self.app.nudge_volume(-5 if dy > 0 else 5)
         return True
+
+    def _wheel_wanted(self, ctl) -> bool:
+        try:
+            ev = ctl.get_current_event()
+            native = Gtk.Native.get_for_surface(ev.get_surface())
+            ok, x, y = ev.get_position()
+            if not native or not ok:
+                return False
+            tx, ty = native.get_surface_transform()
+            w = native.pick(x - tx, y - ty, Gtk.PickFlags.DEFAULT)
+        except (AttributeError, TypeError):
+            return False
+        puddle = getattr(self, "puddle", None)
+        while w is not None and w is not self:
+            if isinstance(w, Gtk.Popover) or w is puddle:
+                return True
+            if isinstance(w, Gtk.ScrolledWindow) and w is not getattr(self, "sub_scroll", None):
+                adj = w.get_vadjustment()
+                if adj.get_upper() - adj.get_page_size() > 1:
+                    return True
+            w = w.get_parent()
+        return False
 
     def on_key(self, _ctl, keyval, _code, _state):
         if keyval == Gdk.KEY_Escape and (self.app.track_view or self.app.song_track):
