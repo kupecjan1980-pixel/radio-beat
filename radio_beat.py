@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.43.4"
+APP_VERSION = "0.43.5"
 
 import collections
 import ctypes
@@ -1339,6 +1339,13 @@ def sentence_case(text: str) -> str:
     return re.sub(r"[^\W\d_][\w']*", word, text)
 
 
+def retry_form(text: str) -> str:
+    """How a name the service gave back unchanged is asked once more: in sentence case, and a single word (which
+    stays capitalised in sentence case: "Fortune") in lower case ("fortune" → "štěstí")."""
+    sc = sentence_case(text)
+    return sc if sc != text else text.lower()
+
+
 TITLES_GOT = os.path.join(os.path.dirname(FACTS_CACHE), "titles-cs.json")  # what the service translated
 
 
@@ -1355,10 +1362,14 @@ def titles_got() -> dict:
                     # (a name that came back with no Czech before the service was asked with the g put back
                     # and, failing that, in sentence case: asked once more)
                     again = not os.path.exists(TITLES_GOT + ".asked-again")
+                    # (and the one-word names with none, once more when single words got asked in lower case)
+                    single = not os.path.exists(TITLES_GOT + ".asked-single")
                     _titles_got.update({k: v for k, v in json.load(f).items()
-                                        if isinstance(v, str) and (v or not again)})
+                                        if isinstance(v, str) and (v or not (again or single and len(k.split()) == 1))})
                     if again:
                         open(TITLES_GOT + ".asked-again", "w").close()
+                    if single:
+                        open(TITLES_GOT + ".asked-single", "w").close()
             except (OSError, ValueError, AttributeError):
                 pass
             _titles_got["\0loaded"] = "1"
@@ -1554,6 +1565,36 @@ HOST_WORDS = ("moderátor", "moderátorka", "rozhlas", "radio", "rádio", "prese
               "critic", "publicist", "novinář", "hudebník", "zpěvák", "zpěvačka", "musician", "singer", "journalist")
 
 
+_MUSIC_GROUP = re.compile(r"\b(?:hudební|rockov\w*|metalov\w*|hardrockov\w*|heavymetalov\w*|popov\w*|punkov\w*|"
+                          r"bigbítov\w*|folkov\w*|bluesov\w*|jazzov\w*|vokální\w*|glamrockov\w*|progresivní\w*|"
+                          r"rock|metal|pop|punk|music|musical|folk|blues|jazz|vocal|singing|hard rock|heavy metal)\s+"
+                          r"(?:\w+\s+)?(?:skupin\w*|group|kapel\w*|band)\b", re.I)
+
+
+def reads_like(text: str, words: tuple) -> bool:
+    """Whether a Wikipedia summary reads like one of `words`, as whole words (a stem: its start), and "group" /
+    "skupina" only beside a music word: "Fortune is an American business magazine … a media group" (in Czech
+    "mediální skupina") was taken for the band Fortune; "band" matched inside "husband"."""
+    low = text.lower()
+    first = re.split(r"(?<=[.!?])\s", low, 1)[0]
+    # (an album's, a song's or a film's article mentions the band too: "Queen je debutové studiové album britské
+    # rockové skupiny Queen" was told as the band's)
+    if re.search(r"\b(?:je|jsou|byl[aoy]?|is|was|are|were)\s+(?:\S+\s+){0,5}(?:album|alba|singl|píseň|písní|song|"
+                 r"single|soundtrack|film|kompilac\w*|compilation|ep|extended play|turné|tour|videohr\w*|video game)\b",
+                 first):
+        return False
+    for w in words:
+        w = w.strip()
+        if w in ("group", "skupina"):
+            if _MUSIC_GROUP.search(text):
+                return True
+            continue
+        tail = r"s?\b" if w in ("band", "rock", "singer", "musician", "group", "rapper", "drummer") else ""
+        if re.search(r"\b" + re.escape(w) + tail, low):
+            return True
+    return False
+
+
 def name_about(name: str, words: tuple, langs=("en", "cs")) -> str:
     """A few sentences (Czech) from the Wikipedia article named after `name` (a band, a host), only when it
     reads like one of `words`; '' when there's none. Remembered."""
@@ -1563,13 +1604,18 @@ def name_about(name: str, words: tuple, langs=("en", "cs")) -> str:
             cache = json.load(f)
     except (OSError, ValueError):
         cache = {}
-    if key in cache:
+    if key in cache and (not cache[key] or reads_like(cache[key], words)):  # (one taken wrongly before: anew)
         return cache[key]
     n, text, reached = norm(name), "", False
-    for lang in langs:
+    # (the name alone, then with what it is: "Fortune" alone finds the magazine and the company, not the band)
+    extra = {"en": " band" if words is MUSIC_WORDS else " radio", "cs": " skupina" if words is MUSIC_WORDS else ""}
+    for lang, query in [(l, q) for q_extra in (False, True) for l in langs
+                        for q in ([name + extra.get(l, "")] if q_extra else [name]) if not q_extra or extra.get(l)]:
+        if text:
+            break
         try:
             hits = _wiki(f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search"
-                         f"&srsearch={urllib.parse.quote(name)}&format=json&srlimit=10")["query"]["search"]
+                         f"&srsearch={urllib.parse.quote(query)}&format=json&srlimit=10")["query"]["search"]
             reached = True
             for hit in hits:
                 if norm(re.sub(r"\(.*?\)", "", hit["title"])) != n:
@@ -1579,7 +1625,7 @@ def name_about(name: str, words: tuple, langs=("en", "cs")) -> str:
                 if summary.get("type") == "disambiguation":  # "may refer to": the right one is further down
                     continue
                 extract = summary.get("extract", "")
-                if any(w in extract.lower() for w in words):
+                if reads_like(extract, words):
                     text = _trim_text(extract) if lang == "cs" else _trim_text(to_czech(extract) or "")
                     break
         except (OSError, ValueError, KeyError):
@@ -15531,15 +15577,18 @@ class Window(Adw.ApplicationWindow):
         wake_auto.set_active(self.app.settings.get("optical_wake", False))
         wake_auto.connect("notify::active", lambda r, _: self.app.set_look(optical_wake=r.get_active()))
         group.add(wake_auto)
-        wake_row = Adw.ActionRow(title="Probudit optický výstup teď",
-                                 subtitle="Zkouška: optický signál na 2 s vypne a zapne (receiver Sony u DeskMini "
-                                          "to neprobudilo)"
-                                 if can else what, subtitle_lines=0, sensitive=can)
-        wake_btn = Gtk.Button(label="Probudit", valign=Gtk.Align.CENTER)
-        wake_btn.connect("clicked", lambda _b: self.app.wake_optical_now())
-        wake_row.add_suffix(wake_btn)
-        wake_row.set_activatable_widget(wake_btn)
-        group.add(wake_row)
+        # each way of waking the optical output on its own, for testing (none woke the DeskMini's Sony so far)
+        for method, title, sub in (
+                ("all", "Zkouška: vše najednou", "Přepínač SPDIF vypnout, 2 s zvuk v 44,1 kHz, zpět 48 kHz, přepínač zapnout"),
+                ("profile", "Zkouška: vypnout a zapnout kartu", "Celá karta na 1,5 s vypnutá (profil off), rádio mezitím pozastavené"),
+                ("spdif", "Zkouška: přepínač SPDIF", "Jen optický výstup karty (SPDIF-Out) na 2 s vypnutý"),
+                ("rate", "Zkouška: jiná frekvence", "Zvuk na 2 s v 44,1 kHz (nebo 96 kHz) místo 48 kHz, pak zpět")):
+            row = Adw.ActionRow(title=title, subtitle=sub if can else what, subtitle_lines=0, sensitive=can)
+            btn = Gtk.Button(label="Zkusit", valign=Gtk.Align.CENTER)
+            btn.connect("clicked", lambda _b, m=method: self.app.wake_optical_now(method=m))
+            row.add_suffix(btn)
+            row.set_activatable_widget(btn)
+            group.add(row)
         self.picture_row = Adw.ActionRow(title="Poslední vylepšený obrázek", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
         group.add(self.picture_row)
         self.recognise_row = Adw.SwitchRow(title="Rozpoznávat skladby (testování)", subtitle_lines=0)
@@ -19226,7 +19275,7 @@ class App(Adw.Application):
                           "ani Sound Blaster"
         return True, sink_desc(sink)
 
-    def wake_optical_now(self, wait: bool = False, otherwise=None) -> None:
+    def wake_optical_now(self, wait: bool = False, otherwise=None, method: str = "all") -> None:
         """Like pressing the Sound Blaster's SXFI / line out button: the optical signal off and on again.
         otherwise(): called (on the main loop) instead when the output isn't optical."""
         if getattr(self, "_waking", False):
@@ -19246,6 +19295,21 @@ class App(Adw.Application):
                 n = sink.get("properties", {}).get("alsa.card")
                 bounce = RateBounce(n, self._say)
                 how = f", zvuk na 2 s v {bounce.rate} Hz" if bounce.rate else ""
+                if method == "spdif":
+                    ok = wake_spdif(n, self._say)
+                    self._say(f"zkouška SPDIF: {'přepínač vypnut a zapnut' if ok else 'karta přepínač nemá'}")
+                    return
+                if method == "rate":
+                    ok = bounce.start()
+                    if ok:
+                        time.sleep(2.0)
+                        bounce.stop()
+                    self._say(f"zkouška frekvence: {f'2 s v {bounce.rate} Hz a zpět' if ok else 'karta jinou frekvenci nemá'}")
+                    return
+                if method == "profile":
+                    ok = wake_optical(card, sink["name"], lambda on: GLib.idle_add(self._optical_pause, on), self._say)
+                    self._say(f"zkouška karty: {'vypnuta a zapnuta' if ok else 'nepodařilo se'}")
+                    return
                 if wake_spdif(n, self._say, bounce):
                     self._say(f"optický výstup {sink_desc(sink)} probuzen (přepínač SPDIF vypnut a zapnut{how})")
                     return
@@ -19718,8 +19782,8 @@ class App(Adw.Application):
                 answers = [r[0].strip() if r[1] == "EN" else "" for r in res]  # (a Czech name: left as it is)
                 # (given back unchanged, taken for a name: asked once more in sentence case)
                 redo = [i for i, (cs, (_, shown)) in enumerate(zip(answers, part))
-                        if cs and not name_translated(shown, cs) and sentence_case(shown) != shown]
-                res2 = deepl_many([sentence_case(g_restored(part[i][1])) for i in redo]) if redo else None
+                        if cs and not name_translated(shown, cs) and retry_form(shown) != shown]
+                res2 = deepl_many([retry_form(g_restored(part[i][1])) for i in redo]) if redo else None
                 for i, r in zip(redo, res2 or []):
                     if r[1] == "EN":
                         answers[i] = r[0].strip()
