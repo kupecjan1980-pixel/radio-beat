@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.41.3"
+APP_VERSION = "0.42.0"
 
 import collections
 import ctypes
@@ -2469,6 +2469,99 @@ class CardVolume:
                 self._pactl("set-sink-mute", target, "0")
             except (OSError, subprocess.SubprocessError):
                 pass
+
+
+# --- sound at start: unmuted, not silent; an optical (S/PDIF) link woken up ------------------------------------
+# The DeskMini plays through a Creative Sound Blaster X3 (USB) by an optical cable into an old Sony receiver, which
+# now and then stays silent after the computer starts until the X3's SXFI / line out button is pressed a few times
+# (the optical signal drops and comes back, the receiver locks on it again). Here the same is done to the card:
+# its profile off and on again, so the optical signal goes away and comes back.
+
+SPDIF_RE = re.compile(r"creative|sound.?blaster|iec958|s/?pdif|optic", re.I)
+START_VOLUME = 30  # percent, when it was muted or at 0 before the computer was turned off
+
+
+def _pactl_out(*args) -> str:
+    return subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=8).stdout
+
+
+def _pactl_json(what: str) -> list:
+    try:
+        return json.loads(_pactl_out("-f", "json", "list", what) or "[]")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
+def output_sink() -> dict | None:
+    """The sink Rádio Beat plays on (its stream's), or the default one before its stream exists."""
+    mine = [i for i in _pactl_json("sink-inputs") if i.get("properties", {}).get("application.name") == CLIENT_NAME]
+    sinks = _pactl_json("sinks")
+    try:
+        default = _pactl_out("get-default-sink").strip()
+    except (OSError, subprocess.SubprocessError):
+        default = ""
+    return (next((s for s in sinks if mine and s["index"] == mine[0]["sink"]), None)
+            or next((s for s in sinks if s["name"] == default), None))
+
+
+def spdif_card(sink: dict) -> str | None:
+    """The card (pactl name) of a sink that goes out optically / is a Sound Blaster, else None."""
+    p = sink.get("properties", {})
+    words = " ".join(str(x) for x in (sink.get("name"), sink.get("description"), p.get("device.name"),
+                                      p.get("device.product.name"), p.get("device.profile.name"),
+                                      p.get("device.vendor.name")) if x)
+    return p.get("device.name") if SPDIF_RE.search(words) and p.get("device.name") else None
+
+
+def sink_level(sink: dict) -> tuple[int, bool]:
+    vols = [int(c["value_percent"].rstrip("%")) for c in sink.get("volume", {}).values()] or [0]
+    return round(sum(vols) / len(vols)), bool(sink.get("mute"))
+
+
+def wake_optical(card: str, sink_name: str, pause_cb, say) -> bool:
+    """One 'press of the button': the card's profile off for a moment and back on (the optical signal stops and
+    starts again). Our stream is paused meanwhile (pause_cb(True/False)) and brought back to the card, which is
+    made the default sink again when it was. True when the card came back."""
+    card_info = next((c for c in _pactl_json("cards") if c.get("name") == card), None)
+    if not card_info:
+        say(f"karta {card} nenalezena")
+        return False
+    profile = card_info.get("active_profile")
+    if not profile or profile == "off":
+        say(f"karta {card} nemá zapnutý profil ({profile})")
+        return False
+    try:
+        was_default = _pactl_out("get-default-sink").strip() == sink_name
+        old = next((x["index"] for x in _pactl_json("sinks") if x.get("name") == sink_name), None)
+        ours = [i["index"] for i in _pactl_json("sink-inputs") if i.get("sink") == old
+                and i.get("properties", {}).get("application.name") == CLIENT_NAME]
+        pause_cb(True)
+        time.sleep(0.4)
+        _pactl_out("set-card-profile", card, "off")
+        time.sleep(1.5)  # long enough for the receiver to notice the signal is gone
+        _pactl_out("set-card-profile", card, profile)
+        back = False
+        for _ in range(40):  # up to 8 s for its sink to come back
+            time.sleep(0.2)
+            if any(s.get("name") == sink_name for s in _pactl_json("sinks")):
+                back = True
+                break
+        if back:
+            if was_default:
+                _pactl_out("set-default-sink", sink_name)
+            time.sleep(0.8)
+            idx = next((s["index"] for s in _pactl_json("sinks") if s.get("name") == sink_name), None)
+            for i in _pactl_json("sink-inputs"):  # left on another card while ours was off: back to it
+                if i["index"] in ours and i.get("sink") != idx:
+                    _pactl_out("move-sink-input", str(i["index"]), sink_name)
+        else:
+            say(f"výstup {sink_name} se po zapnutí profilu {profile} nevrátil")
+        return back
+    except (OSError, subprocess.SubprocessError) as e:
+        say(f"probuzení optického výstupu selhalo: {e}")
+        return False
+    finally:
+        pause_cb(False)
 
 
 # --- tray icon (StatusNotifierItem) ----------------------------------------------
@@ -14962,6 +15055,22 @@ class Window(Adw.ApplicationWindow):
         self.card_row.set_active(self.app.card_on())
         self.card_row.connect("notify::active", lambda r, _: self.app.set_card_volume(r.get_active()))
         group.add(self.card_row)
+        can, what = self.app.optical_state()
+        wake_auto = Adw.SwitchRow(title="Probudit optický výstup po startu",
+                                  subtitle="Po zapnutí počítače optický signál jednou vypne a zapne (jako stisk "
+                                           "tlačítka SXFI na Sound Blasteru), aby se k němu starý receiver "
+                                           f"znovu připojil. {'Výstup: ' + what if can else what}", subtitle_lines=0)
+        wake_auto.set_active(self.app.settings.get("optical_wake", True))
+        wake_auto.connect("notify::active", lambda r, _: self.app.set_look(optical_wake=r.get_active()))
+        group.add(wake_auto)
+        wake_row = Adw.ActionRow(title="Probudit optický výstup teď",
+                                 subtitle="Když z receiveru nejde zvuk: zkuste klidně několikrát, jako to tlačítko"
+                                 if can else what, subtitle_lines=0, sensitive=can)
+        wake_btn = Gtk.Button(label="Probudit", valign=Gtk.Align.CENTER)
+        wake_btn.connect("clicked", lambda _b: self.app.wake_optical_now())
+        wake_row.add_suffix(wake_btn)
+        wake_row.set_activatable_widget(wake_btn)
+        group.add(wake_row)
         self.picture_row = Adw.ActionRow(title="Poslední vylepšený obrázek", subtitle=self.app.picture_subtitle(), subtitle_lines=0)
         group.add(self.picture_row)
         self.recognise_row = Adw.SwitchRow(title="Rozpoznávat skladby (testování)", subtitle_lines=0)
@@ -17634,6 +17743,8 @@ class App(Adw.Application):
         self._started = True
         if first:
             self.play()
+            if "--hidden" not in args:  # (not after an update's restart: a mute meant then stays)
+                threading.Thread(target=self._sound_at_start, args=("--autostart" in args,), daemon=True).start()
         if first and ("--hidden" in args or ("--autostart" in args and not self.settings.get("autostart_full", False))):
             return 0  # (started at login: as the tray icon only, unless set to open in full screen)
         if "--autostart" in args and first:
@@ -18288,6 +18399,113 @@ class App(Adw.Application):
             self._vol_cur = self._vol_target = 100 if on else self.settings["volume"]
             self.mpv.volume(self._vol_cur)
         self.update()
+
+    # sound at start (see wake_optical): never silent because of a mute or 0 % left from before; an optical link
+    # (the DeskMini's Sound Blaster X3 → Sony receiver) woken up after the computer starts
+    def _say(self, text: str) -> None:
+        print(f"Rádio Beat: zvuk: {text}", file=sys.stderr)
+
+    def _sound_at_start(self, boot: bool) -> None:
+        if not shutil.which("pactl"):
+            self._say("chybí pactl, hlasitost karty po startu se nekontroluje")
+            return
+        began, sink = time.monotonic(), None
+        while time.monotonic() - began < 40:  # the USB card can come up some seconds after the login
+            sink = output_sink()
+            if sink and (spdif_card(sink) or not boot or time.monotonic() - began > 15):
+                break
+            time.sleep(1)
+        if not sink:
+            self._say("žádný zvukový výstup ani po 40 s")
+            return
+        name, desc = sink.get("name", ""), sink.get("description", "")
+        vol, mute = sink_level(sink)
+        if mute or vol < 1:
+            try:
+                _pactl_out("set-sink-volume", name, f"{START_VOLUME}%")
+                _pactl_out("set-sink-mute", name, "0")
+                self._say(f"{desc}: byla {'ztlumená' if mute else 'na 0 %'} ({vol} %), teď {START_VOLUME} % a zapnutá")
+            except (OSError, subprocess.SubprocessError) as e:
+                self._say(f"{desc}: hlasitost se nepodařilo nastavit: {e}")
+        else:
+            self._say(f"{desc}: hlasitost {vol} %, zapnutá")
+        GLib.idle_add(self._own_volume_at_start)
+        card = spdif_card(sink)
+        self._log_card(sink, card)
+        if not (boot and card and self.settings.get("optical_wake", True)):
+            return
+        for _ in range(30):  # the radio playing first (the receiver then locks on real sound)
+            if any(i.get("properties", {}).get("application.name") == CLIENT_NAME for i in _pactl_json("sink-inputs")):
+                break
+            time.sleep(1)
+        time.sleep(2)
+        self.wake_optical_now(wait=True)
+
+    def _own_volume_at_start(self) -> bool:
+        if not self.card_on() and self.settings["volume"] < 1:  # Rádio Beat's own slider left at 0
+            self._say(f"vlastní hlasitost byla 0 %, teď {START_VOLUME} %")
+            self.set_volume(START_VOLUME)
+        if self.muted:
+            self.toggle_mute()
+        self.update()
+        return False
+
+    def _log_card(self, sink: dict, card: str | None) -> None:
+        """What the card offers (to the log, read through the hub): its ALSA switches show whether its optical
+        output could be woken more gently than by its profile."""
+        p = sink.get("properties", {})
+        self._say(f"výstup {sink.get('name')} (karta {p.get('device.name')}, profil {p.get('device.profile.name')}, "
+                  f"{'optický / Sound Blaster' if card else 'ne optický'})")
+        n = p.get("alsa.card")
+        if card and n is not None and shutil.which("amixer"):
+            try:
+                out = subprocess.run(["amixer", "-c", str(n), "controls"], capture_output=True, text=True,
+                                     timeout=5).stdout
+                names = [m.group(1) for m in re.finditer(r"name='([^']*)'", out)]
+                self._say(f"ovládací prvky karty: {', '.join(names[:40]) or 'žádné'}")
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+    def optical_state(self) -> tuple[bool, str]:
+        """(can wake now, why not / what) for the settings rows."""
+        if not shutil.which("pactl"):
+            return False, "Nejde: chybí pactl (zvukové nástroje PipeWire/PulseAudio)"
+        sink = output_sink()
+        card = spdif_card(sink) if sink else None
+        if not card:
+            return False, f"Nejde: {sink.get('description', 'tento výstup') if sink else 'žádný výstup'} není optický " \
+                          "ani Sound Blaster"
+        return True, sink.get("description", card)
+
+    def wake_optical_now(self, wait: bool = False) -> None:
+        """Like pressing the Sound Blaster's SXFI / line out button: the optical signal off and on again."""
+        if getattr(self, "_waking", False):
+            return
+
+        def work():
+            self._waking = True
+            try:
+                sink = output_sink()
+                card = spdif_card(sink) if sink else None
+                if not card:
+                    self._say("optický výstup nenalezen, neprobouzí se")
+                    return
+                ok = wake_optical(card, sink["name"], lambda on: GLib.idle_add(self._optical_pause, on), self._say)
+                self._say(f"optický výstup {sink.get('description')} probuzen (profil vypnut a zapnut)" if ok
+                          else "optický výstup se nepodařilo probudit")
+            finally:
+                self._waking = False
+        if wait:
+            work()
+        else:
+            threading.Thread(target=work, daemon=True).start()
+
+    def _optical_pause(self, on: bool) -> bool:
+        if self.mpv and not self.paused:  # (a pause the user made stays)
+            self.mpv.pause(on)
+            if not on:
+                self.last_audio = time.monotonic()
+        return False
 
     # GPU reset (amdgpu resets the whole GPU when a job hangs): GTK's Vulkan renderer can't come back from a
     # lost device, the window freezes and can't even be closed. Seen in the log (GTK/Mesa write it to fd 2 →

@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.42 — Zvuk po startu počítače nikdy potichu
+
+- **0.42.0** (2026-11-19) Po zapnutí počítače Rádio Beat zkontroluje zvukovou kartu: když zůstala ztlumená nebo na 0 %, zapne ji na 30 % (stejně vlastní hlasitost, když byla na 0). Na DeskMini (Sound Blaster X3 optickým kabelem do starého receiveru Sony) navíc jednou vypne a zapne optický signál, jako stisk tlačítka SXFI / line out, aby se receiver znovu chytil. V nastavení jde vypnout a je tam tlačítko „Probudit“ pro další pokus. Do logu píše, co karta nabízí
+
 ## 0.41 — Drobné nápisy na obalech bez vymyšlených písmen
 
 - **0.41.3** (2026-11-18) A pro radost i na jak dlouho by místo stačilo při dosavadním tempu nových obrázků („asi 228 nových obrázků denně… by stačilo na zhruba 34 let“)
