@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.43.5"
+APP_VERSION = "0.43.6"
 
 import collections
 import ctypes
@@ -11844,26 +11844,80 @@ def weather_lines(w: dict, place: str, lat: float, lon: float) -> dict:
 
 # --- the weather box: today hour by hour, the next 7 days, the month ahead; photos by the weather and season ------
 # Photos from Wikimedia Commons ("Quality images"), picked by eye for each kind of weather in each season (the user:
-# sunny autumn looks like autumn); AI-enhanced like the other boxes' photos.
-WX_PICS = {"clear-spring": "Meadow orchards - Hohenwettersbach 04.jpg",
-           "clear-summer": "Oak in the middle of the meadow. Kozachij island in the Dnipro river. Ukraine.jpg",
-           "clear-autumn": "Weg auf der Ostseite des Galgenfeldsees bei Haßfurt.jpg",
-           "clear-winter": "Dülmen, Umland, Sonnenaufgang im Winter -- 2013 -- 9899.jpg",
-           "partly-spring": "Radovljica Gradiška pot SW-Blick auf Save und Julische Alpen 10042017 7434.jpg",
-           "partly-summer": "Strassburg Sankt Peter ob Gurk Landschaft mit Wiesen und Wäldern 19072017 0247.jpg",
-           "partly-autumn": "Poplar Sunset Douar Chiker Morocco Nov25 A7CR 09360.jpg",
-           "partly-winter": "Winter auf dem Himmeldunkberg.jpg",
-           "cloudy-green": "Borkum, Oldmann's Olde Düne -- 2020 -- 2749.jpg",
-           "cloudy-autumn": "Schloss Marienburg im herbstlichen Abendlicht.jpg",
-           "cloudy-winter": "Viru Bog at winter.jpg",
-           "fog-spring": "Hommikune udu Kakerdaja rabas.jpg",
-           "fog-autumn": "Morning fog over Keravanjoki river in Vantaa, Finland, 2021 October.jpg",
-           "fog-winter": "Vitoria - Parque de Olárizu - Niebla y cencellada -BT- 01.jpg",
-           "rain-summer": "Rain over Beinn Eich, Luss Hills, Scotland.jpg",
-           "rain-autumn": "Rain in Malta 06.jpg",
-           "snow": "Forest Fairy Tale.jpg",
-           "storm": "2013-08-07 04-23-26-foudre-belfort.jpg",
-           "night": "Llyn Ogwen Milky Way.jpg"}
+# sunny autumn looks like autumn), mostly sky over trees so the weather shows (the user, 2026-11-19); several of each:
+# another one each time the box opens and for each day of the same weather; AI-enhanced like the other boxes' photos.
+WX_PICS = {
+    "clear-spring": ("Meadow orchards - Hohenwettersbach 04.jpg",
+             "2015 Two trees waiting for spring season.jpg",
+             "Neudenau - Herbolzheim - Felder, grasiger Weg und Birnbaum im April (1.3).jpg",
+             "Münster, Schulstraße -- 2020 -- 6428.jpg"),
+    "clear-summer": ("Oak in the middle of the meadow. Kozachij island in the Dnipro river. Ukraine.jpg",
+             "Sunny green paddy fields with trees and long shadows at golden hour.jpg",
+             "Green landscape with opaque paddy fields and cloudy blue sky in Laos (HDR).jpg"),
+    "clear-autumn": ("Weg auf der Ostseite des Galgenfeldsees bei Haßfurt.jpg",
+             "Dülmen, Wildpark -- 2020 -- 3427.jpg",
+             "Autumnal trees - Malsch 01.jpg",
+             "Dülmen, Wildpark -- 2018 -- 1382-6.jpg",
+             "Park Środula, Sosnowiec, Jesień 2021.jpg"),
+    "clear-winter": ("Dülmen, Umland, Sonnenaufgang im Winter -- 2013 -- 9899.jpg",
+             "Blue, White, and Evergreen.jpg",
+             "Cheops Mountain seen the Sir Donald Trail.jpg"),
+    "partly-spring": ("Radovljica Gradiška pot SW-Blick auf Save und Julische Alpen 10042017 7434.jpg",
+             "Catskill Escarpment and Kingston-Rhinecliff Bridge from Ferncliff Forest firetower.jpg",
+             "Wijnjeterper Schar, Natura 2000-gebied provincie Friesland 04.jpg",
+             "Wijnjeterper Schar, Natura 2000-gebied provincie Friesland 03.jpg"),
+    "partly-summer": ("Strassburg Sankt Peter ob Gurk Landschaft mit Wiesen und Wäldern 19072017 0247.jpg",
+             "Catskill Escarpment and Kingston-Rhinecliff Bridge from Ferncliff Forest firetower.jpg",
+             "Wijnjeterper Schar, Natura 2000-gebied provincie Friesland 04.jpg",
+             "Wijnjeterper Schar, Natura 2000-gebied provincie Friesland 03.jpg"),
+    "partly-autumn": ("Poplar Sunset Douar Chiker Morocco Nov25 A7CR 09360.jpg",
+             "Autumnal trees - Malsch 01.jpg",
+             "Old water tower in New Bavaria (autumn 2017).jpg",
+             "Park Środula, Sosnowiec, Jesień 2021.jpg"),
+    "partly-winter": ("Winter auf dem Himmeldunkberg.jpg",
+             "Dülmen, Umland, Sonnenaufgang im Winter -- 2013 -- 9899.jpg",
+             "Dülmen, Merfeld, Feldweg am Mühlenbach -- 2021 -- 4278-80.jpg",
+             "Winter in der Rhön.jpg"),
+    "cloudy-green": ("Borkum, Oldmann's Olde Düne -- 2020 -- 2749.jpg",
+             "Banff National Park (AB, Canada), Lake Minnewanka -- 2022 -- 2313.jpg",
+             "Banff National Park (AB, Canada), Bankhead, Lower Bankhead -- 2022 -- 2240.jpg",
+             "Banff National Park (AB, Canada), Lake Minnewanka -- 2022 -- 2305.jpg"),
+    "cloudy-autumn": ("Schloss Marienburg im herbstlichen Abendlicht.jpg",
+             "Weismes (B), Brackvenn -- 2021 -- 6585.jpg",
+             "Wijnjeterper Schar, Natura 2000-gebied provincie Friesland 06.jpg",
+             "Wijnjeterper Schar, Natura 2000-gebied provincie Friesland 05.jpg"),
+    "cloudy-winter": ("Viru Bog at winter.jpg",
+             "Dülmen, Kirchspiel, Börnste, Baumreihe -- 2021 -- 4908.jpg",
+             "Dülmen, Kirchspiel, Bauerschaft Börnste -- 2021 -- 4408.jpg",
+             "Dülmen, Kirchspiel, Bauerschaft Börnste -- 2021 -- 4406 (bw).jpg"),
+    "fog-spring": ("Hommikune udu Kakerdaja rabas.jpg",
+             "Crepuscular rays and fog in the early morning, Pozowice, Lesser Poland Voivodeship, 20261025 0646 6702.jpg",
+             "Dülmen, Merfeld, Dülmener Wildpferde in der Wildbahn -- 2016 -- 4740.jpg"),
+    "fog-autumn": ("Morning fog over Keravanjoki river in Vantaa, Finland, 2021 October.jpg",
+             "Morning fog at some trees by Keravanjoki river in Vantaa, Finland, 2021 October.jpg",
+             "Crepuscular rays and fog in the early morning, Pozowice, Lesser Poland Voivodeship, 20261025 0647 6711.jpg",
+             "Crepuscular rays and fog in the early morning, Pozowice, Lesser Poland Voivodeship, 20261025 0647 6705.jpg"),
+    "fog-winter": ("Vitoria - Parque de Olárizu - Niebla y cencellada -BT- 01.jpg",
+             "Morning fog in Upper Silesia.jpg",
+             "Met rijp bedekte boomkruinen 01.jpg",
+             "Groep met rijp bedekte bomen 01.jpg"),
+    "rain-summer": ("Rain over Beinn Eich, Luss Hills, Scotland.jpg",
+             "Blue and orange clouds over the Mekong with a pirogue running in the water at sunset in Don Det Laos.jpg",
+             "Wijnjeterper Schar, Natura 2000-gebied provincie Friesland 27 z.w.jpg"),
+    "rain-autumn": ("Rain in Malta 06.jpg",
+             "Wijnjeterper Schar, Natura 2000-gebied provincie Friesland zw 05.jpg",
+             "Wijnjeterper Schar, Natura 2000-gebied provincie Friesland 06 z.w.jpg"),
+    "snow": ("Forest Fairy Tale.jpg",
+             "Forest road Slavne 2017 BW G9.jpg",
+             "Crepuscular rays during snowfall 10.jpg"),
+    "storm": ("2013-08-07 04-23-26-foudre-belfort.jpg",
+             "Shelf cloud over Asprovalta.jpg",
+             "Грозовое облако.jpg",
+             "2011-07 Unwetter Schwäbisch Gmünd.jpg"),
+    "night": ("Llyn Ogwen Milky Way.jpg",
+             "Bontecou Lake Milky Way panorama.jpg",
+             "Silence In the trees.jpg"),
+}
 
 
 def wx_season(t) -> str:
@@ -11895,10 +11949,19 @@ def wx_pic_key(code: int, t, night: bool = False) -> str:
     return "rain-summer" if green else "rain-autumn"
 
 
-def wx_pic(key: str) -> str:
-    name = WX_PICS.get(key)
-    return ("https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote(name) + "?width=1200"
-            if name else "")
+def wx_pic(ref: str, turn: int = 0) -> str:
+    """The photo for "key#n" (the n-th day of that weather in the box), `turn`: how many times the box opened, so
+    each opening shows other photos of the same weather."""
+    key, _, n = ref.partition("#")
+    names = WX_PICS.get(key) or ()
+    if not names:
+        return ""
+    name = names[(int(n or 0) + turn) % len(names)]
+    return "https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote(name) + "?width=1200"
+
+
+def wx_pics_all(key: str) -> list[str]:
+    return [wx_pic(f"{key}#{i}") for i in range(len(WX_PICS.get(key) or ()))]
 
 
 def weather_forecast(lat: float, lon: float) -> dict:
@@ -11945,6 +12008,11 @@ def weather_parts(fc: dict, place: str, now: float = None) -> list:
     next 7 days, the month ahead by weeks."""
     now = now or time.time()
     esc = GLib.markup_escape_text
+    seen: dict = {}
+
+    def nth(key: str) -> str:  # the n-th of that weather in the box: another photo for each
+        seen[key] = seen.get(key, -1) + 1
+        return f"{key}#{seen[key]}"
     day = fc.get("daily") or {}
     dates = day.get("time") or []
     parts = []
@@ -11977,7 +12045,7 @@ def weather_parts(fc: dict, place: str, now: float = None) -> list:
         text += f" Vítr až {round(wind)} km/h."
     if at("sunrise", 0):
         text += f" Slunce vyjde v {_wx_hm(at('sunrise', 0))}, zapadne v {_wx_hm(at('sunset', 0))}."
-    today = [(text, wx_pic_key(code, struct(dates[0]), night))]
+    today = [(text, nth(wx_pic_key(code, struct(dates[0]), night)))]
     # the coming hours, every 3 hours
     hours = []
     times = hr.get("time") or []
@@ -12001,7 +12069,7 @@ def weather_parts(fc: dict, place: str, now: float = None) -> list:
                 f"{_wx_t(at('temperature_2m_min', i, 0))} v noci")
         if rain >= 0.1:
             text += ", srážky " + f"{rain:.1f}".replace(".", ",") + " mm" + (f" ({prob} %)" if prob is not None else "")
-        week.append((text + ".", wx_pic_key(c, struct(dates[i]))))
+        week.append((text + ".", nth(wx_pic_key(c, struct(dates[i])))))
     if week:
         parts.append(("Příštích 7 dní", week))
     # the month ahead: four weeks after these 7 days (the 16 days' forecast, then the seasonal one's mean)
@@ -12039,7 +12107,7 @@ def weather_parts(fc: dict, place: str, now: float = None) -> list:
         mid = time.localtime(time.mktime((days[3].year, days[3].month, days[3].day, 12, 0, 0, 0, 0, -1)))
         text = (f"<b>{days[0].day}. {days[0].month}. – {days[-1].day}. {days[-1].month}.</b>: {esc(what)}, přes den "
                 f"kolem {_wx_t(hi)}, v noci kolem {_wx_t(lo)}, srážky asi {round(rain)} mm za týden.")
-        month.append((text, wx_pic_key(code, mid)))
+        month.append((text, nth(wx_pic_key(code, mid))))
     if month:
         month.append(("<span alpha='70%'>Výhled na víc než dva týdny je jen odhad: průměr 51 výpočtů sezónní "
                       "předpovědi (Open-Meteo, ECMWF).</span>", ""))
@@ -13846,6 +13914,7 @@ class SquarePic(Gtk.Widget):
         super().__init__(**kw)
         self.px, self.radius, self.tex = px, radius, None
         self.side = 0.5  # which part of a wide photo shows: 0 its left, 0.5 its middle, 1 its right
+        self.sky = False  # a weather photo: a little closer, towards its top (more sky, the tree line below)
 
     def set_paintable(self, tex) -> None:
         if tex is not self.tex:
@@ -13976,6 +14045,9 @@ class SquarePic(Gtk.Widget):
         # a tall picture (a standing figure, a painted full-length portrait) keeps its top, where the face is, and
         # loses the legs: the taller, the nearer the top (a third taller than wide and on: right from the top)
         up = max(0.0, 0.5 - (h / max(1, w) - 1.0) * 1.5)
+        if self.sky:
+            k *= 1.2
+            up = 0.2
         snap.append_texture(self.tex, Graphene.Rect().init((px - w * k) * self.side, (px - h * k) * up, w * k, h * k))
         snap.pop()
 
@@ -16469,7 +16541,7 @@ class Window(Adw.ApplicationWindow):
         parts = self._box_parts(which)
         box = getattr(self, f"{which}_list")
         f = getattr(self, "_day_text_f", None) or 0.7
-        filled = (id(parts), f, self._scale)
+        filled = (id(parts), f, self._scale, getattr(self, "_wx_turn", 0) if which == "wx" else 0)
         if parts and box.get_first_child() is not None and getattr(self, f"_{which}_filled", None) == filled:
             return
         setattr(self, f"_{which}_filled", filled)
@@ -16490,13 +16562,14 @@ class Window(Adw.ApplicationWindow):
             box.append(h)
             for text, ref in rows:
                 lab = Gtk.Label(label=text, use_markup=True, xalign=0, wrap=True, attributes=attrs)
-                url = (wx_pic(ref) if which == "wx" else ref) if ref else ""
+                url = (wx_pic(ref, getattr(self, "_wx_turn", 0)) if which == "wx" else ref) if ref else ""
                 if not url:
                     box.append(lab)
                     continue
                 a.want_name_pic(url)  # (downloaded once, AI-enhanced like the other boxes' photos)
                 row = Gtk.Box(spacing=14)
                 pic = SquarePic(px, 10 * max(1.0, self._scale), valign=Gtk.Align.START)
+                pic.sky = which == "wx"  # (the weather: more of the sky)
                 pic.set_paintable(a.show_pics.get(url))
                 pics.append((pic, url))
                 row.append(pic)
@@ -16519,6 +16592,8 @@ class Window(Adw.ApplicationWindow):
         if not area:
             return
         OPEN_PROFILE.start(self.BOX_NAMES[which], self)
+        if which == "wx":
+            self._wx_turn = getattr(self, "_wx_turn", 0) + 1  # other photos each time it opens
         for p in self._boxes():
             if p is not pop:
                 p.popdown()
@@ -18659,10 +18734,10 @@ class App(Adw.Application):
             self._wx_busy = False
             if parts:
                 self.wx_parts, self._wx_key = parts, key
-                for _h, rows in parts:
-                    for _t, ref in rows:
-                        if ref:
-                            self.want_name_pic(wx_pic(ref))
+                kinds = {ref.partition("#")[0] for _h, rows in parts for _t, ref in rows if ref}
+                for k in sorted(kinds):  # (every photo of those weathers: whichever the next opening shows is ready)
+                    for url in wx_pics_all(k):
+                        self.want_name_pic(url)
                 if self.win:
                     self.win.box_refresh("wx")
             return False
