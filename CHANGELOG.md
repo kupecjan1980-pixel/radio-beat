@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.44 — Tlačítko SXFI na Sound Blasteru X3
+
+- **0.44.0** (2026-11-20) Po startu počítače Rádio Beat sám stiskne dvakrát tlačítko SXFI na Sound Blasteru X3 (přes jeho ovládací port, jako aplikace Creative), aby receiver Sony znovu chytil optický signál; SXFI se vrátí, jak bylo. V nastavení přepínač „Po startu stisknout SXFI dvakrát“ (zapnuto) a tlačítko na zkoušku. Přístup k portu dá Handheld Control 0.10.137. Nástroj tools/x3_sxfi.py: --toggle teď vrací SXFI do původního stavu (předtím končil vypnutým)
+
 ## 0.43 — Předpověď počasí a okno o Rádiu Beat
 
 - **0.43.6** (2026-11-19) Okno počasí: ke každému počasí 3 až 5 fotek (hlavně obloha nad stromy, ať je počasí vidět), pokaždé když se okno otevře jiné, a u dnů se stejným počasím každý den jiná; fotka je trochu přiblížená k horní části (víc oblohy)

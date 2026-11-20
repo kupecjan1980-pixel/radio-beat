@@ -7,7 +7,7 @@ decompiled X3 plug-in (SXFI = button 30, its state = bit 29 of the button mask) 
 protocol (same DLL family, same key bytes; https://blog.nns.ee/2026/02/20/katana-v2x-re).
 
    sudo python3 x3_sxfi.py            read only: firmware version, button states, output
-   sudo python3 x3_sxfi.py --toggle   SXFI switched over and back (like pressing the SXFI button twice)
+   sudo python3 x3_sxfi.py --toggle   SXFI switched over and back to where it was (like pressing it twice)
    sudo python3 x3_sxfi.py --on / --off
 
 Everything sent and received is printed in hex, for checking. The unlock step needs python3-cryptography (only if
@@ -149,6 +149,9 @@ def main() -> int:
     print("Buttons (SXFI = bit 29 of the mask):")
     port.write(bytes([0x5A, 0x26, 0x03, 0x08, 0xFF, 0xFF]), "query buttons")
     resp = port.read(1.0)
+    i = resp.find(b"\x5a\x26")
+    was = resp[i + 6] & 1 if i >= 0 and len(resp) > i + 6 else 1
+    print(f"  SXFI state now: {was}")
 
     want = None
     if "--on" in sys.argv:
@@ -156,7 +159,7 @@ def main() -> int:
     elif "--off" in sys.argv:
         want = [0]
     elif "--toggle" in sys.argv:
-        want = [1, 0]  # over and back, like two presses (the order doesn't matter for re-locking the receiver)
+        want = [1 - was, was]  # over and back to where it was, like two presses
     for state in want or []:
         print(f"Set SXFI {'on' if state else 'off'}:")
         port.write(bytes([0x5A, 0x26, 0x05, 0x07, SXFI_BUTTON, 0x00, state, 0x00]), f"sxfi {state}")

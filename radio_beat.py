@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.43.6"
+APP_VERSION = "0.44.0"
 
 import collections
 import ctypes
@@ -2665,6 +2665,170 @@ class RateBounce:
                            capture_output=True, timeout=5)
         except (OSError, subprocess.SubprocessError):
             pass
+
+
+# Sound Blaster X3: its SXFI button pressed from here. The X3 has a control port (USB CDC serial, /dev/ttyACM*)
+# that Creative's app talks to: a text handshake (whoareyou → unlock with an AES-256-GCM answer → SW_MODE1), then
+# binary frames 5A op len payload. SXFI = button 30: set 5A 26 05 07 1E 00 <state> 00, read 5A 26 03 08 FF FF.
+# Tested on the DeskMini 2026-11-20 (tools/x3_sxfi.py): the X3 needs the unlock, takes both states, the buttons'
+# LEDs follow. Pressing SXFI twice is what brings the Sony receiver's optical input back.
+X3_KEY = bytes([0xD3, 0x1A, 0x21, 0x27, 0x9B, 0xE3, 0x46, 0xF0, 0x99, 0x9D, 0x6E, 0xC4, 0xC3, 0xFE, 0xBE, 0x98,
+                0x90, 0x18, 0x69, 0xC1, 0x18, 0xFB, 0xB1, 0x25, 0x6E, 0x0C, 0xE0, 0x7B])
+X3_SXFI = 30
+
+
+def _aes_gcm(key: bytes, iv: bytes, plain: bytes) -> bytes:
+    """AES-256-GCM: ciphertext + 16-byte tag. python-cryptography when there, else OpenSSL's libcrypto."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        return AESGCM(key).encrypt(iv, plain, None)
+    except ImportError:
+        pass
+    import ctypes
+    import ctypes.util
+    lib = ctypes.CDLL(ctypes.util.find_library("crypto") or "libcrypto.so.3")
+    lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
+    lib.EVP_aes_256_gcm.restype = ctypes.c_void_p
+    for f in ("EVP_EncryptInit_ex", "EVP_EncryptUpdate", "EVP_EncryptFinal_ex", "EVP_CIPHER_CTX_ctrl",
+              "EVP_CIPHER_CTX_free"):
+        getattr(lib, f).argtypes = None
+    ctx = ctypes.c_void_p(lib.EVP_CIPHER_CTX_new())
+    try:
+        n, out, tag = ctypes.c_int(0), ctypes.create_string_buffer(len(plain) + 16), ctypes.create_string_buffer(16)
+        if not lib.EVP_EncryptInit_ex(ctx, ctypes.c_void_p(lib.EVP_aes_256_gcm()), None, None, None):
+            raise OSError("EVP_EncryptInit_ex")
+        lib.EVP_CIPHER_CTX_ctrl(ctx, 0x9, len(iv), None)  # EVP_CTRL_GCM_SET_IVLEN
+        if not lib.EVP_EncryptInit_ex(ctx, None, None, key, iv):
+            raise OSError("EVP_EncryptInit_ex key")
+        lib.EVP_EncryptUpdate(ctx, out, ctypes.byref(n), plain, len(plain))
+        got = n.value
+        lib.EVP_EncryptFinal_ex(ctx, ctypes.byref(out, got), ctypes.byref(n))
+        lib.EVP_CIPHER_CTX_ctrl(ctx, 0x10, 16, tag)  # EVP_CTRL_GCM_GET_TAG
+        return out.raw[:got + n.value] + tag.raw
+    finally:
+        lib.EVP_CIPHER_CTX_free(ctx)
+
+
+def x3_port() -> tuple[str | None, str | None]:
+    """(/dev/ttyACMn, USB product id) of a Creative control port, or (None, None)."""
+    for tty in sorted(glob.glob("/sys/class/tty/ttyACM*")):
+        dev = os.path.realpath(os.path.join(tty, "device"))
+        for up in (dev, os.path.dirname(dev), os.path.dirname(os.path.dirname(dev))):
+            try:
+                with open(os.path.join(up, "idVendor")) as f:
+                    vid = f.read().strip()
+                with open(os.path.join(up, "idProduct")) as f:
+                    pid = f.read().strip()
+            except OSError:
+                continue
+            if vid == "041e":
+                return "/dev/" + os.path.basename(tty), pid
+            break
+    return None, None
+
+
+class X3:
+    """The X3's control port, opened and unlocked. Raises OSError (e.g. PermissionError) when it can't."""
+
+    def __init__(self, path: str):
+        import termios
+        self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            a = termios.tcgetattr(self.fd)
+            a[0] = a[1] = a[3] = 0
+            a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+            a[4] = a[5] = termios.B115200
+            termios.tcsetattr(self.fd, termios.TCSANOW, a)
+            termios.tcflush(self.fd, termios.TCIOFLUSH)
+            self._unlock()
+        except BaseException:
+            os.close(self.fd)
+            raise
+
+    def close(self) -> None:
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+    def _send(self, data: bytes) -> None:
+        os.write(self.fd, data)
+
+    def _read(self, timeout: float) -> bytes:
+        import select
+        out, end = b"", time.monotonic() + timeout
+        while time.monotonic() < end:
+            r, _, _ = select.select([self.fd], [], [], max(0.0, end - time.monotonic()))
+            if not r:
+                break
+            try:
+                chunk = os.read(self.fd, 4096)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                break
+            out += chunk
+            end = max(end, time.monotonic() + 0.15)
+        return out
+
+    def _unlock(self) -> None:
+        self._send(b"\x5a\x03\x00")  # ping: answered only when already in command mode
+        if self._read(0.6).startswith(b"\x5a"):
+            return
+        self._send(b"whoareyou\r\n")
+        resp = self._read(2.0)
+        if resp.startswith(b"whoareyou") and len(resp) >= 45:
+            body = resp[9:]
+            header, pid, nonce = body[0:2], body[2:4], body[4:36]
+            iv = os.urandom(16)
+            self._send(b"unlock" + iv + _aes_gcm(header + X3_KEY + pid, iv[:12], nonce) + b"\r\n")
+            if b"unlock_OK" not in self._read(2.0):
+                raise OSError("the X3 refused the unlock")
+        self._send(b"SW_MODE1\r\n")
+        self._read(0.5)
+
+    def sxfi(self) -> int | None:
+        """SXFI's state (0/1) as the X3 reports it, None if it didn't answer."""
+        self._send(b"\x5a\x26\x03\x08\xff\xff")
+        r = self._read(1.0)
+        i = r.find(b"\x5a\x26")
+        return r[i + 6] & 1 if i >= 0 and len(r) > i + 6 else None
+
+    def set_sxfi(self, state: int) -> None:
+        self._send(bytes([0x5A, 0x26, 0x05, 0x07, X3_SXFI, 0x00, state, 0x00]))
+        self._read(1.0)
+
+
+def x3_double_press(say) -> bool | None:
+    """SXFI pressed twice, like the user does by hand: over to the other state and back to where it was.
+    None: no X3 control port here; False: there, but it failed (said why)."""
+    path, _pid = x3_port()
+    if not path:
+        return None
+    try:
+        x3 = X3(path)
+    except PermissionError:
+        say(f"Sound Blaster X3: bez přístupu k {path} (oprávnění dá Handheld Control, nebo pravidlo udev)")
+        return False
+    except OSError as e:
+        say(f"Sound Blaster X3: ovládání nejde otevřít ({e})")
+        return False
+    try:
+        was = x3.sxfi()
+        if was is None:
+            say("Sound Blaster X3: neodpovídá na dotaz na SXFI")
+            return False
+        x3.set_sxfi(1 - was)
+        time.sleep(1.2)
+        x3.set_sxfi(was)
+        now = x3.sxfi()
+        say(f"Sound Blaster X3: SXFI stisknuto dvakrát ({was} → {1 - was} → {now})")
+        return now == was
+    except OSError as e:
+        say(f"Sound Blaster X3: chyba ovládání ({e})")
+        return False
+    finally:
+        x3.close()
 
 
 def wake_optical(card: str, sink_name: str, pause_cb, say) -> bool:
@@ -15641,6 +15805,23 @@ class Window(Adw.ApplicationWindow):
         self.card_row.connect("notify::active", lambda r, _: self.app.set_card_volume(r.get_active()))
         group.add(self.card_row)
         can, what = self.app.optical_state()
+        x3_path = x3_port()[0]
+        sxfi = Adw.SwitchRow(title="Po startu stisknout SXFI dvakrát",
+                             subtitle="Jako dvojí stisk tlačítka SXFI na Sound Blasteru X3 rukou: receiver Sony "
+                                      "pak znovu chytí optický signál. "
+                                      + (f"X3 nalezen ({x3_path})" if x3_path else "X3 (jeho ovládací port) nenalezen"),
+                             subtitle_lines=0)
+        sxfi.set_active(self.app.settings.get("sxfi_wake", True))
+        sxfi.connect("notify::active", lambda r, _: self.app.set_look(sxfi_wake=r.get_active()))
+        group.add(sxfi)
+        row = Adw.ActionRow(title="Zkouška: dvojí stisk SXFI", subtitle_lines=0, sensitive=bool(x3_path),
+                            subtitle="Tlačítka X3 se přepnou a vrátí (zelená → purpurová/oranžová → zelená)"
+                            if x3_path else "X3 nenalezen")
+        btn = Gtk.Button(label="Zkusit", valign=Gtk.Align.CENTER)
+        btn.connect("clicked", lambda _b: self.app.wake_optical_now(method="sxfi"))
+        row.add_suffix(btn)
+        row.set_activatable_widget(btn)
+        group.add(row)
         wake_auto = Adw.SwitchRow(title="Probudit optický výstup po startu",
                                   subtitle="Po zapnutí počítače optický signál jednou vypne a zapne. Vypnuto: "
                                            "receiveru Sony u DeskMini to nepomohlo (ani vypnutí karty, přepínače "
@@ -19305,14 +19486,18 @@ class App(Adw.Application):
         GLib.idle_add(self._own_volume_at_start)
         card = spdif_card(sink)
         self._log_card(sink, card)
-        if not (boot and card and self.settings.get("optical_wake", False)):
+        x3 = boot and self.settings.get("sxfi_wake", True) and x3_port()[0]
+        if not (boot and card and (x3 or self.settings.get("optical_wake", False))):
             return
         for _ in range(30):  # the radio playing first (the receiver then locks on real sound)
             if any(i.get("properties", {}).get("application.name") == CLIENT_NAME for i in _pactl_json("sink-inputs")):
                 break
             time.sleep(1)
         time.sleep(2)
-        self.wake_optical_now(wait=True)
+        if x3:
+            self.wake_optical_now(wait=True, method="sxfi")
+        if self.settings.get("optical_wake", False):
+            self.wake_optical_now(wait=True)
 
     def _own_volume_at_start(self) -> bool:
         if not self.card_on() and self.settings["volume"] < 1:  # Rádio Beat's own slider left at 0
@@ -19359,6 +19544,10 @@ class App(Adw.Application):
         def work():
             self._waking = True
             try:
+                if method == "sxfi":
+                    if x3_double_press(self._say) is None:
+                        self._say("Sound Blaster X3 (jeho ovládací port) nenalezen")
+                    return
                 sink = output_sink()
                 card = spdif_card(sink) if sink else None
                 if not card:
