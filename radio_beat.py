@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.44.0"
+APP_VERSION = "0.45.0"
 
 import collections
 import ctypes
@@ -15494,9 +15494,16 @@ class Window(Adw.ApplicationWindow):
         ptr = Gtk.EventControllerMotion()
         ptr.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         ptr.connect("enter", lambda _c, x, y: setattr(self, "_ptr", (x, y)))
-        ptr.connect("motion", lambda _c, x, y: setattr(self, "_ptr", (x, y)))
+        ptr.connect("motion", lambda _c, x, y: self._ptr_motion(x, y))
         ptr.connect("leave", lambda *_: setattr(self, "_ptr", None))
         self.add_controller(ptr)
+        # clicks, keys and the wheel are someone there too (idle hiding of boxes and menus, 0.45)
+        self._moved_at = time.monotonic()
+        for ctl, sig in ((Gtk.GestureClick(button=0), "pressed"), (Gtk.EventControllerKey(), "key-pressed"),
+                         (Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.BOTH_AXES), "scroll")):
+            ctl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            ctl.connect(sig, lambda *_: (self._activity(), False)[1])
+            self.add_controller(ctl)
 
         scrim = self.scrim = StillBox(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.END,
                                       margin_top=0)
@@ -15732,25 +15739,26 @@ class Window(Adw.ApplicationWindow):
         self.wx_pop.connect("closed", lambda *_: setattr(self, "_wx_on", False))
         self.st_pop.connect("closed", lambda *_: setattr(self, "_st_on", False))
         logo_hover = Gtk.EventControllerMotion()  # the mouse on the logo: about the station
-        logo_hover.connect("enter", lambda *_: self._st_hover(True))
+        logo_hover.connect("enter", lambda *_: self._hover_ok() and self._st_hover(True))
         logo_hover.connect("leave", lambda *_: self._st_hover(False))
         self.logo.add_controller(logo_hover)
         for pop in (self.day_pop, self.names_pop, self.song_pop, self.sky_pop, self.wx_pop, self.st_pop):
             self._quiet_pop(pop)
+            self._watch_pop(pop)
         over = Gtk.EventControllerMotion()
-        over.connect("enter", lambda *_: self.song_pop.get_visible() or self.song_show())
+        over.connect("enter", lambda *_: self.song_pop.get_visible() or self._by_mouse(self.song_pop, self.song_show))
         over.connect("leave", lambda *_: self.song_pop.popdown())
         self.info.add_controller(over)
         GLib.timeout_add_seconds(self.SONG_AUTO[0], self._song_auto)
         self.names_pager = Pager(self.names_pop, self.names_scroll)
         self.song_pager = Pager(self.song_pop, self.song_scroll)
         hover = Gtk.EventControllerMotion()  # the mouse on the names: their box, like the day's on the date
-        hover.connect("enter", lambda *_: self.names_pop.get_visible() or self.names_show())
+        hover.connect("enter", lambda *_: self.names_pop.get_visible() or self._by_mouse(self.names_pop, self.names_show))
         hover.connect("leave", lambda *_: self.names_pop.popdown())
         self.names.add_controller(hover)
         for view in (self.clock,):
             m = Gtk.EventControllerMotion()
-            m.connect("enter", lambda *_, v=view: self._day_hover(v, True))
+            m.connect("enter", lambda *_, v=view: self._hover_ok() and self._day_hover(v, True))
             m.connect("leave", lambda *_, v=view: self._day_hover(v, False))
             view.add_controller(m)
         GLib.timeout_add_seconds(1, self._tick_clock)
@@ -16061,6 +16069,7 @@ class Window(Adw.ApplicationWindow):
         qglass.mirrors = [pill]  # the pill seen through its glass upside down
         qglass.append(self.quality_fit)
         self.quality_pop = Gtk.Popover(child=qglass, has_arrow=False, position=Gtk.PositionType.TOP)
+        self._watch_pop(self.quality_pop)
         self.quality_pop.add_css_class("glass-menu")
         # hung from the tab, not the pill: a popover parented to the (homogeneous) pill box counts in its width
         # when open, and the pill grew to the menu's width, squeezing the volume slider to half
@@ -16206,8 +16215,9 @@ class Window(Adw.ApplicationWindow):
             self.day_pop.popdown()
             return
         self._day_show(view)
+        self._mouse_pops.add(self.day_pop)
 
-    DAY_AUTO = (20, 20)  # by itself once an hour: at :20 (well away from the panel's tours at :00 and :30), 20 s
+    DAY_AUTO = (20, 15)  # by itself once an hour: at :20 (well away from the panel's tours at :00 and :30), 20 s
 
     def _day_auto(self) -> None:
         """The day's box shown by itself for a while; not while a panel or menu is open, a tour runs, the clock's
@@ -16219,12 +16229,13 @@ class Window(Adw.ApplicationWindow):
             return
         if not day_summary():  # nothing known about the day: no empty box
             return
-        if not self._settled(self._day_auto):
+        if not self._settled(self._day_auto) or not self._auto_ok(self.DAY_AUTO[1]):
             return
         self._day_show(self.clock)
+        self._auto_pops.add(self.day_pop)
         GLib.timeout_add_seconds(self.DAY_AUTO[1], lambda: (self._day_on or self.day_pop.popdown(), False)[1])
 
-    NAMES_AUTO = (45, 120)  # the name day's box by itself once an hour: at :45 (away from :00, :20 and :30), 2 min
+    NAMES_AUTO = (45, 30)  # the name day's box by itself once an hour: at :45 (away from :00, :20 and :30), 2 min
 
     def names_toggle(self) -> None:
         if self.names_pop.get_visible():
@@ -16244,9 +16255,10 @@ class Window(Adw.ApplicationWindow):
             if tries > 0:
                 GLib.timeout_add_seconds(30, lambda: (self._names_auto(tries - 1), False)[1])
             return
-        if not self._settled(lambda: self._names_auto(tries)):
+        if not self._settled(lambda: self._names_auto(tries)) or not self._auto_ok(self.NAMES_AUTO[1]):
             return
         self.names_show(auto=True)
+        self._auto_pops.add(self.names_pop)
         shown = self._names_shown = object()
         GLib.timeout_add_seconds(self.NAMES_AUTO[1], lambda: (self._names_shown is shown and self.names_pop.popdown(),
                                                              False)[1])
@@ -16388,7 +16400,8 @@ class Window(Adw.ApplicationWindow):
         if area:
             GLib.idle_add(self._day_true, area, self.names_pop)
 
-    SONG_AUTO = (120, 20)  # the song's box by itself every 2 minutes, for 20 s: a page of it (Pager.HOLD), the
+    SONG_AUTO = (900, 15)  # (0.45: was every 2 min for 20 s; the user: 95 % cover)
+    # the song's box by itself every 2 minutes, for 20 s: a page of it (Pager.HOLD), the
     # next one the next time
 
     def _settled(self, again) -> bool:
@@ -16403,8 +16416,10 @@ class Window(Adw.ApplicationWindow):
     def _song_auto(self) -> bool:
         if (hasattr(self, "_tour") and self.get_visible() and self._tour is None and not any(w.open for w in self.waters)
                 and not self._day_on and not self.quality_pop.get_visible() and not self.names_pop.get_visible()
-                and not any(p.get_visible() for p in self._boxes()) and self._song_parts() and self._settled(self._song_auto)):
+                and not any(p.get_visible() for p in self._boxes()) and self._song_parts() and self._settled(self._song_auto)
+                and self._auto_ok(self.SONG_AUTO[1])):
             self.song_show(auto=True)
+            self._auto_pops.add(self.song_pop)
             shown = self._song_shown = object()
             GLib.timeout_add_seconds(self.SONG_AUTO[1], lambda: (self._song_shown is shown and self.song_pop.popdown(),
                                                                 False)[1])
@@ -16495,9 +16510,9 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(lambda: (glass.queue_draw(), False)[1])
         GLib.idle_add(self._day_true, area, self.song_pop)
 
-    SKY_AUTO_PAGES = 4  # by itself that many pages at most a time (with the Moon's maps it has many): the next
+    SKY_AUTO_PAGES = 1  # by itself that many pages at most a time (with the Moon's maps it has many): the next
     # hour it goes on where it stopped
-    SKY_AUTO = (10, 30, 20)  # the Moon and Sun box by itself once an hour: at :10 (away from :00, :20, :30 and
+    SKY_AUTO = (10, 20, 20)  # the Moon and Sun box by itself once an hour: at :10 (away from :00, :20, :30 and
     # :45), each page for 20 s (the user: 10 s was too short to read one), 30 s at least
 
     def sky_refresh(self) -> None:
@@ -16663,11 +16678,12 @@ class Window(Adw.ApplicationWindow):
                 or self._wx_on or self._st_on or any(p.get_visible() for p in self._boxes())
                 or not self.app.settings.get("sky_box", True) or not self.app.sky):
             return
-        if not self._settled(self._sky_auto):
+        if not self._settled(self._sky_auto) or not self._auto_ok(self.SKY_AUTO[1]):
             return
         self.sky_show(auto=True)
         if not self.sky_pop.get_visible():
             return
+        self._auto_pops.add(self.sky_pop)
         shown = self._sky_shown = object()
 
         def close() -> bool:
@@ -16685,8 +16701,8 @@ class Window(Adw.ApplicationWindow):
 
     # --- the weather's box ("wx": the mouse on the weather beside the logo; by itself at :40) and the station's
     # ("st": the mouse on the logo; by itself at :52): like the Moon and Sun box, over the cover, paged, with photos
-    WX_AUTO = (40, 30, 20)  # at :40 (away from :00, :10, :20, :30 and :45), 30 s at least, 20 s a page
-    ST_AUTO = (52, 30, 20)
+    WX_AUTO = (40, 20, 20)  # at :40 (away from :00, :10, :20, :30 and :45), 30 s at least, 20 s a page
+    ST_AUTO = (52, 20, 20)
     BOX_NAMES = {"wx": "okna počasí", "st": "okna o Rádiu Beat"}
 
     def _info_box(self):
@@ -16813,11 +16829,13 @@ class Window(Adw.ApplicationWindow):
                 or self._wx_on or self._st_on or any(p.get_visible() for p in self._boxes())
                 or not self.app.settings.get(f"{which}_box", True) or not self._box_parts(which)):
             return
-        if not self._settled(lambda: self._box_auto(which)):
+        spec = self.WX_AUTO if which == "wx" else self.ST_AUTO
+        if not self._settled(lambda: self._box_auto(which)) or not self._auto_ok(spec[1]):
             return
         self.box_show(which, auto=True)
         if not pop.get_visible():
             return
+        self._auto_pops.add(pop)
         shown = object()
         setattr(self, f"_{which}_shown", shown)
         spec = self.WX_AUTO if which == "wx" else self.ST_AUTO
@@ -16839,7 +16857,7 @@ class Window(Adw.ApplicationWindow):
         if on != self._st_on:
             self._st_on = on
             if on:
-                self.st_pop.get_visible() or self.box_show("st")
+                self.st_pop.get_visible() or self._by_mouse(self.st_pop, lambda: self.box_show("st"), check=False)
             else:
                 self.st_pop.popdown()
 
@@ -17054,16 +17072,18 @@ class Window(Adw.ApplicationWindow):
         if now.tm_min == self.DAY_AUTO[0] and getattr(self, "_day_auto_hour", None) != hour:
             self._day_auto_hour = hour
             self._day_auto()
-        if now.tm_min == self.SKY_AUTO[0] and getattr(self, "_sky_auto_hour", None) != hour:
+        # the Moon, weather and station boxes take turns, one of them an hour (0.45)
+        if now.tm_min == self.SKY_AUTO[0] and now.tm_hour % 3 == 0 and getattr(self, "_sky_auto_hour", None) != hour:
             self._sky_auto_hour = hour
             self._sky_auto()
         if now.tm_min == self.NAMES_AUTO[0] and getattr(self, "_names_auto_hour", None) != hour:
             self._names_auto_hour = hour
             self._names_auto()
-        for which, spec in (("wx", self.WX_AUTO), ("st", self.ST_AUTO)):
-            if now.tm_min == spec[0] and getattr(self, f"_{which}_auto_hour", None) != hour:
+        for which, spec, turn in (("wx", self.WX_AUTO, 1), ("st", self.ST_AUTO, 2)):
+            if now.tm_min == spec[0] and now.tm_hour % 3 == turn and getattr(self, f"_{which}_auto_hour", None) != hour:
                 setattr(self, f"_{which}_auto_hour", hour)
                 self._box_auto(which)
+        self._idle_check()
         return GLib.SOURCE_CONTINUE
 
     compact = False
@@ -17521,6 +17541,99 @@ class Window(Adw.ApplicationWindow):
         if not on:
             self.app.enhance_small_full()
 
+    # --- How much the boxes cover the cover (0.45, the user: "95 % of the time the cover, 5 % menus in total;
+    # when idle hide the menu even if the mouse is over something"). Everything that opens by itself (the boxes,
+    # the panel's tour) shares AUTO_SHARE of each hour; a box the mouse opened goes after IDLE_BOX_S without a
+    # move (a mouse resting on the logo or the names no longer keeps it up) and only a real move brings it
+    # back; a menu opened by a click after IDLE_MENU_S untouched.
+    AUTO_SHARE, AUTO_WINDOW = 0.05, 3600
+    IDLE_BOX_S, IDLE_MENU_S = 6, 30
+    HOVER_FRESH_S = 1.5  # a "mouse entered" counts only this soon after a real move (not a box closing under it)
+
+    def _auto_ok(self, secs: float) -> bool:
+        """Room in this hour's share for secs more of a box by itself: then it's booked."""
+        now = time.monotonic()
+        log = [(t, d) for t, d in getattr(self, "_auto_log", []) if t + self.AUTO_WINDOW > now]
+        if sum(d for _t, d in log) + secs > self.AUTO_SHARE * self.AUTO_WINDOW:
+            self._auto_log = log
+            return False
+        log.append((now, secs))
+        self._auto_log = log
+        return True
+
+    def _activity(self, *_a) -> None:
+        self._moved_at = time.monotonic()
+
+    def _ptr_motion(self, x: float, y: float) -> None:
+        old, self._ptr = self._ptr, (x, y)
+        if old is not None and abs(old[0] - x) + abs(old[1] - y) < 2:
+            return  # (GTK repeats the position after a surface change: not a move)
+        self._moved_at = time.monotonic()
+        if getattr(self, "_idle_closed", False):
+            self._idle_closed = False
+            self._hover_again(x, y)
+
+    def _hover_ok(self) -> bool:
+        return time.monotonic() - getattr(self, "_moved_at", 0.0) < self.HOVER_FRESH_S
+
+    def _by_mouse(self, pop, show, check: bool = True) -> bool:
+        if check and not self._hover_ok():
+            return False
+        show()
+        if pop.get_visible():
+            self._mouse_pops.add(pop)
+        return True
+
+    def _watch_pop(self, pop) -> None:
+        """Moves over a box (a surface of its own) are moves too; closed: no longer the mouse's or by itself."""
+        if not hasattr(self, "_mouse_pops"):
+            self._mouse_pops, self._auto_pops = set(), set()
+        last = [None]
+
+        def moved(_c, x, y):
+            if last[0] is None or abs(last[0][0] - x) + abs(last[0][1] - y) >= 2:
+                self._activity()
+            last[0] = (x, y)
+        m = Gtk.EventControllerMotion()
+        m.connect("motion", moved)
+        pop.add_controller(m)
+        pop.connect("closed", lambda *_: (self._mouse_pops.discard(pop), self._auto_pops.discard(pop)))
+
+    def _hover_again(self, x: float, y: float) -> None:
+        """After an idle close, the first real move over the names, the song, the logo or the clock opens its box
+        again (the mouse never left them, so no 'enter' comes); the Moon and the weather do that themselves."""
+        for widget, open_ in ((self.names, lambda: self.names_pop.get_visible() or self._by_mouse(self.names_pop, self.names_show)),
+                              (self.info, lambda: self.song_pop.get_visible() or self._by_mouse(self.song_pop, self.song_show)),
+                              (self.logo, lambda: self._st_hover(True)),
+                              (self.clock, lambda: self._day_hover(self.clock, True))):
+            if not widget.get_visible():
+                continue
+            ok, b = widget.compute_bounds(self)
+            if ok and b.get_x() <= x < b.get_x() + b.get_width() and b.get_y() <= y < b.get_y() + b.get_height():
+                open_()
+                return
+
+    def _idle_check(self) -> None:
+        """Every second: mouse-opened boxes after IDLE_BOX_S without a move, click-opened menus after IDLE_MENU_S."""
+        if not hasattr(self, "_mouse_pops"):
+            return
+        idle = time.monotonic() - getattr(self, "_moved_at", 0.0)
+        if idle >= self.IDLE_BOX_S and any(p.get_visible() for p in self._mouse_pops):
+            for p in list(self._mouse_pops):
+                p.popdown()
+            self._mouse_pops.clear()
+            self._day_on = None
+            self._sky_on = self._wx_on = self._st_on = False
+            self._idle_closed = True
+        if idle >= self.IDLE_MENU_S:
+            if self._tour is None:
+                for w in getattr(self, "waters", []):
+                    if w.open:
+                        w.hide()
+            for p in [self.quality_pop] + self._boxes():
+                if p.get_visible() and p not in self._auto_pops:
+                    p.popdown()
+
     def _menu_open(self) -> bool:
         """A menu the user opened (⚙, ⓘ, quality) is open: no box pops up over it."""
         return any(w.open for w in getattr(self, "waters", [])) or (
@@ -17571,14 +17684,14 @@ class Window(Adw.ApplicationWindow):
     # quick to read), and the next time the next ones: DNES and ZAJÍMAVOSTI, then AKTUALITY and ZÍTRA… A tab with
     # nothing to show yet is left out; with nothing at all the panel stays shut.
     TOUR = ("DNES", "ZAJÍMAVOSTI", "AKTUALITY", "ZÍTRA", "POZÍTŘÍ", "HRÁLO")
-    TOUR_TABS, TOUR_SECS = 2, 20
+    TOUR_TABS, TOUR_SECS = 2, 15
 
     def _watch_show(self) -> bool:
         now = time.localtime()
         cur, _ = on_air(self.app.schedule, now)
         key = cur and (cur["title"], cur["start"])
         seen, self._show_seen = self._show_seen, key or self._show_seen
-        half = (now.tm_yday, now.tm_hour, now.tm_min // 30)  # at :00 and :30
+        half = (now.tm_yday, now.tm_hour)  # at :00 (0.45: no longer at :30 too)
         half_seen, self._half_seen = self._half_seen, half
         if key and seen is not None and key != seen:
             self._start_tour(first="DNES")  # a new show on air: who it is, first
@@ -17612,7 +17725,9 @@ class Window(Adw.ApplicationWindow):
             turn = [first] + [t for t in turn if t != first]
         tabs = [t for t in turn if self._tab_has(t)][:self.TOUR_TABS]
         if not tabs:
-            return  # nothing to show yet: the next half hour
+            return  # nothing to show yet: the next hour
+        if not self._auto_ok(len(tabs) * self.TOUR_SECS):
+            return
         if not first or len(tabs) > 1:  # the next time: from the tab after the last one shown
             self._tour_next = (self.TOUR.index(tabs[-1]) + 1) % n
         self.toggle_water(self.info_water)
@@ -17699,21 +17814,22 @@ class Window(Adw.ApplicationWindow):
         self.weather_view.set_state(hover=at is self.weather_view)
         self.moon_view.set_state(hover=at is self.moon_view)
         on = at is self.moon_view and not self.moon_view.off  # the mouse on the Moon: its box, gone when it leaves
+        rest = not self._hover_ok()  # (a mouse at rest opens nothing: only moving onto it does, 0.45)
         if at is self.weather_view and (spot := self.weather_view.moon_hit()):
             # the weather's moon (beside the logo, on a clear night) as well (the user: either moon)
             ok, b = self.weather_view.compute_bounds(self)
             on = ok and 0 <= x - b.get_x() - spot[0] < spot[2] and 0 <= y - b.get_y() - spot[1] < spot[3]
-        if on != self._sky_on:
+        if on != self._sky_on and not (on and rest):
             self._sky_on = on
             if on:
-                self.sky_pop.get_visible() or self.sky_show()
+                self.sky_pop.get_visible() or self._by_mouse(self.sky_pop, self.sky_show, check=False)
             else:
                 self.sky_pop.popdown()
         wx = at is self.weather_view and not on and not self.weather_view.off  # the weather itself: its forecast
-        if wx != self._wx_on:
+        if wx != self._wx_on and not (wx and rest):
             self._wx_on = wx
             if wx:
-                self.wx_pop.get_visible() or self.box_show("wx")
+                self.wx_pop.get_visible() or self._by_mouse(self.wx_pop, lambda: self.box_show("wx"), check=False)
             else:
                 self.wx_pop.popdown()
         if (at is not None) != getattr(self, "_sky_pointing", False):

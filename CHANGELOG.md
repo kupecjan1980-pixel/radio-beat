@@ -2,6 +2,10 @@
 
 Číslování jako u Handheld Control: 0.MINOR.PATCH. Každá změna (commit) je nová verze: PATCH o jedna víc; větší novinka zvýší MINOR (PATCH znovu od 0). Starší verze očíslovány zpětně.
 
+## 0.45 — Víc obalu, míň oken
+
+- **0.45.0** (2026-11-20) Okna a panely, která se otevírají sama, dohromady zakryjí obal nejvýš 5 % času (3 minuty za hodinu); 95 % času je vidět obal. Okno o skladbě samo jen jednou za 15 minut na 15 s (dřív každé 2 minuty na 20 s), jmeniny 30 s (dřív 2 min), den 15 s, prohlídka panelu jen v celou (už ne v půl) po 15 s na kartu, a okna Měsíce a Slunce, počasí a o Rádiu Beat se střídají: každou hodinu jen jedno z nich, 20 s. Když se myš nehýbe, okna otevřená najetím myší (logo, počasí, jména, skladba, datum, Měsíc) po 6 s zmizí, i když myš na nich pořád stojí, a vrátí se až po pohybu myší; nabídky a panely otevřené kliknutím se zavřou po 30 s bez dotyku
+
 ## 0.44 — Tlačítko SXFI na Sound Blasteru X3
 
 - **0.44.0** (2026-11-20) Po startu počítače Rádio Beat sám stiskne dvakrát tlačítko SXFI na Sound Blasteru X3 (přes jeho ovládací port, jako aplikace Creative), aby receiver Sony znovu chytil optický signál; SXFI se vrátí, jak bylo. V nastavení přepínač „Po startu stisknout SXFI dvakrát“ (zapnuto) a tlačítko na zkoušku. Přístup k portu dá Handheld Control 0.10.137. Nástroj tools/x3_sxfi.py: --toggle teď vrací SXFI do původního stavu (předtím končil vypnutým)
