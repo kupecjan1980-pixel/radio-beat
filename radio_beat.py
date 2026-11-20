@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.0"
+APP_VERSION = "0.45.1"
 
 import collections
 import ctypes
@@ -6181,12 +6181,20 @@ class FlagLogo(Gtk.Widget):
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE
 
+    def _draw_pic(self, snap, w: float, h: float) -> None:
+        """The enhanced logo is screen-sized (3840 px) and drawn ~70 px: GTK's default linear filter samples
+        that coarsely (rough, soft edges); mipmaps (trilinear) shrink it cleanly (0.45.1, the user: not sharp)."""
+        if isinstance(self.pic, Gdk.Texture):
+            snap.append_scaled_texture(self.pic, Gsk.ScalingFilter.TRILINEAR, Graphene.Rect().init(0, 0, w, h))
+        else:
+            self.pic.snapshot(snap, w, h)
+
     def do_snapshot(self, snap) -> None:
         if not self.pic:
             return
         w, h = self.get_width(), self.get_height()
         if self.amp <= 0:
-            self.pic.snapshot(snap, w, h)
+            self._draw_pic(snap, w, h)
             return
         sw = w / self.STRIPS
         for i in range(self.STRIPS):
@@ -6198,7 +6206,7 @@ class FlagLogo(Gtk.Widget):
             snap.save()
             snap.translate(Graphene.Point().init(0, lift))
             snap.push_clip(Graphene.Rect().init(x, 0, sw + 0.6, h))  # a hair wider: no seams
-            self.pic.snapshot(snap, w, h)
+            self._draw_pic(snap, w, h)
             snap.append_color(_rgba(255, 255, 255, fold) if fold > 0 else _rgba(0, 0, 0, -fold),
                               Graphene.Rect().init(x, 0, sw + 0.6, h))
             snap.pop()

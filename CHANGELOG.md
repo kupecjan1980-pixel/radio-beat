@@ -4,6 +4,7 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.1** (2026-11-20) Logo vlevo nahoře ostré: vylepšené logo má velikost obrazovky (3840 px) a kreslí se malé, GTK ho zmenšovalo hrubě (vynechávalo body), takže bylo neostré a zubaté; teď se zmenšuje přes mipmapy (trilineárně), čistě
 - **0.45.0** (2026-11-20) Okna a panely, která se otevírají sama, dohromady zakryjí obal nejvýš 5 % času (3 minuty za hodinu); 95 % času je vidět obal. Okno o skladbě samo jen jednou za 15 minut na 15 s (dřív každé 2 minuty na 20 s), jmeniny 30 s (dřív 2 min), den 15 s, prohlídka panelu jen v celou (už ne v půl) po 15 s na kartu, a okna Měsíce a Slunce, počasí a o Rádiu Beat se střídají: každou hodinu jen jedno z nich, 20 s. Když se myš nehýbe, okna otevřená najetím myší (logo, počasí, jména, skladba, datum, Měsíc) po 6 s zmizí, i když myš na nich pořád stojí, a vrátí se až po pohybu myší; nabídky a panely otevřené kliknutím se zavřou po 30 s bez dotyku
 
 ## 0.44 — Tlačítko SXFI na Sound Blasteru X3
