@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.1"
+APP_VERSION = "0.45.2"
 
 import collections
 import ctypes
@@ -18812,7 +18812,17 @@ class App(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
         theme.add_search_path(os.path.join(HERE, "icons"))
-        for p in (os.path.join(HERE, "logo.png"), os.path.join(HERE, "icons", "hicolor", "256x256", "apps", f"{APP_ID}.png")):
+        # logo-hd.png: the logo AI-enhanced once (1600 px, lossless) and shipped, so it's sharp at once on every
+        # computer whatever the enhancer does (0.45.2, the user: the logo still wasn't sharp)
+        hd = os.path.join(HERE, "logo-hd.png")
+        if os.path.exists(hd):
+            try:
+                self.logo_tex = Gdk.Texture.new_from_filename(hd)
+                self.orig_tex["logo"] = self.logo_tex
+            except GLib.Error:
+                hd = None
+        for p in (() if hd and self.orig_tex.get("logo") else (os.path.join(HERE, "logo.png"),
+                  os.path.join(HERE, "icons", "hicolor", "256x256", "apps", f"{APP_ID}.png"))):
             if os.path.exists(p):
                 self.logo_tex = Gdk.Texture.new_from_filename(p)
                 self.orig_tex["logo"] = self.logo_tex

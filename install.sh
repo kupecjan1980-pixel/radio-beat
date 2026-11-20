@@ -46,6 +46,7 @@ fi
 
 mkdir -p "$DEST" "$(dirname "$BIN")" "$(dirname "$DESKTOP")"
 install -m 644 radio_beat.py radio_beat_hub.py npu_upscale.py recognise.py logo.png days_cz.json titles_cs.json "$DEST/"
+[ -s logo-hd.png ] && install -m 644 logo-hd.png "$DEST/"
 # Fonts like the logo's, for the "Beat Radio" text style (SIL OFL, licences beside them).
 mkdir -p "$DEST/fonts"
 install -m 644 fonts/* "$DEST/fonts/"
