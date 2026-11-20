@@ -4,6 +4,7 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.4** (2026-11-20) Logo ostré doopravdy (ověřeno snímkem obrazovky): GTK kreslilo zmenšené logo přes mezisnímek v poloviční velikosti a ten pak natáhlo na 4K. Teď se kreslí přímo, bod na bod
 - **0.45.3** (2026-11-20) Logo konečně ostré: kreslilo se z 1600 px přes mipmapy, které míchaly menší úroveň (100 px na 114 px místa), a navíc roztažené na výšku. Teď se logo jednou kvalitně zmenší přesně na body obrazovky, které zabírá, kreslí se 1:1 a je čtvercové
 - **0.45.2** (2026-11-20) Logo opravdu ostré: aplikace s sebou nese logo jednou vylepšené AI (1600 px, bezeztrátové PNG, doostřené) a ukazuje ho hned, na každém počítači; dřív čekala na vylepšení za běhu, které se k logu nemuselo dostat
 - **0.45.1** (2026-11-20) Logo vlevo nahoře ostré: vylepšené logo má velikost obrazovky (3840 px) a kreslí se malé, GTK ho zmenšovalo hrubě (vynechávalo body), takže bylo neostré a zubaté; teď se zmenšuje přes mipmapy (trilineárně), čistě

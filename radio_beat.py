@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.3"
+APP_VERSION = "0.45.4"
 
 import collections
 import ctypes
@@ -6206,9 +6206,13 @@ class FlagLogo(Gtk.Widget):
                 self._fit_tex = Gdk.Texture.new_for_pixbuf(pb)
             except (GLib.Error, AttributeError, TypeError, ImportError):
                 self._fit_tex = None
-        tex = self._fit_tex or self.pic
         rect = Graphene.Rect().init(round(x * k) / k, round(y * k) / k, px / k, px / k)
-        snap.append_scaled_texture(tex, Gsk.ScalingFilter.LINEAR if self._fit_tex else Gsk.ScalingFilter.TRILINEAR, rect)
+        if self._fit_tex is not None:
+            # a plain texture node: GSK draws a texture-scale node through an offscreen at the logical size and
+            # stretches that by the screen scale (2x on 4K: soft, measured by rendering the dumped node tree)
+            snap.append_texture(self._fit_tex, rect)
+        else:
+            snap.append_scaled_texture(self.pic, Gsk.ScalingFilter.TRILINEAR, rect)
 
     def do_snapshot(self, snap) -> None:
         if not self.pic:
