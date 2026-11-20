@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.2"
+APP_VERSION = "0.45.3"
 
 import collections
 import ctypes
@@ -6182,12 +6182,33 @@ class FlagLogo(Gtk.Widget):
         return GLib.SOURCE_CONTINUE
 
     def _draw_pic(self, snap, w: float, h: float) -> None:
-        """The enhanced logo is screen-sized (3840 px) and drawn ~70 px: GTK's default linear filter samples
-        that coarsely (rough, soft edges); mipmaps (trilinear) shrink it cleanly (0.45.1, the user: not sharp)."""
-        if isinstance(self.pic, Gdk.Texture):
-            snap.append_scaled_texture(self.pic, Gsk.ScalingFilter.TRILINEAR, Graphene.Rect().init(0, 0, w, h))
-        else:
+        """Square (the widget can be taller than wide: it was stretched) and sharp: the big logo is shrunk once,
+        with a high-quality filter, to exactly the screen pixels it covers and drawn 1:1. Mipmaps (0.45.1) still
+        blended in a smaller level than the target (100 px for 114): soft (0.45.3, the user: still not sharp)."""
+        side = min(w, h)
+        x, y = (w - side) / 2, (h - side) / 2
+        if not isinstance(self.pic, Gdk.Texture):
             self.pic.snapshot(snap, w, h)
+            return
+        native = self.get_native()
+        surf = native.get_surface() if native else None
+        k = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
+        px = max(1, round(side * k))
+        key = (id(self.pic), px)
+        if getattr(self, "_fit_key", None) != key:
+            self._fit_key, self._fit_tex = key, None
+            try:
+                from gi.repository import GdkPixbuf
+                loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+                loader.write(self.pic.save_to_png_bytes().get_data())
+                loader.close()
+                pb = loader.get_pixbuf().scale_simple(px, px, GdkPixbuf.InterpType.HYPER)
+                self._fit_tex = Gdk.Texture.new_for_pixbuf(pb)
+            except (GLib.Error, AttributeError, TypeError, ImportError):
+                self._fit_tex = None
+        tex = self._fit_tex or self.pic
+        rect = Graphene.Rect().init(round(x * k) / k, round(y * k) / k, px / k, px / k)
+        snap.append_scaled_texture(tex, Gsk.ScalingFilter.LINEAR if self._fit_tex else Gsk.ScalingFilter.TRILINEAR, rect)
 
     def do_snapshot(self, snap) -> None:
         if not self.pic:
