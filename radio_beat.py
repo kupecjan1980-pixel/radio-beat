@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.6"
+APP_VERSION = "0.45.7"
 
 import collections
 import ctypes
@@ -19648,16 +19648,30 @@ class App(Adw.Application):
         x3 = boot and self.settings.get("sxfi_wake", True) and x3_port()[0]
         if not (boot and card and (x3 or self.settings.get("optical_wake", False))):
             return
-        for _ in range(30):  # the radio playing first (the receiver then locks on real sound)
-            if any(i.get("properties", {}).get("application.name") == CLIENT_NAME for i in _pactl_json("sink-inputs")):
-                break
+        # Wait until the stream is flowing AND has been steady for a while. At boot it drops out a few
+        # times ("no audio for a while, reconnecting"), and every drop unlocks the Sony again, so a wake
+        # done too early is immediately undone. Only once the sound has run steady do the wake.
+        began = time.monotonic()
+        steady_since = None
+        last_tries = getattr(self, "tries", 0)
+        while time.monotonic() - began < 120:
+            playing = any(i.get("properties", {}).get("application.name") == CLIENT_NAME
+                          for i in _pactl_json("sink-inputs"))
+            now_tries = getattr(self, "tries", 0)
+            if now_tries != last_tries:          # a reconnect just happened -> not steady yet
+                last_tries, steady_since = now_tries, None
+            elif playing:
+                steady_since = steady_since or time.monotonic()
+                if time.monotonic() - steady_since >= 15:
+                    break
+            else:
+                steady_since = None
             time.sleep(1)
-        time.sleep(2)
-        # Clean optical carrier drop only: the SPDIF-Out switch off ~2 s / on — exactly the manual
-        # `amixer` toggle that re-locked the Sony. The X3's SXFI control-port press is unreliable
-        # here (often "neodpovídá na dotaz na SXFI") and the full wake's sample-rate bounce (to
-        # 96 kHz) left the receiver silent / downmixed to stereo at boot, so neither is used now.
-        self.wake_optical_now(wait=True, method="spdif")
+        # One full output re-init: the card profile off for a moment and back on, which actually stops
+        # and restarts the optical transmitter (what the physical SXFI button does, and what re-locks the
+        # Sony). The SPDIF-Out switch / rate bounce only muted the stream and left the receiver silent,
+        # and in method="all" the switch succeeded so the profile re-init was never reached.
+        self.wake_optical_now(wait=True, method="profile")
 
     def _own_volume_at_start(self) -> bool:
         if not self.card_on() and self.settings["volume"] < 1:  # Rádio Beat's own slider left at 0
