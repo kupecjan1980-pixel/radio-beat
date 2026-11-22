@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.5"
+APP_VERSION = "0.45.6"
 
 import collections
 import ctypes
@@ -19653,13 +19653,11 @@ class App(Adw.Application):
                 break
             time.sleep(1)
         time.sleep(2)
-        # The Sony receiver only re-locks when the optical carrier actually drops; the X3's SXFI
-        # control-port double-press is a fast toggle that usually doesn't manage that. So tap the
-        # SXFI control (like the button on the card) and then really bounce the optical carrier
-        # (SPDIF-Out switch off ~2 s, then on — what wakes the receiver by hand).
-        if x3:
-            self.wake_optical_now(wait=True, method="sxfi")
-        self.wake_optical_now(wait=True)
+        # Clean optical carrier drop only: the SPDIF-Out switch off ~2 s / on — exactly the manual
+        # `amixer` toggle that re-locked the Sony. The X3's SXFI control-port press is unreliable
+        # here (often "neodpovídá na dotaz na SXFI") and the full wake's sample-rate bounce (to
+        # 96 kHz) left the receiver silent / downmixed to stereo at boot, so neither is used now.
+        self.wake_optical_now(wait=True, method="spdif")
 
     def _own_volume_at_start(self) -> bool:
         if not self.card_on() and self.settings["volume"] < 1:  # Rádio Beat's own slider left at 0

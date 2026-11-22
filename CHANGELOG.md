@@ -4,6 +4,7 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.6** (2026-11-22) Probuzení optiky po startu zjednodušeno na to, co opravdu funguje: jen čisté vypnutí a zapnutí přepínače „SPDIF-Out“ (nosná optiky na ~2 s zmizí a vrátí se), přesně jako ruční `amixer`, který receiver Sony probral. Dřívější způsob navíc měnil vzorkovací frekvenci na 96 kHz a zkoušel ovládací port SXFI (který tu často „neodpovídá“); podle logu to po startu nechalo zvuk ztlumený nebo jen stereo (ne 5.1). Teď se dělá jen ten spolehlivý přepínač
 - **0.45.5** (2026-11-22) Po startu se optický výstup Sound Blasteru X3 teď probudí doopravdy: samotné dvojí stisknutí SXFI (rychlé přepnutí ovládacího portu) receiver Sony většinou znovu nechytí, tak se po něm navíc na ~2 s shodí nosná optického signálu (přepínač „SPDIF-Out“ vypnout a zapnout) — přesně to, co ho probere i ručně. Dřív se tenhle spolehlivý způsob spouštěl jen při zapnutém „Probudit optický výstup po startu“, teď i pro Sound Blaster po startu
 - **0.45.4** (2026-11-20) Logo ostré doopravdy (ověřeno snímkem obrazovky): GTK kreslilo zmenšené logo přes mezisnímek v poloviční velikosti a ten pak natáhlo na 4K. Teď se kreslí přímo, bod na bod
 - **0.45.3** (2026-11-20) Logo konečně ostré: kreslilo se z 1600 px přes mipmapy, které míchaly menší úroveň (100 px na 114 px místa), a navíc roztažené na výšku. Teď se logo jednou kvalitně zmenší přesně na body obrazovky, které zabírá, kreslí se 1:1 a je čtvercové
