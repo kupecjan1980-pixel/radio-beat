@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.9"
+APP_VERSION = "0.45.10"
 
 import collections
 import ctypes
@@ -2794,14 +2794,16 @@ class X3:
         i = r.find(b"\x5a\x26")
         return r[i + 6] & 1 if i >= 0 and len(r) > i + 6 else None
 
-    def set_sxfi(self, state: int) -> None:
+    def set_sxfi(self, state: int) -> bytes:
         self._send(bytes([0x5A, 0x26, 0x05, 0x07, X3_SXFI, 0x00, state, 0x00]))
-        self._read(1.0)
+        return self._read(1.0)
 
 
-def x3_double_press(say) -> bool | None:
-    """SXFI pressed twice, like the user does by hand: over to the other state and back to where it was.
-    None: no X3 control port here; False: there, but it failed (said why)."""
+def x3_press(say, *states: int) -> bool | None:
+    """Set SXFI to each value in `states`, 5 s apart - blind writes to the X3 control port, the same bytes the
+    SXFI button on the card (or in Creative's phone app) sends. x3_press(say, 1, 0) is the double press at
+    start; x3_press(say, s) is one press (the gear button). Each write's reply is logged so we can see whether
+    the X3 actually takes it. None: no control port here; False: there, but opening/control failed."""
     path, _pid = x3_port()
     if not path:
         return None
@@ -2814,20 +2816,22 @@ def x3_double_press(say) -> bool | None:
         say(f"Sound Blaster X3: ovládání nejde otevřít ({e})")
         return False
     try:
-        # Blind, like the SXFI button on the X3 (or in Creative's phone app): no state is read first - the
-        # X3 here doesn't answer the SXFI query, but it does take the writes. SXFI on (LED magenta), a 5 s
-        # gap, then SXFI off (LED green = 5.1 direct): the optical output re-inits on each change, which is
-        # what re-locks the Sony. Boot state is SXFI off, so this is exactly the two hand presses.
-        x3.set_sxfi(1)
-        time.sleep(5.0)
-        x3.set_sxfi(0)
-        say("Sound Blaster X3: SXFI stisknuto dvakrát (zapnuto → pauza 5 s → vypnuto), jako tlačítko")
+        for i, s in enumerate(states):
+            if i:
+                time.sleep(5.0)
+            resp = x3.set_sxfi(s)
+            say(f"Sound Blaster X3: SXFI = {s}, odpověď: {resp.hex(' ') if resp else '(nic)'}")
         return True
     except OSError as e:
         say(f"Sound Blaster X3: chyba ovládání ({e})")
         return False
     finally:
         x3.close()
+
+
+def x3_double_press(say) -> bool | None:
+    """The startup wake: SXFI on, 5 s gap, SXFI off again - like pressing the button twice by hand."""
+    return x3_press(say, 1, 0)
 
 
 def wake_optical(card: str, sink_name: str, pause_cb, say) -> bool:
@@ -15854,11 +15858,11 @@ class Window(Adw.ApplicationWindow):
         sxfi.set_active(self.app.settings.get("sxfi_wake", True))
         sxfi.connect("notify::active", lambda r, _: self.app.set_look(sxfi_wake=r.get_active()))
         group.add(sxfi)
-        row = Adw.ActionRow(title="Zkouška: dvojí stisk SXFI", subtitle_lines=0, sensitive=bool(x3_path),
-                            subtitle="Tlačítka X3 se přepnou a vrátí (zelená → purpurová/oranžová → zelená)"
-                            if x3_path else "X3 nenalezen")
+        row = Adw.ActionRow(title="Stisknout tlačítko SXFI", subtitle_lines=0, sensitive=bool(x3_path),
+                            subtitle="Jeden stisk, stejně jako tlačítko SXFI na kartě nebo v Creative appce "
+                            "(přepne SXFI, LED se změní)" if x3_path else "X3 nenalezen")
         btn = Gtk.Button(label="Zkusit", valign=Gtk.Align.CENTER)
-        btn.connect("clicked", lambda _b: self.app.wake_optical_now(method="sxfi"))
+        btn.connect("clicked", lambda _b: self.app.sxfi_press())
         row.add_suffix(btn)
         row.set_activatable_widget(btn)
         group.add(row)
@@ -18764,6 +18768,7 @@ class App(Adw.Application):
         self.last_audio = time.monotonic()  # when playback last moved on
         self.last_pos = None
         self.tries = 0  # reconnects since audio last flowed
+        self._sxfi_on = False  # assumed SXFI state for the gear-menu single press (boot = off)
         self.alt = 0  # streams moved on from the chosen one (backup servers)
         self.last_reconnect = 0.0
         self.quitting = False
@@ -19709,6 +19714,13 @@ class App(Adw.Application):
             return False, f"Nejde: {sink_desc(sink) if sink else 'žádný výstup'} není optický " \
                           "ani Sound Blaster"
         return True, sink_desc(sink)
+
+    def sxfi_press(self) -> None:
+        """One press of the SXFI button, like the button on the X3 (or in Creative's phone app): flip the
+        assumed SXFI state and set it (blind write; the X3 here won't answer a state query). Gear 'Zkusit'."""
+        self._sxfi_on = not getattr(self, "_sxfi_on", False)
+        s = 1 if self._sxfi_on else 0
+        threading.Thread(target=lambda: x3_press(self._say, s), daemon=True).start()
 
     def wake_optical_now(self, wait: bool = False, otherwise=None, method: str = "all") -> None:
         """Like pressing the Sound Blaster's SXFI / line out button: the optical signal off and on again.
