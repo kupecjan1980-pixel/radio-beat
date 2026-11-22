@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.12"
+APP_VERSION = "0.45.13"
 
 import collections
 import ctypes
@@ -2772,8 +2772,11 @@ class X3:
         return out
 
     def _unlock(self) -> None:
-        self._send(b"\x5a\x03\x00")  # ping: answered only when already in command mode
-        if self._read(0.6).startswith(b"\x5a"):
+        # Ping, answered only when already in command mode. It MUST end in CR LF, as Creative's tool sends it:
+        # in text mode (how the X3 comes up after boot) a bare 5A 03 00 stays in its line buffer and the
+        # following "whoareyou" then arrives as garbage, gets no challenge, and nothing is ever unlocked.
+        self._send(b"\x5a\x03\x00\r\n")
+        if b"\x5a\x03" in self._read(0.8):
             return
         self._send(b"whoareyou\r\n")
         resp = self._read(2.0)
@@ -2784,8 +2787,13 @@ class X3:
             self._send(b"unlock" + iv + _aes_gcm(header + X3_KEY + pid, iv[:12], nonce) + b"\r\n")
             if b"unlock_OK" not in self._read(2.0):
                 raise OSError("the X3 refused the unlock")
+        else:
+            raise OSError(f"the X3 sent no unlock challenge ({resp[:16].hex(' ') or 'nothing'})")
         self._send(b"SW_MODE1\r\n")
         self._read(0.5)
+        self._send(b"\x5a\x03\x00")
+        if not self._read(0.8).startswith(b"\x5a"):
+            raise OSError("the X3 didn't answer after unlocking")
 
     def sxfi(self) -> int | None:
         """SXFI's state (0/1) as the X3 reports it, None if it didn't answer."""
@@ -2799,7 +2807,15 @@ class X3:
         return self._read(1.0)
 
 
-def x3_toggle(say, presses: int, gap: float = 5.0) -> bool | None:
+_X3_LOCK = threading.Lock()  # one conversation with the X3 at a time (overlapping ones garble each other)
+
+
+def x3_toggle(say, presses: int, gap: float = 5.0, retry_s: float = 15.0) -> bool | None:
+    with _X3_LOCK:
+        return _x3_toggle(say, presses, gap, retry_s)
+
+
+def _x3_toggle(say, presses: int, gap: float = 5.0, retry_s: float = 15.0) -> bool | None:
     """Press SXFI like the button on the card: each press flips the state the X3 reports (read first; the
     writes alone are blind). presses=2 is the double press at start (over and back, two real changes, ending
     where it was); presses=1 is the gear button. Sending fixed values was wrong: '1' while SXFI was already on
@@ -2807,14 +2823,22 @@ def x3_toggle(say, presses: int, gap: float = 5.0) -> bool | None:
     path, _pid = x3_port()
     if not path:
         return None
-    try:
-        x3 = X3(path)
-    except PermissionError:
-        say(f"Sound Blaster X3: bez přístupu k {path} (oprávnění dá Handheld Control, nebo pravidlo udev)")
-        return False
-    except OSError as e:
-        say(f"Sound Blaster X3: ovládání nejde otevřít ({e})")
-        return False
+    # Right after boot the X3 may not answer yet (ModemManager probing its port, or the card still starting):
+    # keep trying for retry_s instead of pressing blind into a session that never opened.
+    began = time.monotonic()
+    while True:
+        try:
+            x3 = X3(path)
+            break
+        except PermissionError:
+            say(f"Sound Blaster X3: bez přístupu k {path} (oprávnění dá Handheld Control, nebo pravidlo udev)")
+            return False
+        except OSError as e:
+            if time.monotonic() - began >= retry_s:
+                say(f"Sound Blaster X3: ovládání nejde otevřít ({e}), vzdávám to po {int(retry_s)} s")
+                return False
+            say(f"Sound Blaster X3: zatím neodpovídá ({e}), zkusím znovu")
+            time.sleep(5.0)
     try:
         now = x3.sxfi()
         say(f"Sound Blaster X3: SXFI je teď {now if now is not None else '? (bez odpovědi, beru 1)'}")
@@ -2868,7 +2892,7 @@ def x3_press(say, *states: int) -> bool | None:
 
 def x3_double_press(say) -> bool | None:
     """The startup wake: two presses 5 s apart, like pressing the button twice by hand (over and back)."""
-    return x3_toggle(say, 2)
+    return x3_toggle(say, 2, retry_s=90.0)
 
 
 def wake_optical(card: str, sink_name: str, pause_cb, say) -> bool:

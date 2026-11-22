@@ -4,6 +4,8 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.13** (2026-11-22) SXFI po startu opravdu: v prvních minutách po startu X3 na ovládání vůbec neodpovídal (port mu „osahával“ ModemManager jako modem — opravuje Handheld Control 0.10.139, který ho ModemManageru zakáže), takže stisky šly naprázdno. Teď aplikace pozná, že se X3 neodemkl, a zkouší to znovu (po startu až 90 s, tlačítko v nastavení 15 s) místo mačkání naslepo. Úvodní dotaz posílá s koncem řádku jako Creative nástroj, a stisky se nikdy nepřekrývají (dřív se při rychlém klikání pobily a X3 odemknutí odmítl)
+
 - **0.45.12** (2026-11-22) SXFI z aplikace konečně dělá to, co tlačítko na kartě: nejdřív přečte, v jakém stavu SXFI je, a pak ho přepne (stisk = změna stavu). Dřív posílala pevné hodnoty: po startu „zapnout, pak vypnout“ — jenže SXFI už zapnuté bylo, takže první příkaz neudělal nic a druhý SXFI vypnul (jedna změna místo dvou a karta skončila ve špatném stavu); tlačítko v nastavení poprvé posílalo „zapnout“, což taky nic neudělalo. Teď po startu dva stisky 5 s od sebe (tam a zpátky, skončí tam, kde bylo) a tlačítko v nastavení jeden skutečný stisk. Do logu jde stav před i po každém stisku
 
 - **0.45.11** (2026-11-22) Ikona aplikace v nabídce programů teď ostrá: generovala se z logo.png (400 px) a u větších velikostí (256/512) se zvětšovala a byla rozmazaná; teď se bere z logo-hd.png (1600 px) a jen zmenšuje
