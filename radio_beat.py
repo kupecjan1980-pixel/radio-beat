@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.13"
+APP_VERSION = "0.45.14"
 
 import collections
 import ctypes
@@ -21319,85 +21319,34 @@ class App(Adw.Application):
             return None
 
     def _make_icons(self) -> None:
-        logo = os.path.join(HERE, "logo.png")
-        if not os.path.exists(logo) or not self.enhancer.ffmpeg:
+        """Installs the app icon drawn by tools/make_app_icon.py (appicon/, BEAT + RADIO on a dark
+        rounded square) in every size. It used to be made here at run time (the whole logo, with
+        "Classic Rock", AI-sharpened onto a white square), which was unreadable at launcher sizes
+        and overwrote what install.sh had put there."""
+        src = os.path.join(HERE, "appicon")
+        if not os.path.isdir(src):
             return
-        try:
-            with open(self.ICON_MARK) as f:
-                mark = json.load(f)
-        except (OSError, ValueError):
-            mark = {}
-        if mark.get("logo") == self._sha(logo) and mark.get("256") == self._sha(self._icon_paths(256)[0]):
-            self.icon_text = "Ikona aplikace: AI zostřená ve všech velikostech."
-            self._enhance_status_changed("")
-            return
-        with open(logo, "rb") as f:
-            data = f.read()
-        tex = Gdk.Texture.new_from_filename(logo)
-        w, h = tex.get_width(), tex.get_height()
-        self.icon_text = "Ikona aplikace: zostřuje se…"
-        self._enhance_status_changed("")
-        self.enhancer.request("icon", f"icon:{self._sha(logo)}", data, (w, h), (w * 4, h * 4),
-                              lambda pic: threading.Thread(target=self._icons_from, args=(pic, logo),
-                                                           daemon=True).start())
-
-    def _icons_from(self, master: bytes, logo: str) -> None:
-        """Every size from the master (in a thread: ffmpeg); drawn on the main thread."""
-        work = tempfile.mkdtemp(prefix="radio-beat-esr-")
-        try:
-            src = os.path.join(work, "master.jpg")
-            with open(src, "wb") as f:
-                f.write(master)
-            inner = {}
-            for size in self.ICON_SIZES:
-                px = max(1, round(size * 0.84))
-                out = os.path.join(work, f"{size}.png")
-                vf = f"scale={px}:{px}:flags=lanczos" + (",unsharp=3:3:0.6:3:3:0" if size <= 48 else "")
-                if self.enhancer._ff(["-i", src], vf, out):
-                    with open(out, "rb") as f:
-                        inner[size] = f.read()
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
-        if len(inner) == len(self.ICON_SIZES):
-            GLib.idle_add(self._draw_icons, inner, logo)
-
-    def _draw_icons(self, inner: dict, logo: str) -> bool:
-        renderer = Gsk.CairoRenderer.new()
-        renderer.realize_for_display(Gdk.Display.get_default())
-        try:
-            for size, data in inner.items():
-                pic = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
-                snap = Gtk.Snapshot()
-                pad = size * 0.04
-                box = Graphene.Rect().init(pad, pad, size - 2 * pad, size - 2 * pad)
-                rr = Gsk.RoundedRect()
-                rr.init_from_rect(box, size * 0.2)
-                snap.push_rounded_clip(rr)
-                snap.append_color(_rgba(255, 255, 255, 1.0), box)
-                off = (size - pic.get_width()) / 2
-                snap.append_texture(pic, Graphene.Rect().init(off, off, pic.get_width(), pic.get_height()))
-                snap.pop()
-                out = renderer.render_texture(snap.to_node(), Graphene.Rect().init(0, 0, size, size))
-                for path in self._icon_paths(size):
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    out.save_to_png(path)
-        except (GLib.Error, OSError) as e:
-            print(f"icons: {e}", file=sys.stderr)
-            return False
-        finally:
-            renderer.unrealize()
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(self.ICON_MARK, "w") as f:
-            json.dump({"logo": self._sha(logo), "256": self._sha(self._icon_paths(256)[0])}, f)
-        # Desktops read the icons from their caches.
-        for cmd in (["gtk-update-icon-cache", "-q", "-t", self.ICON_DIR], ["kbuildsycoca6"], ["kbuildsycoca5"]):
-            if shutil.which(cmd[0]):
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if cmd[0].startswith("kbuildsycoca"):
-                    break
-        self.icon_text = "Ikona aplikace: AI zostřená ve všech velikostech (nové ikony po příštím spuštění)."
-        self._enhance_status_changed("")
-        return False
+        changed = False
+        for size in self.ICON_SIZES:
+            pic = os.path.join(src, f"{APP_ID}-{size}.png")
+            if not os.path.exists(pic):
+                continue
+            for path in self._icon_paths(size):
+                if self._sha(path) != self._sha(pic):
+                    try:
+                        os.makedirs(os.path.dirname(path), exist_ok=True)
+                        shutil.copyfile(pic, path)
+                        changed = True
+                    except OSError as e:
+                        print(f"icons: {e}", file=sys.stderr)
+        if changed:
+            # Desktops read the icons from their caches.
+            for cmd in (["gtk-update-icon-cache", "-q", "-t", self.ICON_DIR], ["kbuildsycoca6"], ["kbuildsycoca5"]):
+                if shutil.which(cmd[0]):
+                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if cmd[0].startswith("kbuildsycoca"):
+                        break
+        self.icon_text = ""
 
 
 LOG = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "radio-beat",
