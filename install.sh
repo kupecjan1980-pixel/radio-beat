@@ -53,12 +53,13 @@ install -m 644 fonts/* "$DEST/fonts/"
 # Which commit this is (get.sh passes it; a checkout knows it), for the update check.
 echo "${RADIO_BEAT_VERSION:-$(git rev-parse HEAD 2>/dev/null || echo local)}" > "$DEST/VERSION"
 HAVE_CAIRO=$(python3 -c 'import cairo' 2>/dev/null && echo 1 || true)
+ICON_SRC=logo.png; [ -s logo-hd.png ] && ICON_SRC=logo-hd.png  # 1600px -> sharp icons (logo.png is only 400px, upscaled = blurry)
 for size in 48 64 128 256 512; do
     mkdir -p "$ICONS/${size}x${size}/apps" "$DEST/icons/hicolor/${size}x${size}/apps"
     if [ -n "$HAVE_CAIRO" ]; then
-        python3 make_icon.py logo.png "$ICONS/${size}x${size}/apps/$APP_ID.png" "$size"
+        python3 make_icon.py "$ICON_SRC" "$ICONS/${size}x${size}/apps/$APP_ID.png" "$size"
     else
-        cp logo.png "$ICONS/${size}x${size}/apps/$APP_ID.png"  # square already; themes scale it
+        cp "$ICON_SRC" "$ICONS/${size}x${size}/apps/$APP_ID.png"  # square already; themes scale it
     fi
     cp "$ICONS/${size}x${size}/apps/$APP_ID.png" "$DEST/icons/hicolor/${size}x${size}/apps/"
 done

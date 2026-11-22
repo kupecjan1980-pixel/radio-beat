@@ -4,6 +4,8 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.11** (2026-11-22) Ikona aplikace v nabídce programů teď ostrá: generovala se z logo.png (400 px) a u větších velikostí (256/512) se zvětšovala a byla rozmazaná; teď se bere z logo-hd.png (1600 px) a jen zmenšuje
+
 - **0.45.10** (2026-11-22) Tlačítko v nastavení „Stisknout tlačítko SXFI" teď udělá JEDEN stisk (přepne SXFI), přesně jako tlačítko na kartě nebo v Creative appce (ne dvojstisk). Po startu zůstává dvojstisk s 5s pauzou. Odpověď X3 na každý příkaz se teď loguje (ať je vidět, jestli ho karta vůbec bere). Samostatný nástroj tools/x3_sxfi.py (--on/--off/--toggle) k ověření přímo na hardwaru
 - **0.45.9** (2026-11-22) Pauza mezi oběma stisky SXFI po startu prodloužena na 5 s (dřív 2,5 s), ať má receiver Sony dost času signál ztratit a znovu chytit. Přepínač celé funkce je v nastavení (ozubené kolo) „Po startu stisknout SXFI dvakrát" (zapnuto ve výchozím stavu) — v popisku teď zmíněná ta 5s pauza
 - **0.45.8** (2026-11-22) Probuzení zvuku po startu teď dělá přesně to, co ručně funguje: dvojí stisk tlačítka SXFI na Sound Blasteru X3 (zapnout → pauza 2,5 s → vypnout), naslepo přes ovládací port, jako tlačítko na kartě nebo v Creative appce na telefonu. Už se nečte stav SXFI (na ten X3 tady neodpovídá, kvůli tomu to dřív selhalo „neodpovídá na dotaz na SXFI") a hlavně se zahodilo přepínání profilu karty (set-card-profile off/on), které odpojovalo a znovu připojovalo celé USB zvukové zařízení a nejspíš zasekávalo PipeWire i plochu po startu
