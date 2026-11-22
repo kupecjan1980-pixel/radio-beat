@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.8"
+APP_VERSION = "0.45.9"
 
 import collections
 import ctypes
@@ -2815,13 +2815,13 @@ def x3_double_press(say) -> bool | None:
         return False
     try:
         # Blind, like the SXFI button on the X3 (or in Creative's phone app): no state is read first - the
-        # X3 here doesn't answer the SXFI query, but it does take the writes. SXFI on (LED magenta), a 2.5 s
+        # X3 here doesn't answer the SXFI query, but it does take the writes. SXFI on (LED magenta), a 5 s
         # gap, then SXFI off (LED green = 5.1 direct): the optical output re-inits on each change, which is
         # what re-locks the Sony. Boot state is SXFI off, so this is exactly the two hand presses.
         x3.set_sxfi(1)
-        time.sleep(2.5)
+        time.sleep(5.0)
         x3.set_sxfi(0)
-        say("Sound Blaster X3: SXFI stisknuto dvakrát (zapnuto → pauza 2,5 s → vypnuto), jako tlačítko")
+        say("Sound Blaster X3: SXFI stisknuto dvakrát (zapnuto → pauza 5 s → vypnuto), jako tlačítko")
         return True
     except OSError as e:
         say(f"Sound Blaster X3: chyba ovládání ({e})")
@@ -15847,8 +15847,8 @@ class Window(Adw.ApplicationWindow):
         can, what = self.app.optical_state()
         x3_path = x3_port()[0]
         sxfi = Adw.SwitchRow(title="Po startu stisknout SXFI dvakrát",
-                             subtitle="Jako dvojí stisk tlačítka SXFI na Sound Blasteru X3 rukou: receiver Sony "
-                                      "pak znovu chytí optický signál. "
+                             subtitle="Jako dvojí stisk tlačítka SXFI na Sound Blasteru X3 rukou (zapnout, 5 s "
+                                      "pauza, zase vypnout): receiver Sony pak znovu chytí optický signál. "
                                       + (f"X3 nalezen ({x3_path})" if x3_path else "X3 (jeho ovládací port) nenalezen"),
                              subtitle_lines=0)
         sxfi.set_active(self.app.settings.get("sxfi_wake", True))
