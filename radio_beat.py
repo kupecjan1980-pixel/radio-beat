@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.11"
+APP_VERSION = "0.45.12"
 
 import collections
 import ctypes
@@ -2799,6 +2799,43 @@ class X3:
         return self._read(1.0)
 
 
+def x3_toggle(say, presses: int, gap: float = 5.0) -> bool | None:
+    """Press SXFI like the button on the card: each press flips the state the X3 reports (read first; the
+    writes alone are blind). presses=2 is the double press at start (over and back, two real changes, ending
+    where it was); presses=1 is the gear button. Sending fixed values was wrong: '1' while SXFI was already on
+    did nothing, so the start sequence 1,0 made one change and left SXFI off."""
+    path, _pid = x3_port()
+    if not path:
+        return None
+    try:
+        x3 = X3(path)
+    except PermissionError:
+        say(f"Sound Blaster X3: bez přístupu k {path} (oprávnění dá Handheld Control, nebo pravidlo udev)")
+        return False
+    except OSError as e:
+        say(f"Sound Blaster X3: ovládání nejde otevřít ({e})")
+        return False
+    try:
+        now = x3.sxfi()
+        say(f"Sound Blaster X3: SXFI je teď {now if now is not None else '? (bez odpovědi, beru 1)'}")
+        if now is None:
+            now = 1
+        for i in range(presses):
+            if i:
+                time.sleep(gap)
+            now = 1 - now
+            resp = x3.set_sxfi(now)
+            after = x3.sxfi()
+            say(f"Sound Blaster X3: stisk {i + 1}: SXFI = {now}, odpověď: {resp.hex(' ') if resp else '(nic)'}, "
+                f"X3 hlásí {after if after is not None else '?'}")
+        return True
+    except OSError as e:
+        say(f"Sound Blaster X3: chyba ovládání ({e})")
+        return False
+    finally:
+        x3.close()
+
+
 def x3_press(say, *states: int) -> bool | None:
     """Set SXFI to each value in `states`, 5 s apart - blind writes to the X3 control port, the same bytes the
     SXFI button on the card (or in Creative's phone app) sends. x3_press(say, 1, 0) is the double press at
@@ -2830,8 +2867,8 @@ def x3_press(say, *states: int) -> bool | None:
 
 
 def x3_double_press(say) -> bool | None:
-    """The startup wake: SXFI on, 5 s gap, SXFI off again - like pressing the button twice by hand."""
-    return x3_press(say, 1, 0)
+    """The startup wake: two presses 5 s apart, like pressing the button twice by hand (over and back)."""
+    return x3_toggle(say, 2)
 
 
 def wake_optical(card: str, sink_name: str, pause_cb, say) -> bool:
@@ -19716,11 +19753,9 @@ class App(Adw.Application):
         return True, sink_desc(sink)
 
     def sxfi_press(self) -> None:
-        """One press of the SXFI button, like the button on the X3 (or in Creative's phone app): flip the
-        assumed SXFI state and set it (blind write; the X3 here won't answer a state query). Gear 'Zkusit'."""
-        self._sxfi_on = not getattr(self, "_sxfi_on", False)
-        s = 1 if self._sxfi_on else 0
-        threading.Thread(target=lambda: x3_press(self._say, s), daemon=True).start()
+        """One press of the SXFI button, like the button on the X3 (or in Creative's phone app): flips the
+        state the X3 reports. Gear 'Stisknout tlačítko SXFI'."""
+        threading.Thread(target=lambda: x3_toggle(self._say, 1), daemon=True).start()
 
     def wake_optical_now(self, wait: bool = False, otherwise=None, method: str = "all") -> None:
         """Like pressing the Sound Blaster's SXFI / line out button: the optical signal off and on again.
