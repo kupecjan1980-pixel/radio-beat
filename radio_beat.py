@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.7"
+APP_VERSION = "0.45.8"
 
 import collections
 import ctypes
@@ -2814,16 +2814,15 @@ def x3_double_press(say) -> bool | None:
         say(f"Sound Blaster X3: ovládání nejde otevřít ({e})")
         return False
     try:
-        was = x3.sxfi()
-        if was is None:
-            say("Sound Blaster X3: neodpovídá na dotaz na SXFI")
-            return False
-        x3.set_sxfi(1 - was)
-        time.sleep(1.2)
-        x3.set_sxfi(was)
-        now = x3.sxfi()
-        say(f"Sound Blaster X3: SXFI stisknuto dvakrát ({was} → {1 - was} → {now})")
-        return now == was
+        # Blind, like the SXFI button on the X3 (or in Creative's phone app): no state is read first - the
+        # X3 here doesn't answer the SXFI query, but it does take the writes. SXFI on (LED magenta), a 2.5 s
+        # gap, then SXFI off (LED green = 5.1 direct): the optical output re-inits on each change, which is
+        # what re-locks the Sony. Boot state is SXFI off, so this is exactly the two hand presses.
+        x3.set_sxfi(1)
+        time.sleep(2.5)
+        x3.set_sxfi(0)
+        say("Sound Blaster X3: SXFI stisknuto dvakrát (zapnuto → pauza 2,5 s → vypnuto), jako tlačítko")
+        return True
     except OSError as e:
         say(f"Sound Blaster X3: chyba ovládání ({e})")
         return False
@@ -19667,11 +19666,13 @@ class App(Adw.Application):
             else:
                 steady_since = None
             time.sleep(1)
-        # One full output re-init: the card profile off for a moment and back on, which actually stops
-        # and restarts the optical transmitter (what the physical SXFI button does, and what re-locks the
-        # Sony). The SPDIF-Out switch / rate bounce only muted the stream and left the receiver silent,
-        # and in method="all" the switch succeeded so the profile re-init was never reached.
-        self.wake_optical_now(wait=True, method="profile")
+        # Press SXFI twice, exactly like the button on the X3 (or in Creative's phone app): the only thing
+        # that has ever re-locked the Sony here. This is light (two serial writes to the X3), touches no
+        # audio device, and does NOT churn PipeWire the way the old profile re-init did.
+        if x3:
+            self.wake_optical_now(wait=True, method="sxfi")
+        elif self.settings.get("optical_wake", False):
+            self.wake_optical_now(wait=True, method="profile")
 
     def _own_volume_at_start(self) -> bool:
         if not self.card_on() and self.settings["volume"] < 1:  # Rádio Beat's own slider left at 0
