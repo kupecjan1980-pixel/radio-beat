@@ -4,6 +4,8 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.17** (2026-11-23) Padající zimní motivy teď všechny geometrické: „jinovatka“ (třetina zimních motivů) byla pořád hvězdička z tenkých čar — teď je to menší ledově modrý krystal stejného druhu jako vločky. (V listopadu se už přimíchávají motivy zimy, proto byly ty čárové vidět)
+
 - **0.45.16** (2026-11-23) Hezčí vločky: místo šesti čar s čárkovými větvičkami teď plné geometrické krystaly — šestiúhelníková destička uprostřed s vybroušeným kroužkem, fazetová ramena se špičkami a tři druhy jako ve skutečnosti (hvězdice s větvičkami zakončenými destičkami, destička s krátkými rameny, kapradinka s jemnými větvičkami). Tenký tmavší okraj, aby byly vidět i na světlém obalu. Stejné krystaly i v obrázku počasí (sněžení, mrznoucí déšť), o třetinu větší, ať je tvar poznat
 
 - **0.45.15** (2026-11-23) Ikona v nabídce programů ostrá: instalují se jen velké velikosti (128/256/512). Na obrazovce se zvětšením 2× si nabídka brala malou ikonu (např. 48 px) a roztahovala ji — proto byla rozmazaná, i když samotná ikona ostrá je. Velkou jen zmenší, a to zůstane ostré (stejně jako u Dune 2000). Staré malé ikony aplikace při startu smaže

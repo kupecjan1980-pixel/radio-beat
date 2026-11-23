@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.16"
+APP_VERSION = "0.45.17"
 
 import collections
 import ctypes
@@ -10377,12 +10377,11 @@ class SeasonDecor:
             s.append_stroke(pb.to_path(), st, _rgba(120, 170, 215, 0.9 * color.alpha))
 
     @staticmethod
-    def _frost(s, rng, size, color, _sea):
-        """Frost crystals: a star of fine needles."""
-        for _ in range(rng.randint(7, 12)):
-            a = rng.uniform(0, 2 * math.pi)
-            l = size * rng.uniform(0.2, 0.55)
-            SeasonDecor._line(s, [(0, 0), (l * math.cos(a), l * math.sin(a))], max(0.7, size * 0.02), color)
+    def _frost(s, rng, size, color, sea):
+        """Frost: a small icy crystal of the same geometric kind as the flakes (it used to be a star of thin
+        needles, drawn as plain lines), a touch smaller and pale blue."""
+        ice = _rgba(222, 240, 255, color.alpha)
+        SeasonDecor._flake(s, rng, size * rng.uniform(0.7, 0.85), ice, sea)
 
     @staticmethod
     def _blossom(s, rng, size, color, _sea):
