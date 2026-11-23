@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.14"
+APP_VERSION = "0.45.15"
 
 import collections
 import ctypes
@@ -21298,7 +21298,8 @@ class App(Adw.Application):
     # clean at 16 px as at 512. Made once; again when the logo changes or an
     # update put the plain icons back.
 
-    ICON_SIZES = (16, 22, 24, 32, 48, 64, 96, 128, 256, 512)
+    ICON_SIZES = (128, 256, 512)   # only big ones: a 2x screen stretches small icons (blurry), shrinks big ones (sharp)
+    ICON_SMALL = (16, 22, 24, 32, 48, 64, 96)
     ICON_DIR = os.path.join(os.path.expanduser("~/.local/share/icons"), "hicolor")
     ICON_MARK = os.path.join(DATA_DIR, "icons.json")
 
@@ -21327,6 +21328,14 @@ class App(Adw.Application):
         if not os.path.isdir(src):
             return
         changed = False
+        for size in self.ICON_SMALL:          # left by older versions; launchers would pick and stretch them
+            for path in self._icon_paths(size):
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                        changed = True
+                    except OSError:
+                        pass
         for size in self.ICON_SIZES:
             pic = os.path.join(src, f"{APP_ID}-{size}.png")
             if not os.path.exists(pic):

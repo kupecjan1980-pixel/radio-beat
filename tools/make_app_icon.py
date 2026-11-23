@@ -6,7 +6,7 @@ Usage: tools/make_app_icon.py   (needs cairo + ImageMagick; run from the repo ro
 import math, os, subprocess, tempfile, cairo
 
 APP_ID = "local.hanis.RadioBeat"
-SIZES = [16, 22, 24, 32, 48, 64, 96, 128, 256, 512]
+SIZES = [128, 256, 512]   # only big sizes (see install.sh)
 M = 1024
 
 tmp = tempfile.mkdtemp()

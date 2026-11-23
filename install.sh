@@ -55,7 +55,11 @@ echo "${RADIO_BEAT_VERSION:-$(git rev-parse HEAD 2>/dev/null || echo local)}" > 
 # App icon: BEAT + RADIO on a dark rounded square, drawn by tools/make_app_icon.py (appicon/).
 mkdir -p "$DEST/appicon"
 install -m 644 appicon/*.png "$DEST/appicon/"
-for size in 16 22 24 32 48 64 96 128 256 512; do
+# Only big sizes: on a 2x-scaled screen a launcher stretches a small one (blurry) but shrinks a big one (sharp).
+for size in 16 22 24 32 48 64 96; do
+    rm -f "$ICONS/${size}x${size}/apps/$APP_ID.png" "$DEST/icons/hicolor/${size}x${size}/apps/$APP_ID.png"
+done
+for size in 128 256 512; do
     mkdir -p "$ICONS/${size}x${size}/apps" "$DEST/icons/hicolor/${size}x${size}/apps"
     install -m 644 "appicon/$APP_ID-$size.png" "$ICONS/${size}x${size}/apps/$APP_ID.png"
     install -m 644 "appicon/$APP_ID-$size.png" "$DEST/icons/hicolor/${size}x${size}/apps/$APP_ID.png"

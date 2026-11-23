@@ -4,6 +4,8 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.15** (2026-11-23) Ikona v nabídce programů ostrá: instalují se jen velké velikosti (128/256/512). Na obrazovce se zvětšením 2× si nabídka brala malou ikonu (např. 48 px) a roztahovala ji — proto byla rozmazaná, i když samotná ikona ostrá je. Velkou jen zmenší, a to zůstane ostré (stejně jako u Dune 2000). Staré malé ikony aplikace při startu smaže
+
 - **0.45.14** (2026-11-23) Nová ikona aplikace: velké bílé „BEAT“ nad červeným pruhem „RADIO“ na tmavém zaobleném čtverci, čitelná i v malé velikosti v nabídce programů a na liště (dřív celé logo včetně „Classic Rock“ zmenšené do bílého čtverečku, v malé velikosti nečitelné). A hlavně se už nepřepisuje: aplikace si dřív při každém spuštění sama vyráběla ikony ze starého loga (400 px) a přepsala ty z instalace — proto zůstávala ikona špatná i po 0.45.11. Ikony jsou teď hotové v appicon/ (kreslí je tools/make_app_icon.py)
 
 - **0.45.13** (2026-11-22) SXFI po startu opravdu: v prvních minutách po startu X3 na ovládání vůbec neodpovídal (port mu „osahával“ ModemManager jako modem — opravuje Handheld Control 0.10.139, který ho ModemManageru zakáže), takže stisky šly naprázdno. Teď aplikace pozná, že se X3 neodemkl, a zkouší to znovu (po startu až 90 s, tlačítko v nastavení 15 s) místo mačkání naslepo. Úvodní dotaz posílá s koncem řádku jako Creative nástroj, a stisky se nikdy nepřekrývají (dřív se při rychlém klikání pobily a X3 odemknutí odmítl)
