@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.15"
+APP_VERSION = "0.45.16"
 
 import collections
 import ctypes
@@ -10229,6 +10229,67 @@ def season_text(clock_bytes: int = None) -> str:
     return text
 
 
+def flake_shapes(rng, R: float) -> tuple[list, list]:
+    """A geometric snowflake round (0, 0), radius R: ([solid polygons], [ring polygons: hexagon outlines drawn
+    even-odd, i.e. a plate with a hole]). Three crystal types like real ones: a branched star (side branches
+    tipped with little plates), a plate (big hexagon, short arms ending in plates) and a fern (many fine
+    branches shortening to the tip). All six arms the same, as in nature."""
+    kind = rng.choice(("star", "star", "plate", "fern"))
+    solid, rings = [], []
+
+    def rot(pts, a):
+        ca, sa = math.cos(a), math.sin(a)
+        return [(x * ca - y * sa, x * sa + y * ca) for x, y in pts]
+
+    def hexagon(cx, cy, r, a0=0.0):
+        return [(cx + r * math.cos(a0 + math.pi / 3 * i), cy + r * math.sin(a0 + math.pi / 3 * i)) for i in range(6)]
+
+    def bar(x0, x1, w, a=0.0, ox=0.0, oy=0.0, tip=True):
+        """A faceted bar along x from x0 to x1 (pointed end), turned by a, moved to (ox, oy)."""
+        end = [(x1 - w * 1.6, w), (x1, 0), (x1 - w * 1.6, -w)] if tip else [(x1, w), (x1, -w)]
+        pts = [(x0, -w * 0.9), (x0, w * 0.9)] + end
+        return [(ox + x, oy + y) for x, y in rot(pts, a)]
+
+    arm = []
+    w = R * (0.055 if kind != "fern" else 0.045)
+    if kind == "star":
+        core = R * 0.2
+        arm.append(bar(core * 0.6, R, w))
+        n = rng.choice((2, 3))
+        for i in range(n):
+            f = 0.38 + 0.42 * i / max(1, n - 1) * rng.uniform(0.92, 1.05)
+            L = R * (0.36 - 0.11 * i) * rng.uniform(0.9, 1.1)
+            for side in (-1, 1):
+                a = side * math.pi / 3
+                arm.append(bar(0, L, w * 0.75, a, R * f, 0))
+                if i == 0 and rng.random() < 0.7:   # a little plate at the first branches' tips
+                    arm.append(hexagon(R * f + L * math.cos(a), L * math.sin(a), w * 1.6, math.pi / 6))
+        arm.append(hexagon(R * 0.93, 0, w * 1.5, math.pi / 6))
+        solid += [hexagon(0, 0, core, math.pi / 6)]
+        rings += [hexagon(0, 0, core * 0.62, math.pi / 6)]
+    elif kind == "plate":
+        core = R * rng.uniform(0.42, 0.5)
+        solid += [hexagon(0, 0, core, math.pi / 6)]
+        rings += [hexagon(0, 0, core * 0.78, math.pi / 6), hexagon(0, 0, core * 0.42, math.pi / 6)]
+        arm.append(bar(core * 0.8, R * 0.86, w * 1.1, tip=False))
+        arm.append(hexagon(R * 0.86, 0, R * 0.13, math.pi / 6))
+        arm.append(bar(core * 0.25, core * 0.9, w * 0.45, tip=False))   # a ridge on the plate
+    else:  # fern
+        core = R * 0.14
+        arm.append(bar(core * 0.5, R, w))
+        n = 5
+        for i in range(n):
+            f = 0.3 + 0.6 * i / (n - 1)
+            L = R * 0.3 * (1 - f) ** 0.8 + R * 0.04
+            for side in (-1, 1):
+                arm.append(bar(0, L, w * 0.6, side * math.pi / 3, R * f, 0))
+        solid += [hexagon(0, 0, core, math.pi / 6)]
+    for k in range(6):
+        a = math.pi / 3 * k
+        solid += [rot(poly, a) for poly in arm]
+    return solid, rings
+
+
 class SeasonDecor:
     """The season's (and special days') motifs, each drawn round (0, 0) at a given size: the snow's pictures."""
 
@@ -10291,18 +10352,29 @@ class SeasonDecor:
 
     @staticmethod
     def _flake(s, rng, size, color, _sea):
-        """A six-armed snowflake, branched."""
-        R, wid = size / 2, max(1.0, size * 0.045)
-        for k in range(6):
-            a = math.pi / 3 * k
-            ca, sa = math.cos(a), math.sin(a)
-            SeasonDecor._line(s, [(0, 0), (R * ca, R * sa)], wid, color)
-            for f in (0.45, 0.72):
-                bx, by = R * f * ca, R * f * sa
-                for side in (-1, 1):
-                    b = a + side * math.pi / 4
-                    l = R * 0.28 * (1.2 - f)
-                    SeasonDecor._line(s, [(bx, by), (bx + l * math.cos(b), by + l * math.sin(b))], wid * 0.8, color)
+        """A six-armed geometric snowflake (flake_shapes): solid facets with a thin darker rim so it reads on
+        light covers too, plus a plate's cut-out rings."""
+        solid, rings = flake_shapes(rng, size / 2)
+        pb = Gsk.PathBuilder.new()
+        for poly in solid:
+            pb.move_to(*poly[0])
+            for p in poly[1:]:
+                pb.line_to(*p)
+            pb.close()
+        path = pb.to_path()
+        rim = Gsk.Stroke.new(max(0.8, size * 0.03))
+        rim.set_line_join(Gsk.LineJoin.ROUND)
+        s.append_stroke(path, rim, _rgba(20, 50, 80, 0.35 * color.alpha))
+        s.append_fill(path, Gsk.FillRule.WINDING, color)
+        if rings:
+            pb = Gsk.PathBuilder.new()
+            for poly in rings:
+                pb.move_to(*poly[0])
+                for p in poly[1:]:
+                    pb.line_to(*p)
+                pb.close()
+            st = Gsk.Stroke.new(max(0.7, size * 0.022))
+            s.append_stroke(pb.to_path(), st, _rgba(120, 170, 215, 0.9 * color.alpha))
 
     @staticmethod
     def _frost(s, rng, size, color, _sea):
@@ -11816,15 +11888,32 @@ def _sky_drops(cr, spots, r, color=(0.30, 0.66, 1.0)) -> None:
 
 
 def _sky_flake(cr, x, y, r, color=(1, 1, 1)) -> None:
-    cr.set_line_cap(1)
-    for w, c in ((r * 0.5, (0, 0, 0, 0.35)), (r * 0.26, (*color, 1))):
-        cr.set_line_width(w)
-        cr.set_source_rgba(*c)
-        for i in range(3):
-            a = math.pi * i / 3
-            cr.move_to(x - r * math.cos(a), y - r * math.sin(a))
-            cr.line_to(x + r * math.cos(a), y + r * math.sin(a))
-        cr.stroke()
+    """The weather picture's snowflake: the same geometric crystal as the falling ones (a branched star, so it
+    reads at icon size), with a soft dark rim."""
+    import random as _random
+    solid, rings = flake_shapes(_random.Random(1), r)   # fixed seed: always the same branched star
+    cr.save()
+    cr.translate(x, y)
+    for poly in solid:
+        cr.move_to(*poly[0])
+        for p in poly[1:]:
+            cr.line_to(*p)
+        cr.close_path()
+    cr.set_line_join(1)
+    cr.set_line_width(max(0.8, r * 0.16))
+    cr.set_source_rgba(0, 0, 0, 0.35)
+    cr.stroke_preserve()
+    cr.set_source_rgba(*color, 1)
+    cr.fill()
+    for poly in rings:
+        cr.move_to(*poly[0])
+        for p in poly[1:]:
+            cr.line_to(*p)
+        cr.close_path()
+    cr.set_line_width(max(0.6, r * 0.06))
+    cr.set_source_rgba(0.45, 0.65, 0.85, 1)
+    cr.stroke()
+    cr.restore()
 
 
 def _sky_bolt(cr, x, y, h) -> None:
@@ -11878,10 +11967,10 @@ def draw_sky(cr, w: float, h: float, kind: str, night: bool = False) -> None:
                             (w * 0.75, y + s * 0.25)), s * 0.052)
         elif kind == "freezing":
             _sky_drops(cr, ((w * 0.30, y + s * 0.12), (w * 0.68, y + s * 0.20)), s * 0.05, (0.62, 0.84, 1.0))
-            _sky_flake(cr, w * 0.49, y + s * 0.12, s * 0.09, (0.86, 0.95, 1.0))
+            _sky_flake(cr, w * 0.49, y + s * 0.13, s * 0.11, (0.86, 0.95, 1.0))
         elif kind == "snow":
-            for fx, fy in ((0.30, 0.0), (0.52, 0.12), (0.72, 0.0)):
-                _sky_flake(cr, w * fx, y + s * fy + s * 0.06, s * 0.09)
+            for fx, fy in ((0.27, 0.0), (0.51, 0.13), (0.75, 0.0)):
+                _sky_flake(cr, w * fx, y + s * fy + s * 0.08, s * 0.12)
         elif kind in ("thunder", "hail"):
             _sky_bolt(cr, w * 0.42, h * 0.52, s * 0.44)
             if kind == "hail":

@@ -4,6 +4,8 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.16** (2026-11-23) Hezčí vločky: místo šesti čar s čárkovými větvičkami teď plné geometrické krystaly — šestiúhelníková destička uprostřed s vybroušeným kroužkem, fazetová ramena se špičkami a tři druhy jako ve skutečnosti (hvězdice s větvičkami zakončenými destičkami, destička s krátkými rameny, kapradinka s jemnými větvičkami). Tenký tmavší okraj, aby byly vidět i na světlém obalu. Stejné krystaly i v obrázku počasí (sněžení, mrznoucí déšť), o třetinu větší, ať je tvar poznat
+
 - **0.45.15** (2026-11-23) Ikona v nabídce programů ostrá: instalují se jen velké velikosti (128/256/512). Na obrazovce se zvětšením 2× si nabídka brala malou ikonu (např. 48 px) a roztahovala ji — proto byla rozmazaná, i když samotná ikona ostrá je. Velkou jen zmenší, a to zůstane ostré (stejně jako u Dune 2000). Staré malé ikony aplikace při startu smaže
 
 - **0.45.14** (2026-11-23) Nová ikona aplikace: velké bílé „BEAT“ nad červeným pruhem „RADIO“ na tmavém zaobleném čtverci, čitelná i v malé velikosti v nabídce programů a na liště (dřív celé logo včetně „Classic Rock“ zmenšené do bílého čtverečku, v malé velikosti nečitelné). A hlavně se už nepřepisuje: aplikace si dřív při každém spuštění sama vyráběla ikony ze starého loga (400 px) a přepsala ty z instalace — proto zůstávala ikona špatná i po 0.45.11. Ikony jsou teď hotové v appicon/ (kreslí je tools/make_app_icon.py)
