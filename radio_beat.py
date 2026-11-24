@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.17"
+APP_VERSION = "0.45.18"
 
 import collections
 import ctypes
@@ -4931,6 +4931,10 @@ class Enhancer:
                 per_day = here / age
                 years = (n - here) / per_day / 365.25
                 left = (f"zhruba {round(years):.0f} let" if years >= 5 else f"zhruba {years:.1f} roku")
+                # and which year that is (the user: 37 years -> 2026 + 37 = 2063)
+                until = time.localtime(time.time() + years * 365.25 * 86400).tm_year if years < 5000 else None
+                if until:
+                    left += f" (do roku {until})"
                 room += (f" a při dosavadním tempu (asi {round(per_day):.0f} nových obrázků denně) by stačilo na "
                          f"{left}")
         room = room.replace("zhruba 1 let", "zhruba rok")

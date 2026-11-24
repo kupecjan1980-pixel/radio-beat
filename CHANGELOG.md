@@ -4,6 +4,8 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.18** (2026-11-24) Mezipaměť v nastavení: odhad, na jak dlouho vystačí volné místo, teď ukazuje i rok, např. „zhruba 37 let (do roku 2063)“
+
 - **0.45.17** (2026-11-23) Padající zimní motivy teď všechny geometrické: „jinovatka“ (třetina zimních motivů) byla pořád hvězdička z tenkých čar — teď je to menší ledově modrý krystal stejného druhu jako vločky. (V listopadu se už přimíchávají motivy zimy, proto byly ty čárové vidět)
 
 - **0.45.16** (2026-11-23) Hezčí vločky: místo šesti čar s čárkovými větvičkami teď plné geometrické krystaly — šestiúhelníková destička uprostřed s vybroušeným kroužkem, fazetová ramena se špičkami a tři druhy jako ve skutečnosti (hvězdice s větvičkami zakončenými destičkami, destička s krátkými rameny, kapradinka s jemnými větvičkami). Tenký tmavší okraj, aby byly vidět i na světlém obalu. Stejné krystaly i v obrázku počasí (sněžení, mrznoucí déšť), o třetinu větší, ať je tvar poznat
