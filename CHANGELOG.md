@@ -4,6 +4,8 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.20** (2026-11-28) Ručně přeložené všechny zbývající anglické názvy z historie: 559 písní, alb a kapel dostalo český překlad (např. „Wheel in the Sky (Kolo na nebi)“, „Wanted Dead or Alive (Hledaný živý nebo mrtvý)“), dalších 352 (jména lidí, české názvy, vlastní jména) je označeno, že překlad nepotřebují — na DeepL už nečekají
+
 - **0.45.19** (2026-11-28) Názvy písní se překládají i po vyčerpání DeepL: když je měsíční limit klíče DeepL vyčerpaný (teď 999 788 z 1 000 000 znaků), pošlou se názvy, které vypadají anglicky, zatím po jednom do bezplatné překladové služby (dřív se čekalo do dalšího měsíce, proto zůstal anglicky např. „When One Door Opens“). Ručně přidáno „When One Door Opens (Když se otevřou jedny dveře)“
 
 - **0.45.18** (2026-11-24) Mezipaměť v nastavení: odhad, na jak dlouho vystačí volné místo, teď ukazuje i rok, např. „zhruba 37 let (do roku 2063)“
