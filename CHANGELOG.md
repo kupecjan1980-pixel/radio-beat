@@ -4,6 +4,8 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.19** (2026-11-28) Názvy písní se překládají i po vyčerpání DeepL: když je měsíční limit klíče DeepL vyčerpaný (teď 999 788 z 1 000 000 znaků), pošlou se názvy, které vypadají anglicky, zatím po jednom do bezplatné překladové služby (dřív se čekalo do dalšího měsíce, proto zůstal anglicky např. „When One Door Opens“). Ručně přidáno „When One Door Opens (Když se otevřou jedny dveře)“
+
 - **0.45.18** (2026-11-24) Mezipaměť v nastavení: odhad, na jak dlouho vystačí volné místo, teď ukazuje i rok, např. „zhruba 37 let (do roku 2063)“
 
 - **0.45.17** (2026-11-23) Padající zimní motivy teď všechny geometrické: „jinovatka“ (třetina zimních motivů) byla pořád hvězdička z tenkých čar — teď je to menší ledově modrý krystal stejného druhu jako vločky. (V listopadu se už přimíchávají motivy zimy, proto byly ty čárové vidět)

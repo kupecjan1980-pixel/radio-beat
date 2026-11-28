@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.18"
+APP_VERSION = "0.45.19"
 
 import collections
 import ctypes
@@ -20375,12 +20375,27 @@ class App(Adw.Application):
                 got = False
                 time.sleep(5)
                 continue
+            res = None
             if DEEPL_KEY:
                 part = self._title_queue[:40]
                 res = deepl_many([g_restored(shown) for _, shown in part])
-                if res is None:
+            if DEEPL_KEY and res is None:
+                # DeepL can't (the month's share used up - the user: "When One Door Opens" stayed English):
+                # the names that look English go to the free service one by one meanwhile, the rest wait
+                i = next((i for i, (k, _) in enumerate(self._title_queue) if ENGLISH_HINT.search(k)), None)
+                cs = czech_sentence(g_restored(self._title_queue[i][1])).strip().rstrip(".") if i is not None else ""
+                if not cs:
                     time.sleep(600)
                     continue
+                part = [self._title_queue.pop(i)]
+                for (key, shown) in part:
+                    if norm(cs) != norm(key) and name_translated(shown, cs):
+                        titles_got()[key] = cs[:1].upper() + cs[1:]
+                        got = True
+                titles_save({q[0] for q in self._title_queue})
+                time.sleep(3)
+                continue
+            if DEEPL_KEY:
                 answers = [r[0].strip() if r[1] == "EN" else "" for r in res]  # (a Czech name: left as it is)
                 # (given back unchanged, taken for a name: asked once more in sentence case)
                 redo = [i for i, (cs, (_, shown)) in enumerate(zip(answers, part))
