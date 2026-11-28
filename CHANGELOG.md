@@ -4,6 +4,8 @@
 
 ## 0.45 — Víc obalu, míň oken
 
+- **0.45.22** (2026-11-28) „GitHub nedostupný“ opraveno: kontrola aktualizací se ptala GitHub API, které dovolí jen 60 dotazů za hodinu pro celou domácí síť (všechny počítače a aplikace dohromady); každá běžící kopie se ptala každých 5 minut dvakrát, takže limit docházel. Nejnovější verze se teď zjišťuje přes gitovou adresu GitHubu (bez tohoto limitu) a novější/starší se pozná podle čísla verze; API už jen doplní datum a popis, když je k dispozici. Stejně tak get.sh při ruční instalaci
+
 - **0.45.21** (2026-11-28) Návrat na zvolenou kvalitu: když se přehrávání přepne na záložní stream (např. z AAC 128 na MP3 128), aplikace každých 10 minut zkusí, jestli zvolený stream (AAC 128) zase hraje, a pokud ano, sama se na něj vrátí. Dřív zůstala na záložním až do ručního přepnutí nebo restartu (na DeskMini takhle hrálo MP3 celé dny)
 
 - **0.45.20** (2026-11-28) Ručně přeložené všechny zbývající anglické názvy z historie: 559 písní, alb a kapel dostalo český překlad (např. „Wheel in the Sky (Kolo na nebi)“, „Wanted Dead or Alive (Hledaný živý nebo mrtvý)“), dalších 352 (jména lidí, české názvy, vlastní jména) je označeno, že překlad nepotřebují — na DeepL už nečekají

@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.21"
+APP_VERSION = "0.45.22"
 
 import collections
 import ctypes
@@ -290,15 +290,40 @@ def _when_local(iso: str) -> str:
         return (iso or "")[:10]
 
 
+def master_sha() -> str:
+    """GitHub's newest commit on master, through git's own address (github.com/….git/info/refs): unlike the API
+    (60 requests an hour for the whole home network, shared by every computer and app - the user saw "GitHub
+    nedostupný" when they were used up) it has no such limit. '' when it can't."""
+    try:
+        req = urllib.request.Request(f"https://github.com/{REPO}.git/info/refs?service=git-upload-pack",
+                                     headers={"User-Agent": "git/2.0 " + UA})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            m = re.search(rb"([0-9a-f]{40}) refs/heads/master\b", r.read(65536))
+        return m.group(1).decode() if m else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _vtuple(v: str) -> tuple:
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except (ValueError, AttributeError):
+        return ()
+
+
 def update_status() -> tuple[bool | None, str]:
     """(newer version on GitHub?, text); None when it couldn't be checked.
-    Compares the installed commit (VERSION, written by install.sh) with GitHub's newest."""
-    try:
-        c = _json(f"https://api.github.com/repos/{REPO}/commits/master")
-        sha, info = c["sha"], c["commit"]
-        LATEST["sha"] = sha
-    except (OSError, ValueError, KeyError):
-        return None, "GitHub nedostupný"
+    Compares the installed commit (VERSION, written by install.sh) with GitHub's newest; which one is newer by
+    their version numbers (APP_VERSION). The API (rate-limited) only adds the date and the commit's message."""
+    sha = master_sha()
+    info = None
+    if not sha:
+        try:
+            c = _json(f"https://api.github.com/repos/{REPO}/commits/master")
+            sha, info = c["sha"], c["commit"]
+        except (OSError, ValueError, KeyError):
+            return None, "GitHub nedostupný"
+    LATEST["sha"] = sha
     try:
         with open(os.path.join(HERE, "VERSION")) as f:
             mine = f.read().strip()
@@ -308,23 +333,23 @@ def update_status() -> tuple[bool | None, str]:
         # not an installed copy (no VERSION: run from the source folder): never replaced by an update
         return False, "Běží ze složky se zdrojáky: sám se neaktualizuje"
     if mine == sha:
-        return False, f"Verze {APP_VERSION}: aktuální (vydaná {_when_local(info['committer']['date'])})"
-    # Only forwards: GitHub's commit must come after the installed one (a newer local build stays).
-    if re.fullmatch(r"[0-9a-f]{7,40}", mine):
-        try:
-            status = _json(f"https://api.github.com/repos/{REPO}/compare/{mine}...{sha}")["status"]
-        except urllib.error.HTTPError as e:
-            if e.code == 404:  # not on GitHub: built here, newer than what's published
-                return False, "Tahle verze je novější než na GitHubu (ještě nevydaná)"
-            return None, "GitHub nedostupný"
-        except (OSError, ValueError, KeyError):
-            return None, "GitHub nedostupný"
-        if status in ("behind", "identical"):
-            return False, (f"Verze {APP_VERSION}: aktuální (novější než na GitHubu)" if status == "behind"
-                           else f"Verze {APP_VERSION}: aktuální")
+        return False, f"Verze {APP_VERSION}: aktuální"
+    # Only forwards: GitHub's version must be newer than the installed one (a newer local build stays).
     theirs = remote_version(sha)
-    return True, (f"Nová verze {theirs or ''} z {_when_local(info['committer']['date'])} (teď {APP_VERSION}):\n"
-                  f"{info['message'].splitlines()[0]}").replace("verze  z", "verze z")
+    if not theirs:
+        return None, "GitHub nedostupný"
+    if _vtuple(theirs) <= _vtuple(APP_VERSION):
+        return False, (f"Verze {APP_VERSION}: aktuální" if theirs == APP_VERSION
+                       else "Tahle verze je novější než na GitHubu (ještě nevydaná)")
+    if info is None:
+        try:
+            info = _json(f"https://api.github.com/repos/{REPO}/commits/{sha}")["commit"]
+        except (OSError, ValueError, KeyError):
+            info = None
+    if not info:
+        return True, f"Nová verze {theirs} (teď {APP_VERSION})"
+    return True, (f"Nová verze {theirs} z {_when_local(info['committer']['date'])} (teď {APP_VERSION}):\n"
+                  f"{info['message'].splitlines()[0]}")
 
 
 def remote_version(sha: str) -> str:
