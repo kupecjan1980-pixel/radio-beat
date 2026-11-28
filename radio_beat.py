@@ -16,7 +16,7 @@ icon.
 # The version, as in Handheld Control: 0.MINOR.PATCH, the patch one up with every change pushed, the minor one up
 # (patch back to 0) with a bigger new feature; each a git tag vX.Y.Z (and a GitHub release). Every earlier commit
 # numbered the same way afterwards (CHANGELOG.md).
-APP_VERSION = "0.45.20"
+APP_VERSION = "0.45.21"
 
 import collections
 import ctypes
@@ -18826,6 +18826,7 @@ class App(Adw.Application):
     RELIVE = 30  # s paused: pick the live stream up again instead of resuming behind it
     STALL = 20  # s without new audio: reconnect
     PER_SERVER = 3  # failed tries before moving to the next stream
+    BACK_EVERY = 600  # s: on a backup stream, how often the chosen one (AAC 128) is tried again
 
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
@@ -19023,6 +19024,7 @@ class App(Adw.Application):
             self.card.start()
         self.start_mpv()
         GLib.timeout_add_seconds(5, self._watchdog)
+        GLib.timeout_add_seconds(self.BACK_EVERY, self._back_check)
         self._programme()
         GLib.timeout_add_seconds(60, self._programme_tick)
         GLib.timeout_add_seconds(3, lambda: (self.weather_tick(), False)[1])
@@ -19477,6 +19479,37 @@ class App(Adw.Application):
         print(f"radio-beat: {why}, reconnecting (try {self.tries}, {self.stream()[1]})", file=sys.stderr)
         self._load()
         self.update()
+
+    def _back_check(self) -> bool:
+        """(Every 10 minutes.) Moved on to a backup stream (the user: AAC 128 fell back to MP3 128 and stayed
+        there for days): when the chosen stream answers again, back to it."""
+        if self.alt and self.mpv and not self.paused and not self.quitting:
+            ids = [i for i, _, _ in self.streams]
+            q = self.settings["quality"]
+            want = self.streams[ids.index(q) if q in ids else 0]
+            if want[2] != self.url():
+                threading.Thread(target=self._back_probe, args=(want,), daemon=True).start()
+        return True
+
+    def _back_probe(self, want) -> None:
+        """(A thread.) Whether the chosen stream sends audio now: a little of it is read, then back on it."""
+        try:
+            req = urllib.request.Request(want[2], headers={"User-Agent": UA, "Icy-MetaData": "0"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                ok = r.status == 200 and len(r.read(16384)) >= 4096
+        except (OSError, ValueError):
+            ok = False
+        print(f"radio-beat: {want[1]} {'answers again, switching back' if ok else 'still not answering'}",
+              file=sys.stderr)
+        if ok:
+            GLib.idle_add(self._back_switch, want)
+
+    def _back_switch(self, want) -> bool:
+        if self.alt and not self.paused and not self.quitting and self.url() != want[2]:
+            self.alt, self.tries = 0, 0
+            self._load()
+            self.update()
+        return False
 
     def _watchdog(self):
         if self.mpv and not self.paused and time.monotonic() - self.last_audio > self.STALL:
